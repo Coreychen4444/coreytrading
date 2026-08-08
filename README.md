@@ -5,6 +5,8 @@ decision pipeline. It focuses on explainable state scoring, explicit strategy
 authorization, constraint-based position construction, and risk-adjusted order
 intent.
 
+> **Core strategy:** A price-volume and market-structure-driven, technical-first trend-following framework that scales into confirmed moves, limits exposure through layered risk constraints, and keeps execution human-reviewed by default.
+
 [中文说明](README_CN.md)
 
 > This project is educational software, not investment advice. Defaults and
@@ -46,6 +48,7 @@ Execution
 | Risk | Single-position, gross-exposure, stop-risk, and whole-unit constraints | `AdjustedTargetPosition` |
 | Order | Deterministic limit-order intent | `OrderIntent` |
 | Execution | Explicit adapter boundary; paper executor included | `ExecutionReport` |
+| Test / Backtest Validation | Cross-cutting synthetic unit and integration tests; offline research must validate its mechanics before real-data runs | Release gate |
 
 The default pipeline stops at order intent. Execution requires both an explicit
 adapter and `execute=True`, keeping human review or an external approval system
@@ -61,6 +64,24 @@ in the loop.
 - No broker credentials, account adapters, market datasets, live positions, or
   autonomous order submission are included.
 - Every bundled example and test uses synthetic inputs.
+
+## Testing and backtest validation
+
+`tests/` is the executable release gate for the framework, not an auxiliary example directory:
+
+- `test_model.py` checks feature/score behavior and score bounds.
+- `test_pipeline.py` verifies the full decision chain, authorization vetoes and explicit execution opt-in.
+- `test_risk.py` locks binding-cap selection and whole-unit rounding with synthetic portfolio states.
+- New strategy, sizing, risk or offline research mechanics should first be expressed as deterministic synthetic cases, then kept as regression tests before any historical-data evaluation is trusted.
+
+The public package deliberately ships no account records, market-history bundle or performance claims. Historical backtests remain an offline extension boundary; their timing, statistics and verdict rules should be tested independently from the dataset so a favorable result cannot hide a broken backtest mechanism.
+
+```text
+tests/
+├── test_model.py      model and score invariants
+├── test_pipeline.py   end-to-end signal-to-order behavior
+└── test_risk.py       portfolio-cap and rounding invariants
+```
 
 ## Quick start
 
