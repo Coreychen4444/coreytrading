@@ -45,7 +45,7 @@ Execution
 | Prediction / Score | Explainable current-state score; not a return forecast | `Prediction` |
 | Strategy | Zone, regime, and score authorization | `GO`, `WAIT`, or `VETO` |
 | Portfolio Construction | Conviction-scaled incremental allocation | `TargetPosition` |
-| Risk | Single-position, gross-exposure, stop-risk, and whole-unit constraints | `AdjustedTargetPosition` |
+| Risk | Single-position, gross-exposure, stop-risk, optional round budgets, and whole-unit constraints | `AdjustedTargetPosition` |
 | Order | Deterministic limit-order intent | `OrderIntent` |
 | Execution | Explicit adapter boundary; paper executor included | `ExecutionReport` |
 | Test / Backtest Validation | Cross-cutting synthetic unit and integration tests; offline research must validate its mechanics before real-data runs | Release gate |
@@ -59,6 +59,7 @@ in the loop.
 - The score classifies current technical alignment; it does not claim to
   predict expected return.
 - Portfolio construction is constraint-based, not a covariance optimizer.
+- An optional non-increasing round-risk schedule can cap each successive addition; it is disabled unless configured.
 - A target is built for the current decision rather than as a global optimizer
   over every asset.
 - No broker credentials, account adapters, market datasets, live positions, or
@@ -71,7 +72,7 @@ in the loop.
 
 - `test_model.py` checks feature/score behavior and score bounds.
 - `test_pipeline.py` verifies the full decision chain, authorization vetoes and explicit execution opt-in.
-- `test_risk.py` locks binding-cap selection and whole-unit rounding with synthetic portfolio states.
+- `test_risk.py` locks binding-cap selection, optional round-budget exhaustion, and whole-unit rounding with synthetic portfolio states.
 - New strategy, sizing, risk or offline research mechanics should first be expressed as deterministic synthetic cases, then kept as regression tests before any historical-data evaluation is trusted.
 
 The public package deliberately ships no account records, market-history bundle or performance claims. Historical backtests remain an offline extension boundary; their timing, statistics and verdict rules should be tested independently from the dataset so a favorable result cannot hide a broken backtest mechanism.

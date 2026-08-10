@@ -14,6 +14,7 @@ class RiskLimits:
     max_gross_exposure_fraction: float = 1.00
     risk_per_trade_fraction: float = 0.01
     stop_distance_atr: float = 2.0
+    round_risk_fractions: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         fractions = (
@@ -25,6 +26,16 @@ class RiskLimits:
             raise ValueError("risk fractions must be positive")
         if self.stop_distance_atr <= 0:
             raise ValueError("stop_distance_atr must be positive")
+        if any(not 0 < value <= 1 for value in self.round_risk_fractions):
+            raise ValueError("round risk fractions must be in (0, 1]")
+        if any(
+            later > earlier
+            for earlier, later in zip(
+                self.round_risk_fractions,
+                self.round_risk_fractions[1:],
+            )
+        ):
+            raise ValueError("round risk fractions must be non-increasing")
 
 
 class RiskEngine:
@@ -52,6 +63,19 @@ class RiskEngine:
                 / (snapshot.atr * self.limits.stop_distance_atr)
             ),
         }
+        if self.limits.round_risk_fractions:
+            round_number = portfolio.round_for(snapshot.symbol)
+            if round_number <= len(self.limits.round_risk_fractions):
+                round_fraction = self.limits.round_risk_fractions[round_number - 1]
+                round_increment = (
+                    portfolio.nav
+                    * round_fraction
+                    * snapshot.close
+                    / (snapshot.atr * self.limits.stop_distance_atr)
+                )
+            else:
+                round_increment = 0.0
+            caps["round_risk"] = target.current_notional + round_increment
         adjusted_cap = max(target.current_notional, min(caps.values()))
         quantity = math.floor(adjusted_cap / snapshot.close)
         target_notional = quantity * snapshot.close

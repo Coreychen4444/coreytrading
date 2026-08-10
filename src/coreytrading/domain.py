@@ -86,6 +86,7 @@ class PortfolioState:
     nav: float
     gross_exposure: float
     position_notionals: Mapping[str, float] = field(default_factory=dict)
+    position_rounds: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.nav <= 0:
@@ -94,9 +95,19 @@ class PortfolioState:
             raise ValueError("gross_exposure must not be negative")
         if any(value < 0 for value in self.position_notionals.values()):
             raise ValueError("position notionals must not be negative")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in self.position_rounds.values()
+        ):
+            raise ValueError("position rounds must be positive integers")
 
     def notional_for(self, symbol: str) -> float:
         return float(self.position_notionals.get(symbol, 0.0))
+
+    def round_for(self, symbol: str) -> int:
+        """Return the one-based construction round for ``symbol``."""
+
+        return self.position_rounds.get(symbol, 1)
 
 
 @dataclass(frozen=True)

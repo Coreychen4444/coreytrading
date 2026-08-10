@@ -41,7 +41,7 @@ Execution
 | Prediction / Score | 可解释的当前状态评分，而非收益预测 | `Prediction` |
 | Strategy | 根据 zone、regime 和评分进行授权 | `GO`、`WAIT` 或 `VETO` |
 | Portfolio Construction | 按确认度缩放的增量配置 | `TargetPosition` |
-| Risk | 单标的、总暴露、止损风险与整数交易单位约束 | `AdjustedTargetPosition` |
+| Risk | 单标的、总暴露、止损风险、可选分轮预算与整数交易单位约束 | `AdjustedTargetPosition` |
 | Order | 确定性的限价单意图 | `OrderIntent` |
 | Execution | 显式执行适配器边界；仅附带 paper executor | `ExecutionReport` |
 | 测试 / 回测验证 | 横切全系统的合成数据单元与集成测试；离线研究在真数据运行前必须先验证机械件 | 发布闸门 |
@@ -52,6 +52,7 @@ Execution
 
 - Score 只分类当前技术状态，不声称预测未来收益。
 - 组合构建采用约束式方法，不是协方差优化器。
+- 可选的非递增分轮风险计划可以限制每次后续加仓；未显式配置时保持关闭。
 - Target Position 面向当前决策构建，不维护覆盖全部资产的全局优化目标。
 - 项目不包含 broker 凭证、账户适配器、市场数据集、真实持仓或自主下单能力。
 - 随附的样例和测试全部使用合成输入。
@@ -62,7 +63,7 @@ Execution
 
 - `test_model.py` 验证特征/评分行为与评分边界。
 - `test_pipeline.py` 验证完整决策链、授权 veto 与显式执行开关。
-- `test_risk.py` 使用合成组合状态锁定 binding cap 选择和整数单位取整。
+- `test_risk.py` 使用合成组合状态锁定 binding cap 选择、分轮预算耗尽和整数单位取整。
 - 新增 strategy、sizing、risk 或离线 research 机械件时，应先写成确定性的合成场景，并在信任任何历史数据结果前将其固化为回归测试。
 
 公开包有意不附带账户记录、历史行情数据集或绩效声明。历史回测属于离线扩展边界；其时序、统计口径与裁决规则应脱离真实数据单独验证，避免“结果好看”掩盖回测机械件错误。
