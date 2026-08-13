@@ -1,0 +1,1 @@
+{"event_type":"fill","timestamp":"2099-01-01T10:00:00-05:00","ticker":"SYNTH_STOCK","side":"BUY","qty":0,"price":0,"order_id":"SYNTHETIC_ORDER","broker":"example_broker","tier":"position","classification":"probe","synthetic":true}

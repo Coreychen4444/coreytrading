@@ -1,147 +1,108 @@
-# CoreyTrading
+# TradingOps
 
-A small, deterministic, broker-agnostic reference implementation of a trading
-decision pipeline. It focuses on explainable state scoring, explicit strategy
-authorization, constraint-based position construction, and risk-adjusted order
-intent.
+TradingOps is an open-source, technical-first trading operations framework. It turns broker and market data into deterministic state, risk checks, entry/exit plans, reports, and human-reviewed order instructions.
 
-> **Core strategy:** A price-volume and market-structure-driven, technical-first trend-following framework that scales into confirmed moves, limits exposure through layered risk constraints, and keeps execution human-reviewed by default.
+[中文版](README_CN.md)
 
-[中文说明](README_CN.md)
+> This project is research and operations software, not investment advice. It does not place trades from the live pipeline. Review every output and protect all broker credentials locally.
 
-> This project is educational software, not investment advice. Defaults and
-> examples are illustrative and must not be treated as production parameters.
+AI agents setting up a fresh clone should start with [`AI_BOOTSTRAP.md`](AI_BOOTSTRAP.md) ([中文](AI_BOOTSTRAP_CN.md)). The complete project contract remains in [`CLAUDE.md`](CLAUDE.md); [`AGENTS.md`](AGENTS.md) is the compatibility entry point for agents such as Codex and must not replace it.
 
-## Architecture
+## What is included
+
+The public repository follows the same application layout as the working system:
 
 ```text
-Data
-  ↓
-Model
-  ↓
-Prediction / Score
-  ↓
-Strategy
-  ↓
-Signal
-  ↓
-Portfolio Construction
-  ↓
-Target Position
-  ↓
-Risk
-  ↓
-Adjusted Target Position
-  ↓
-Order
-  ↓
-Execution
+quant/
+├── core/       shared schemas, paths, structure, sizing and accounting rules
+├── data/       external market-data ingestion
+├── sync/       broker truth ↔ local state reconciliation
+├── decision/   entry, exit, regime, drift, level and tape guards
+├── options/    option selection, IV checks and premium ladders
+├── risk/       portfolio and position-risk analysis
+├── journal/    structured decision and trade annotations
+├── report/     portfolio, performance and gate-ladder reports
+├── ops/        pipeline orchestration and notifications
+└── research/   offline backtests and calibration; never imported by live code
+
+tests/           layer-mirrored unit, integration and architecture tests
+tasks/           reusable scheduled-task prompts
+.claude/         project rules and reusable trading/OpenD skills
+trade/           AI bootstrap contracts and synthetic examples for private data
+opend/           sanitized OpenD configuration template
 ```
 
-| Stage | Public implementation | Output |
-|---|---|---|
-| Data | Vendor-neutral `DataSource`; in-memory source for tests | `MarketSnapshot` |
-| Model | Deterministic trend, distance, volume, and regime features | `ModelFeatures` |
-| Prediction / Score | Explainable current-state score; not a return forecast | `Prediction` |
-| Strategy | Zone, regime, and score authorization | `GO`, `WAIT`, or `VETO` |
-| Portfolio Construction | Conviction-scaled incremental allocation | `TargetPosition` |
-| Risk | Single-position, gross-exposure, stop-risk, optional round budgets, and whole-unit constraints | `AdjustedTargetPosition` |
-| Order | Deterministic limit-order intent | `OrderIntent` |
-| Execution | Explicit adapter boundary; paper executor included | `ExecutionReport` |
-| Test / Backtest Validation | Cross-cutting synthetic unit and integration tests; offline research must validate its mechanics before real-data runs | Release gate |
+Private holdings, fills, orders, NAV history, journals, market caches, research, strategies, credentials, account identifiers, and machine-specific configuration are intentionally absent. The entire `trade/` tree contains only README contracts and synthetic examples so an AI can construct the user's private workspace without changing application paths.
 
-The default pipeline stops at order intent. Execution requires both an explicit
-adapter and `execute=True`, keeping human review or an external approval system
-in the loop.
+## System boundary
 
-## Design boundaries
+- Price structure drives `zone / gate / regime / cap` authorization.
+- Fundamentals, news, earnings and macro context are information inputs; explicit sizing rules may still reduce risk around events.
+- The system produces verdicts, caps, whole-unit ladders, option parameters, alerts and broker-side authorization lists.
+- The canonical pipeline does not submit orders. Execution remains a manual or separately approved step.
+- Broker orders and fills can be reconciled back into local state after execution.
 
-- The score classifies current technical alignment; it does not claim to
-  predict expected return.
-- Portfolio construction is constraint-based, not a covariance optimizer.
-- An optional non-increasing round-risk schedule can cap each successive addition; it is disabled unless configured.
-- A target is built for the current decision rather than as a global optimizer
-  over every asset.
-- No broker credentials, account adapters, market datasets, live positions, or
-  autonomous order submission are included.
-- Every bundled example and test uses synthetic inputs.
-
-## Testing and backtest validation
-
-`tests/` is the executable release gate for the framework, not an auxiliary example directory:
-
-- `test_model.py` checks feature/score behavior and score bounds.
-- `test_pipeline.py` verifies the full decision chain, authorization vetoes and explicit execution opt-in.
-- `test_risk.py` locks binding-cap selection, optional round-budget exhaustion, and whole-unit rounding with synthetic portfolio states.
-- New strategy, sizing, risk or offline research mechanics should first be expressed as deterministic synthetic cases, then kept as regression tests before any historical-data evaluation is trusted.
-
-The public package deliberately ships no account records, market-history bundle or performance claims. Historical backtests remain an offline extension boundary; their timing, statistics and verdict rules should be tested independently from the dataset so a favorable result cannot hide a broken backtest mechanism.
-
-```text
-tests/
-├── test_model.py      model and score invariants
-├── test_pipeline.py   end-to-end signal-to-order behavior
-└── test_risk.py       portfolio-cap and rounding invariants
+```mermaid
+flowchart LR
+    D["Broker + market data"] --> M["Technical model"]
+    M --> S["State and signal"]
+    S --> P["Portfolio constraints"]
+    P --> R["Risk-adjusted target"]
+    R --> O["Human-reviewed order plan"]
+    O --> F["Orders and fills"]
+    F --> D
 ```
+
+## Main runtime paths
+
+| Area | Responsibility |
+|---|---|
+| `quant/ops/pipeline.py` | Canonical stage ordering for heartbeat, briefing and post-close modes. |
+| `quant/sync/` | Positions, orders, fills, watchlists and broker-state reconciliation. |
+| `quant/decision/entry_guard.py` | Entry verdict, cap, integer ladder, stops and optional option plan. |
+| `quant/decision/exit_guard.py` | Ratchets, ATR trails, structural exits and margin checks. |
+| `quant/report/portfolio_brief.py` | Portfolio cards, risk alerts and operating brief. |
+| `quant/core/` | Single sources of truth for schemas, paths, sizing and structure. |
+| `tests/` | Synthetic behavior tests plus dependency, coverage and path invariants. |
 
 ## Quick start
 
-The package has no runtime dependencies and requires Python 3.11 or newer.
+Python 3.11 or newer is recommended.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
-python examples/minimal_pipeline.py
+python -m pip install -e '.[dev]'
+pytest -q
 ```
 
-Run the test suite:
+Broker-connected workflows are optional:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+python -m pip install -e '.[broker]'
+cp .env.example .env
 ```
 
-## Example
+Then install and start Moomoo OpenD, fill only local values in `.env`, and review `.claude/rules/tools-environment.md`. Never commit `.env`, live state, account exports or private keys.
 
-```python
-from coreytrading import (
-    IncrementalPortfolioConstructor,
-    InMemoryDataSource,
-    MarketSnapshot,
-    OrderPlanner,
-    PortfolioState,
-    Regime,
-    RiskEngine,
-    TechnicalScoreModel,
-    ThresholdStrategy,
-    TradingPipeline,
-)
+## AI-guided private workspace setup
 
-snapshot = MarketSnapshot(
-    symbol="SYNTH_A",
-    close=100.0,
-    moving_average=96.0,
-    atr=2.0,
-    volume_ratio=1.5,
-    regime=Regime.BULL,
-)
+Start with `trade/README.md`. It defines the machine-oriented bootstrap protocol, privacy boundary and child directory map. An AI should read the relevant descendant READMEs, copy only the examples needed by the requested workflow, and remove `.example` from the private runtime filename. For example:
 
-pipeline = TradingPipeline(
-    data_source=InMemoryDataSource({snapshot.symbol: snapshot}),
-    model=TechnicalScoreModel(),
-    strategy=ThresholdStrategy(),
-    constructor=IncrementalPortfolioConstructor(),
-    risk=RiskEngine(),
-    order_planner=OrderPlanner(),
-)
-
-result = pipeline.run(
-    snapshot.symbol,
-    PortfolioState(nav=100_000.0, gross_exposure=20_000.0),
-)
-print(result.order)
+```bash
+cp trade/us_stock/holding/state/positions.example.json trade/us_stock/holding/state/positions.json
+cp trade/us_stock/holding/state/watchlist.example.json trade/us_stock/holding/state/watchlist.json
+cp trade/us_stock/market/earnings_calendar.example.json trade/us_stock/market/earnings_calendar.json
 ```
+
+Files without `.example` are ignored by Git. Examples are schemas, not live data or recommended strategies; unresolved private facts must remain empty or be requested from the user rather than inferred. The runtime may create additional private state, market, research and strategy files under the same directories.
+
+## Testing and research discipline
+
+The test suite mirrors the `quant/` layers and locks down dependency direction, package depth, module coverage, repository references, pipeline ordering and synthetic trading behavior. Tests must not read live account state or market caches.
+
+Research code is deliberately isolated from the live decision path. Validate backtest mechanics with synthetic or adversarial fixtures before trusting results from historical data.
 
 ## License
 
-MIT
+MIT. Third-party integrations retain their own notices and terms; in particular, review the Moomoo/OpenD disclaimers before using the bundled OpenAPI skill.

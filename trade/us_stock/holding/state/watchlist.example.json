@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "generated_at": "2099-01-01T00:00:00Z",
+  "tickers": {
+    "SYNTH_WATCH": {
+      "instrument": {
+        "type": "stock"
+      },
+      "status": "watching",
+      "moomoo_listed": false,
+      "agent": {
+        "thesis": {
+          "summary": "Synthetic candidate awaiting user-approved research.",
+          "status": "review_required",
+          "conviction": "unrated",
+          "last_reviewed": "2099-01-01T00:00:00Z"
+        },
+        "action": {
+          "intent": "research",
+          "reason": "No entry authorization has been supplied.",
+          "confidence": "low"
+        }
+      }
+    }
+  }
+}

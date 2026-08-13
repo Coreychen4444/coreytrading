@@ -1,0 +1,11 @@
+{
+  "as_of": "2099-01-01",
+  "underlying": "SYNTH_STOCK",
+  "authorization": "review_required",
+  "contract": null,
+  "entry_gates": [],
+  "max_premium": null,
+  "exit_rules": [],
+  "evidence_refs": [],
+  "synthetic": true
+}

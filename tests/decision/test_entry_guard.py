@@ -1,0 +1,663 @@
+"""entry_guard 纯计算层回归 — 源 =  回测三发现:
+early_risky 4/4 全亏 (分类必须绑 size cap) / IV 95% 买单腿 (闸门要有钩子) /
+decisions.jsonl 空 (计划必须落盘)。这些测试锁定: verdict 分支、ladder 单调降序、
+分类 cap × N-unit 取小、staleness 拒绝旧 zone。"""
+import os
+
+import pytest
+
+from quant.decision import entry_guard
+from quant.decision.entry_guard import (
+    PARAMS, build_ladder, momentum_mode, size_caps, zone_bands,
+    zone_position, zone_staleness,
+)
+
+
+def _bar(t, c, h=None, low=None):
+    return {"time": t, "open": c, "high": h or c * 1.01, "low": low or c * 0.99, "close": c}
+
+
+def _ramp(n, start, daily):
+    """n 根逐日 ×(1+daily) 的合成序列。"""
+    rows, px = [], start
+    for i in range(n):
+        rows.append(_bar(f"2026-{(i//28)%12+1:02d}-{i%28+1:02d}", px))
+        px *= 1 + daily
+    return rows
+
+
+# ── momentum mode ───────────────────────────────────────────────
+
+def test_momentum_normal_flat_series():
+    rows = [_bar(f"2026-03-{i%28+1:02d}", 100 + (i % 3)) for i in range(60)]
+    assert momentum_mode(rows) == "normal"
+
+
+def test_momentum_parabolic_all_three_yes():
+    rows = _ramp(130, 10, 0.012)            # 6m +150%+ (Q1)
+    last = rows[-1]["close"]
+    rows.append(_bar("2026-07-01", last * 1.12))   # 单日 +12% (Q2), 新高 (Q3)
+    assert momentum_mode(rows) == "parabolic"
+
+
+def test_momentum_far_from_high_is_normal():
+    rows = _ramp(130, 10, 0.012)
+    peak = rows[-1]["close"]
+    rows.append(_bar("2026-07-01", peak * 1.11))       # Q2 满足
+    rows.append(_bar("2026-07-02", peak * 0.80))       # 距高点 >10% → Q3 NO
+    assert momentum_mode(rows) == "normal"
+
+
+# ── zone position / staleness ───────────────────────────────────
+
+ZB = zone_bands({
+    "accumulation_zone_1": [95.0, 100.0], "accumulation_zone_2": [84.0, 90.0],
+    "trim_zone": [128.0, 138.0], "no_chase_above": 118.0, "stop_level": 84.0,
+    "valid_until": "2026-12-31",
+})
+
+
+@pytest.mark.parametrize("px,expect", [
+    (120.0, "above_no_chase"), (130.0, "above_no_chase"),  # no_chase 优先于 trim
+    (110.0, "waiting"), (97.0, "zone1"), (92.0, "gap_z1_z2"),
+    (87.0, "zone2"), (80.0, "below_zones"),
+])
+def test_zone_position_branches(px, expect):
+    assert zone_position(px, ZB) == expect
+
+
+def test_zone_bands_missing_returns_none():
+    assert zone_bands(None) is None
+    assert zone_bands({"reasoning_summary": "prose only"}) is None
+
+
+def test_staleness_expired_and_breakdown():
+    zb = dict(ZB, valid_until="2026-01-01")
+    rows = [_bar("2026-07-14", 82.0), _bar("2026-07-15", 81.0)]
+    hits = zone_staleness(zb, {"last_reviewed": "2026-07-10"}, rows, "2026-07-17")
+    assert any("过期" in h for h in hits)
+    assert any("breakdown" in h for h in hits)
+
+
+def test_staleness_fresh_zone_silent():
+    rows = [_bar("2026-07-14", 97.0), _bar("2026-07-15", 96.0)]
+    assert zone_staleness(ZB, {"last_reviewed": "2026-07-10"}, rows, "2026-07-17") == []
+
+
+def test_staleness_reviewed_too_old():
+    rows = [_bar("2026-07-15", 97.0)]
+    hits = zone_staleness(ZB, {"last_reviewed": "2026-06-01"}, rows, "2026-07-17")
+    assert any("last_reviewed" in h for h in hits)
+
+
+# ── ladder ──────────────────────────────────────────────────────
+
+def test_ladder_normal_in_zone1_descending():
+    rows = [_bar("2026-07-15", 97.0)]
+    tiers = build_ladder("normal", 97.0, rows, ZB)
+    assert len(tiers) == 3
+    assert tiers[0] > tiers[1] > tiers[2]
+    assert tiers[0] <= 97.0                # 首档不高于现价
+    assert tiers[1] == pytest.approx(95.0)  # z1 下沿
+    assert tiers[2] == pytest.approx(87.0)  # z2 中值
+
+
+def test_ladder_parabolic_anchors():
+    rows = [_bar(f"2026-07-{i:02d}", 100 + i, h=102 + i) for i in range(1, 11)]
+    close = rows[-1]["close"]
+    tiers = build_ladder("parabolic", close, rows, None)
+    a, b, c = PARAMS["parabolic_anchors"]
+    assert tiers[0] == pytest.approx(round(close * a, 2))
+    h5 = max(r["high"] for r in rows[-5:])
+    assert tiers[1] <= round(h5 * b, 2) + 0.01
+    assert tiers[0] > tiers[1] > tiers[2]
+
+
+def test_ladder_normal_without_bands_empty():
+    assert build_ladder("normal", 100.0, [_bar("2026-07-15", 100.0)], None) == []
+
+
+# ── size caps ───────────────────────────────────────────────────
+
+FULL = {"current_regime": {"name": "常规参与", "cap_pct_nav": 0.40}}
+
+
+def test_size_caps_cap_zero_regime_is_zero():
+    caps = size_caps(24000, atr=3.0, t1=100.0,
+                     agent={"current_regime": {"cap_pct_nav": 0}})
+    assert caps["regime_cap"] == 0.0
+    assert caps["final"] == 0.0            # cap 0 = VETO 域
+
+
+def test_size_caps_binding_min_of_arms():
+    """约束取小。② = gate 预算: 默认 gate_no=1 → 2.5% (用户
+    「gate1 max 2.5%」)。"""
+    from quant.core.sizing import GATE_RISK_CAPS
+    assert GATE_RISK_CAPS[0] == 0.025, "本用例的算术依赖 gate1=2.5%"
+    #  (用户 #3): ② 的分母是**真 stop 距离**, 不再是写死的 2N。
+    # 近 stop (92, 距 8%): gate1 n_unit = 24k×2.5% ×100/8 = 7,500; regime cap = 9,600
+    caps = size_caps(24000, atr=4.0, t1=100.0, risk_stop=92.0, agent=FULL)
+    assert caps["final"] == pytest.approx(7500.0)
+    assert caps["binding"] == "n_unit"
+    # 远 stop (20, 距 80%) → 同一笔风险预算只买得起 1/10: 24k×2.5% ×100/80 = 750
+    caps2 = size_caps(24000, atr=40.0, t1=100.0, risk_stop=20.0, agent=FULL)
+    assert caps2["final"] == pytest.approx(750.0)
+    assert caps2["binding"] == "n_unit"
+    # ② 不再依赖 ATR —— ATR 缺失照样算得出 (旧实现 atr=None 时整条臂消失)
+    assert size_caps(24000, atr=None, t1=100.0, risk_stop=92.0,
+                     agent=FULL)["n_unit_cap"] == pytest.approx(7500.0)
+
+
+def test_size_caps_shock_budget_and_gross_bind_when_book_is_full():
+    """新增的两条组合层约束 (接线)。"""
+    from quant.core.sizing import GROSS_CAP, SHOCK_BUDGET
+    # 预算几乎用尽 → shock_budget binding
+    caps = size_caps(24000, atr=4.0, t1=100.0, agent=FULL,
+                     usage={"used_budget": SHOCK_BUDGET - 0.001, "used_gross": 0.0})
+    assert caps["binding"] == "shock_budget"
+    assert caps["final"] < 2250.0
+    # gross 几乎用尽 → gross binding
+    caps2 = size_caps(24000, atr=0.01, t1=100.0, agent=FULL,
+                      usage={"used_budget": 0.0, "used_gross": GROSS_CAP - 0.001})
+    assert caps2["binding"] == "gross"
+    assert caps2["final"] == pytest.approx(24000 * 0.001)
+
+
+def test_size_caps_without_usage_treats_book_as_empty():
+    """不传 usage = 空书口径 —— 会**高估**可用额度, 所以调用方必须传。"""
+    a = size_caps(24000, atr=4.0, t1=100.0, agent=FULL)
+    b = size_caps(24000, atr=4.0, t1=100.0, agent=FULL,
+                  usage={"used_budget": 0.0, "used_gross": 0.0})
+    assert a["final"] == b["final"]
+
+
+def test_size_caps_no_nav_none():
+    assert size_caps(None, 3.0, 100.0, agent=FULL)["final"] is None
+
+
+def test_size_caps_splits_deployment_from_notional():
+    """期权上这两种钱不是同一种 (单位错误):
+
+      regime cap                   = 你**花出去**多少 (保费)
+      n_unit / 冲击预算 / gross     = **标的名义**敞口多少
+
+    正股上两者重合, 所以 `final` 仍是各臂取小; 但给 option_plan 的必须分开传,
+    否则名义上限被当保费花掉 → 名义敞口数倍于上限 (方向是放松约束)。
+    """
+    caps = size_caps(24000, atr=4.0, t1=100.0, risk_stop=92.0, agent=FULL,
+                     usage={"used_budget": 0.0, "used_gross": 0.0})
+    assert caps["deployment_cap"] == pytest.approx(24000 * 0.40)   # regime cap
+    assert caps["notional_cap"] == pytest.approx(7500.0)           # R1 n_unit binding
+    assert caps["final"] == min(caps["deployment_cap"], caps["notional_cap"])
+
+
+def test_size_caps_agrees_with_available_cap_on_the_portfolio_layer():
+    """entry_guard 不得自带第二份实际-cap 算法 —— 三条组合层数必须逐字来自
+    core.sizing.available_cap (moomoo 备注和 brief 预算行读的是同一个函数)。"""
+    from quant.core.sizing import available_cap, NOTIONAL_CAP
+    usage = {"used_budget": 0.06, "used_gross": 0.75}
+    caps = size_caps(21237, atr=3.0, t1=100.0, usage=usage, agent=FULL)
+    ac = available_cap(21237, NOTIONAL_CAP, 3.0, 100.0, usage)
+    for k in ("regime_cap", "shock_budget_cap", "gross_cap",
+              "budget_room", "gross_room"):
+        assert caps[k] == ac[k], k
+
+
+def test_render_delisted_one_liner():
+    # moomoo 已移出的卡: 不评估, 计划末尾一行带过 ()
+    txt = entry_guard.render([], nav=None, today="2026-07-21",
+                             delisted=["NBIS", "CRWV", "AMKR"])
+    assert "已移出 moomoo 分组" in txt
+    assert "NBIS, CRWV, AMKR" in txt
+    assert "STALE" not in txt  # 不产生完整 verdict 块
+
+
+def test_render_no_delisted_no_footer():
+    txt = entry_guard.render([], nav=None, today="2026-07-21", delisted=[])
+    assert "已移出" not in txt
+
+
+def test_latest_iv_skips_zero_rows(tmp_path, monkeypatch):
+    # 0.0 = 盘前空报价误写 (MRVL 案): 跳过取最后一条有效
+    p = tmp_path / "MRVL.jsonl"
+    p.write_text(
+        '{"date": "2026-07-17", "atm_iv_pct": 93.2}\n'
+        '{"date": "2026-07-20", "atm_iv_pct": 0.0}\n'
+)
+    monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path)
+    row = entry_guard.latest_iv("MRVL")
+    assert row["date"] == "2026-07-17"
+    assert "93.2" in entry_guard.iv_gate_line("MRVL")
+    assert "禁单腿" in entry_guard.iv_gate_line("MRVL")
+
+
+def test_latest_iv_all_invalid_reads_none(tmp_path, monkeypatch):
+    p = tmp_path / "X.jsonl"
+    p.write_text('{"date": "2026-07-20", "atm_iv_pct": 0.0}\n')
+    monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path)
+    assert entry_guard.latest_iv("X") is None
+    assert "未入库" in entry_guard.iv_gate_line("X")
+
+
+# ── next_regime: gate = 状态转移锚点 () ──────────────
+
+def _bars(*closes):
+    return [{"time": f"2026-07-{10 + i:02d}", "close": c} for i, c in enumerate(closes)]
+
+
+NR = {
+    "name": "B_repair_probe",
+    "entry_gate": {"level": 104.5, "days": 2, "unlocks": "probe"},
+    "cap_pct_nav": 0.01,
+    "provisional": ["accumulation_zone_1"],
+    "zones": {"accumulation_zone_1": [102.5, 105.0], "no_chase_above": 107.1,
+              "stop_level": 100.0, "stop_level_days": 2},
+}
+
+
+def test_next_regime_counts_consecutive_closes_above_gate():
+    from quant.decision.entry_guard import next_regime_lines
+    lines, fired = next_regime_lines({"next_regime": NR}, _bars(95.0, 105.0, 106.0))
+    assert fired
+    assert any("✅ 2/2 已成立" in x for x in lines)
+
+
+def test_next_regime_not_fired_below_gate():
+    from quant.decision.entry_guard import next_regime_lines
+    lines, fired = next_regime_lines({"next_regime": NR}, _bars(95.0, 105.0, 103.0))
+    assert not fired
+    assert any("0/2" in x for x in lines)
+
+
+def test_next_regime_streak_resets_on_a_close_back_below():
+    """中途跌破清零 —— 一次假突破不能靠事后凑够天数补上。"""
+    from quant.decision.entry_guard import next_regime_lines
+    _, fired = next_regime_lines({"next_regime": NR}, _bars(105.0, 103.0, 106.0))
+    assert not fired
+
+
+def test_next_regime_fired_line_declares_auto_switch_in_flight():
+    """ 用户 裁决 A: gate ×N 成立 → regime_transition 自动切换
+    (旧合同"人工确认再切"随裁决作废 —— 8/4 首夜三笔达标未切的 open ruling)。
+    fired 行只会在"已达标、切换还没跑"的间隙里出现, 文案必须说清这是在途,
+    并保留 provisional 补画前不授权的护栏。"""
+    from quant.decision.entry_guard import next_regime_lines
+    lines, fired = next_regime_lines({"next_regime": NR}, _bars(105.0, 106.0))
+    assert fired
+    assert any("自动切换" in x and "切换在途" in x for x in lines)
+    assert any("补画前不授权" in x for x in lines)
+
+
+def test_next_regime_marks_provisional_zones():
+    from quant.decision.entry_guard import next_regime_lines
+    lines, _ = next_regime_lines({"next_regime": NR}, _bars(95.0))
+    switch = next(x for x in lines if "切换后" in x)
+    assert "z1 102.5-105(provisional)" in switch
+    assert "stop 100" in switch and "provisional" not in switch.split("stop 100")[1][:20]
+
+
+@pytest.mark.skipif(os.environ.get("TRADINGOPS_CHECK_LIVE_STATE") != "1",
+                    reason="set TRADINGOPS_CHECK_LIVE_STATE=1 to scan local account state")
+def test_gate_sits_above_the_current_regime_no_chase():
+    """核心不变式: gate 是下一个状态的入口, 按定义在本 regime 的 no_chase 之上。
+    两者放同一坐标系比大小 → gate 成立即 above_no_chase → VETO 死锁
+    (2026-07-25 INTC 卡原始写法就是这个)。
+
+    2026-07-31 起扫描 watchlist + positions 全部带 next_regime.entry_gate 的卡
+    —— 旧版钉死 watchlist['INTC'], INTC promote 进 positions 当天就 KeyError:
+    live 状态会流动, 不变式测试不能锚具体 ticker 在具体 bucket。"""
+    import json
+    from pathlib import Path
+    checked = []
+    for fname in ("watchlist.json", "positions.json"):
+        doc = json.loads(Path(f"trade/us_stock/holding/state/{fname}").read_text())
+        for ticker, card in (doc.get("tickers") or {}).items():
+            agent = (card.get("agent") or {})
+            nr = agent.get("next_regime") or {}
+            gate = (nr.get("entry_gate") or {}).get("level")
+            if gate is None or not (agent.get("zones") or {}).get("no_chase_above"):
+                continue
+            ctx = f"{fname}:{ticker}"
+            # zone-maintenance 自洽条款: 上行 gate ≥ no_chase (等于 = "在追价上限处
+            # 确认突破", 正常设计; 只有**低于**才是倒挂死锁)。NVDA 卡 gate==no_chase==204。
+            assert gate >= agent["zones"]["no_chase_above"], ctx
+            # 切换后的 no_chase 又高于 gate — 新 regime 内部自洽
+            # 骨架 next_regime (转移机把 preview 提升后 zones=null, 待
+            # trading-analysis 补画 —  NVDA/AAOI 夜间转移首例):
+            # 内部自洽只对**已画好的**下一世界成立, 骨架没有可查的 zones。
+            # 骨架不许卡死的守卫在别处 (pending_repaint / NEEDS_CARD)。
+            if not nr.get("zones"):
+                continue
+            assert nr["zones"]["no_chase_above"] > gate, ctx
+            # 入场侧棘轮 (round-2b 修订 , 用户 批): 下一档地板 = gate − 0.5×ATR20,
+            # **带缓冲低于 gate**—— 旧断言 (地板 ≥ 上一档 no_chase ≈ 贴 gate) 正是 bfloor
+            # whipsaw 语义, 已被 gate_backtest2b 裁决废除。量级守卫: 缓冲不为零、也不脱锚。
+            floor = nr["zones"]["stop_level"]
+            assert floor < gate, ctx               # 有缓冲, 不贴 gate
+            assert floor > gate * 0.85, ctx        # 缓冲有界 (~0.5N 量级, 不是脱锚的深位)
+            checked.append(ctx)
+    assert checked, "全库无一张带 next_regime.entry_gate 的卡 — 不变式失去被测对象"
+
+
+def test_no_next_regime_is_silent():
+    from quant.decision.entry_guard import next_regime_lines
+    assert next_regime_lines({}, _bars(95.0)) == ([], False)
+
+
+def test_the_unstructured_constraint_warning_is_gone():
+    """「卡片约束未结构化」 摘除 (用户 定) —— 它已恒真。
+
+    旧用例 test_partial_constraints_do_not_silence_the_ceiling_warning 钉的是
+     的判据 (只填 vehicle 不算校验过, 必须看 max_classification)。
+    那条判据没错, 错的是它守的东西在 v3 之后不存在了:
+      card_gates = action.reason[:300]  → 每张卡都有 reason ⇒ 恒非空
+      max_classification                → v3 () 废掉财报/thesis 语义,
+                                          六张卡全拿掉, 全书 0 张
+    ⇒  实测 **6/6 张 PLAN 全部触发**。100% 触发率 = 零信息量, 是
+    「不会触发的检查比没有更危险」的另一端: 读的人会连着真信号一起学会略过。
+
+    本用例反过来钉住"它不该回来" —— 真要重开, 先证明新判据不会重新变成恒真。
+    [ 追记] clamp 机制已随分类轴退役; 卡片级收紧如需回归走数值字段另立。
+    """
+    from quant.decision.entry_guard import render
+    base = {"ticker": "T", "verdict": "PLAN", "close": 100.0, "reasons": [], "lines": [],
+            "card_gates": "卡片 prose 里写着某个天花板", "mode": "normal"}
+
+    for constraints in ({}, {"vehicle": "leaps"}, {"max_classification": "probe"}):
+        assert "卡片约束未结构化" not in render(
+            [{**base, "constraints": constraints}], 1e5, "2026-08-12")
+
+
+# ── regime 统一方案 a (用户 批): cap 0 VETO 保留修复地图 ──
+
+def test_cap0_veto_still_renders_repair_map(monkeypatch):
+    """cap 0 = 无授权 → VETO; 但阶梯/gate 行在 return 之前渲染 — 砍掉地图 =
+    手册只剩一行 VETO, 看不到解除路径。VETO 与地图不矛盾。"""
+    from quant.decision import entry_guard as eg
+    rows = [{"time": f"2026-07-{d:02d} 00:00:00", "open": 90.0, "high": 95.0,
+             "low": 88.0, "close": 90.0 + d * 0.1, "volume": 1e6} for d in range(1, 29)]
+    monkeypatch.setattr(eg, "_rows", lambda tk: rows)
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    card = {"moomoo_listed": True, "agent": {
+        "thesis": {"summary": "x", "status": "intact"},
+        "action": {"intent": "wait_for_structure", "reason": ""},
+        "current_regime": {"name": "修复观察", "cap_pct_nav": 0,
+                           "participation": "gate_only", "since": "2026-08-04",
+                           "source": "card", "reason": "修复路径"},
+        "zones": {"accumulation_zone_1": [80.0, 84.0], "accumulation_zone_2": [70.0, 78.0],
+                  "stop_level": 68.0, "valid_until": "2099-01-01",
+                  "reclaim_gates": [{"level": 92.5, "days": 2}, {"level": 98.0, "days": 2}],
+                  "anchored_on": {"date": "2026-08-04", "basis": "test"}},
+        "next_regime": {"name": "B_repair_probe_98", "cap_pct_nav": 0.02,
+                        "entry_gate": {"level": 98.0, "days": 2,
+                                       "anchored_on": {"date": "2026-08-04"}}},
+    }}
+    r = eg.evaluate_ticker("TST", card, "2026-08-05", nav=22000.0)
+    assert r["verdict"] == "VETO"
+    assert any("cap 0" in x for x in r["reasons"])
+    joined = "\n".join(r["lines"])
+    assert "92.5" in joined, "reclaim 阶梯行被 cap-0 提前 return 砍掉了 (方案 a 回归)"
+    assert "98" in joined
+
+
+# ── 期权轮资格闸: R2 起, 严禁 R1 (用户 ;  R1-only 反转) ──
+
+def _vehicle_card(cap_pct: float) -> dict:
+    """干净候选卡, close 落 zone1 内 → PLAN。"""
+    return {"moomoo_listed": True, "agent": {
+        "thesis": {"summary": "x", "status": "intact"},
+        "action": {"intent": "accumulate", "reason": "",
+                   "constraints": {"vehicle": "leaps"}},
+        "current_regime": {"name": "常规参与", "cap_pct_nav": cap_pct,
+                           "participation": "zone_eligible", "since": "2026-08-01",
+                           "source": "card", "reason": "test"},
+        "zones": {"accumulation_zone_1": [88.0, 93.0], "accumulation_zone_2": [80.0, 87.0],
+                  "trim_zone": [105.0, 110.0], "no_chase_above": 102.0,
+                  "stop_level": 78.0, "valid_until": "2099-01-01",
+                  "anchored_on": {"date": "2026-08-04", "basis": "test"}},
+    }}
+
+
+def _vehicle_rows() -> list:
+    return [{"time": f"2026-07-{d:02d} 00:00:00", "open": 90.0, "high": 94.0,
+             "low": 88.0, "close": 89.0 + d * 0.08, "volume": 1e6}
+            for d in range(1, 29)]
+
+
+def test_option_vehicle_is_blocked_at_r1(monkeypatch):
+    """entry_guard 域恒 R1 ⇒ vehicle=leaps 卡的期权计划**永不生成**(期权 R2 起,
+    严禁 R1 — 用户 「期权样本较少 需要更高确定性」), 且渲染不得给
+    「手动跑 option_plan」话术 (那是教人绕闸); R2+ 的指路在 reasons 里。"""
+    from quant.decision import entry_guard as eg
+    monkeypatch.setattr(eg, "_rows", lambda tk: _vehicle_rows())
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    r = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
+    assert r["verdict"] == "PLAN"
+    assert "option_plan" not in r, "轮资格闸被绕过: R1 生成了期权计划"
+    assert any("gate1 严禁" in x for x in r["reasons"])
+    assert any("gate2" in x for x in r["reasons"])        # 指路 (够 gate 之后) 而非静默
+    txt = eg.render([r], nav=22000.0, today="2026-08-05")
+    assert "gate 资格闸" in txt and "第一档正股 only" in txt
+
+
+def test_option_premium_cap_is_gate_scheduled():
+    """保费上限随档 (sizing 单源, 用**本档新增**不用累计): gate1 = 0 (严禁) /
+    gate2 = 6% / gate3 = 4% NAV。"""
+    from quant.core.sizing import option_premium_cap_frac
+    assert option_premium_cap_frac(1) == 0.0
+    assert option_premium_cap_frac(2) == pytest.approx(0.06)
+    assert option_premium_cap_frac(3) == pytest.approx(0.04)
+
+
+# ── 选约落库 write_option_plans (用户  Today/画线真源) ──
+
+def test_write_option_plans_only_plan_with_sized_contracts(tmp_path, monkeypatch):
+    from quant.decision import entry_guard as eg
+    import quant.core.paths as paths
+    out = tmp_path / "option_plans.json"
+    monkeypatch.setattr(paths, "OPTION_PLANS_PATH", out)
+    results = [
+        {"ticker": "MSFT", "verdict": "PLAN", "option_plan_data": {
+            "chosen": {"code": "US.MSFT270115C460000", "strike": 460.0, "delta": 0.71},
+            "expiry": "2027-01-15", "dte": 523,
+            "rungs": [{"premium_flat_iv": 55.0}, {"premium_flat_iv": 52.0}],
+            "size": {"tiers": [{"shares": 1}, {"shares": 1}]}}},
+        {"ticker": "AAOI", "verdict": "VETO", "option_plan_data": {
+            "chosen": {"code": "US.AAOI270115C150000"},
+            "rungs": [{"premium_flat_iv": 30.0}], "size": {"tiers": [{"shares": 1}]}}},
+        {"ticker": "INTC", "verdict": "PLAN"},   # 无期权计划 (正股卡)
+    ]
+    n = eg.write_option_plans(results, "2026-08-10")
+    assert n == 1
+    import json as _json
+    doc = _json.loads(out.read_text())
+    assert list(doc["plans"]) == ["MSFT"], "VETO 不落 (授权语义), 无计划不落"
+    p = doc["plans"]["MSFT"]
+    assert p["code"] == "MSFT270115C460000", "US. 前缀必须剥掉 (state 存 OCC)"
+    assert p["tiers"][0] == {"premium": 55.0, "contracts": 1}
+
+
+# ── 第⑤条 at-risk 天花板 (N1  接线,  复查补测 — 此前零覆盖) ──
+
+def test_at_risk_can_never_bind_on_the_entry_side_now():
+    """ (用户 #3) 的结构性后果, 值得钉住:
+
+    ②⑤ 现在**共用同一个 stop**, 于是它们的比恒为 gate_risk_cap_frac /
+    AT_RISK_CAP_FRAC (gate1 = 0.5) —— 与 stop 距离无关。⑤ 在入场侧**可证明永不
+    binding**, "stop >4N 才轮到 ⑤" 那条交叉点随 2N 分母一起消失了。保留 ⑤ 是为了
+    表改动时不越 T + 与持仓侧同源; 真咬点在 at_risk_breach_signal (棘轮推 stop)。
+    """
+    from quant.core.sizing import AT_RISK_CAP_FRAC, GATE_RISK_CAPS
+    for stop in (99.0, 92.0, 70.0, 20.0, 1.0):          # 近到极远, 全扫
+        c = size_caps(21237, atr=4.0, t1=100.0, risk_stop=stop, agent=FULL)
+        assert c["binding"] != "at_risk", f"stop={stop} 竟由 ⑤ binding"
+        assert c["n_unit_cap"] <= c["at_risk_cap"] + 1e-9
+    # 比值恒定 (不随 stop 变) —— 这就是 ⑤ 永不 binding 的原因
+    c = size_caps(21237, atr=4.0, t1=100.0, risk_stop=70.0, agent=FULL)
+    assert c["n_unit_cap"] / c["at_risk_cap"] == pytest.approx(
+        GATE_RISK_CAPS[0] / AT_RISK_CAP_FRAC)
+    assert c["at_risk_cap"] == pytest.approx(c["n_unit_cap"] * 2)
+
+
+def test_at_risk_excluded_from_option_notional():
+    """§b1: 标的 stop 不给期权折扣 — ⑤ (标的口径) 不得混进 notional_cap
+    (期权的 at-risk 由 at_risk_premium_cap 保费口径单独管)。构造 ⑤ < n_unit
+    的形状: 若 ⑤ 混进 notional, notional_cap 会等于它。"""
+    c = size_caps(21237, atr=None, t1=100.0, risk_stop=70.0, agent=FULL,
+                  usage={"used_budget": 0.0, "used_gross": 0.0})
+    assert c["at_risk_cap"] is not None, "⑤ 必须仍被算出来 (只是不再 binding)"
+    assert c["notional_cap"] is None or c["notional_cap"] != c["at_risk_cap"], \
+        "标的口径 at-risk 混进了期权 notional 链 (§b1 违规)"
+
+
+# ── verdict 重构 (用户: 移除 GO/WAIT — 挂 zone 限价单, 市价位置不驱动) ──
+
+def _plan_card(z1=(88.0, 93.0), z2=(80.0, 87.0), trim=(105.0, 110.0),
+               no_chase=102.0, stop=78.0) -> dict:
+    return {"moomoo_listed": True, "agent": {
+        "thesis": {"summary": "x", "status": "intact"},
+        "action": {"intent": "accumulate", "reason": ""},
+        "current_regime": {"name": "常规参与", "cap_pct_nav": 0.40,
+                           "participation": "zone_eligible", "since": "2026-08-01",
+                           "source": "card", "reason": "test"},
+        "zones": {"accumulation_zone_1": list(z1), "accumulation_zone_2": list(z2),
+                  "trim_zone": list(trim), "no_chase_above": no_chase,
+                  "stop_level": stop, "valid_until": "2099-01-01",
+                  "anchored_on": {"date": "2026-08-04", "basis": "test"}},
+    }}
+
+
+def _rows_ending_at(close: float) -> list:
+    rows = [{"time": f"2026-07-{d:02d} 00:00:00", "open": 90.0, "high": 94.0,
+             "low": 88.0, "close": 89.0 + d * 0.08, "volume": 1e6}
+            for d in range(1, 29)]
+    rows.append({"time": "2026-08-04 00:00:00", "open": close, "high": close + 1,
+                 "low": close - 1, "close": close, "volume": 1e6})
+    return rows
+
+
+def _eval_at(monkeypatch, close, card=None):
+    from quant.decision import entry_guard as eg
+    monkeypatch.setattr(eg, "_rows", lambda tk: _rows_ending_at(close))
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    return eg.evaluate_ticker("TST", card or _plan_card(), "2026-08-05", nav=22000.0)
+
+
+def test_waiting_position_now_plans(monkeypatch):
+    """等待区不再 WAIT — 出 zone 限价单计划 (2026-08-10: 铃响那一刻手上要有计划)。"""
+    r = _eval_at(monkeypatch, 97.0)
+    assert r["verdict"] == "PLAN" and r["ladder"], r["reasons"]
+    assert all(p <= 93.0 for p in r["ladder"]), "计划必须锚 zone, 不贴市价"
+    assert any("📍" in x and "等待区" in x for x in r["lines"])
+
+
+def test_above_no_chase_now_plans_with_position_line(monkeypatch):
+    """超 no_chase 不再 VETO 整卡 — 它罚的是市价追买, 与 z1 限价单无关。"""
+    r = _eval_at(monkeypatch, 104.0)
+    assert r["verdict"] == "PLAN" and r["ladder"]
+    assert any("no_chase" in x and "不追市价" in x for x in r["lines"])
+    assert all(p <= 93.0 for p in r["ladder"])
+
+
+def test_trim_position_now_plans(monkeypatch):
+    card = _plan_card(no_chase=112.0, trim=(105.0, 110.0))   # trim 带在 no_chase 之下
+    r = _eval_at(monkeypatch, 107.0, card)
+    assert r["verdict"] == "PLAN"
+    assert any("trim 区" in x for x in r["lines"])
+
+
+def test_below_zones_vetoes_because_limit_would_fill_instantly(monkeypatch):
+    r = _eval_at(monkeypatch, 79.0)
+    assert r["verdict"] == "VETO"
+    assert any("即时成交" in x for x in r["reasons"])
+
+
+def test_below_stop_vetoes_as_breakdown(monkeypatch):
+    r = _eval_at(monkeypatch, 76.0)
+    assert r["verdict"] == "VETO"
+    assert any("破位" in x for x in r["reasons"])
+
+
+def test_plan_carries_single_stop_and_trim(monkeypatch):
+    """显示合同: 一个建仓位 (ladder) / 一个止损位 (结构) / 一个止盈位 (trim)。
+    2N 保留为 sizing 内部量, 不再是第二条止损线。"""
+    r = _eval_at(monkeypatch, 91.0)
+    assert r["verdict"] == "PLAN"
+    assert r["stops"]["display"] == 78.0
+    assert r["stops"]["display_basis"] == "结构位"
+    assert r["trim"] == [105.0, 110.0]
+    from quant.decision.entry_guard import render
+    txt = render([r], nav=22000.0, today="2026-08-05")
+    assert "预设止损: 78" in txt and "止盈 trim 105-110" in txt
+    assert "双线先到先触发" not in txt
+
+
+def test_log_decisions_only_on_change(tmp_path, monkeypatch):
+    """PLAN 是常态后逐日全落 = 噪音; 变动才落 = 重锚审计轨迹。"""
+    from quant.decision import entry_guard as eg
+    dec = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr(eg, "DECISIONS_PATH", dec)
+    r = {"ticker": "T", "verdict": "PLAN", "classification": "confirmed",
+         "mode": "normal", "ladder": [93.0, 88.0, 83.5],
+         "caps": {"final": 2000.0}, "stops": {"display": 78.0}, "constraints": {}}
+    assert eg.log_decisions([r]) == 1
+    assert eg.log_decisions([r]) == 0, "同一份计划不重复落库"
+    r2 = dict(r, ladder=[94.0, 88.0, 83.5])          # 重锚 → 价位变 → 落
+    assert eg.log_decisions([r2]) == 1
+    lines = [ln for ln in dec.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 2
+
+
+def test_entry_guard_never_calls_option_plan(monkeypatch):
+    """期权 R1 严禁 (2026-08-13) ⇒ entry_guard 恒 R1 域**不再有任何路径**调
+    option_plan.build。§13.2 的 DTE 语义 (target 270 / min 270) 归 option_plan
+    模块自持, R2+ 手动跑时生效。"""
+    from quant.decision import entry_guard as eg
+    from quant.options import option_plan as op
+    called = []
+    monkeypatch.setattr(op, "build", lambda *a, **k: called.append(1) or {})
+    monkeypatch.setattr(eg, "_rows", lambda tk: _vehicle_rows())
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    r = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
+    assert r["verdict"] == "PLAN"
+    assert called == [], "R1 域调了 option_plan.build — 轮资格闸被绕过"
+
+
+# ── 当前 regime 的 no_chase 无条件印 (用户) ───────────
+#
+# 此前它只在 above_no_chase 那一支出现 = 被突破了才说, 而 next_regime 的整套
+# 仓位层 (含它自己的 no_chase) 是**无条件**渲染的 ⇒ 块上唯一看得见的 no_chase
+# 是还没生效的那条。COHR : 当前 339 / 下一档 374, 差 10%, 现价
+# 351.62 正好夹在中间。
+
+_ZB = {"z1": [313.5, 322.0], "z2": [304.0, 313.5], "trim": [348.0, 365.0],
+       "no_chase": 339.0, "stop": 303.0}
+
+
+@pytest.mark.parametrize("pos,close", [
+    ("waiting", 328.57), ("zone1", 318.0), ("zone2", 308.0),
+    ("gap_z1_z2", 313.5), ("trim", 350.0),
+])
+def test_current_no_chase_is_printed_in_every_position(pos, close):
+    from quant.decision.entry_guard import _position_line
+    assert "no_chase 339" in _position_line(pos, close, _ZB)
+
+
+def test_above_no_chase_names_it_once_not_twice():
+    """那一支本来就点名了它 —— 不重复成 'no_chase 339 ... | no_chase 339'。"""
+    from quant.decision.entry_guard import _position_line
+    line = _position_line("above_no_chase", 350.0, _ZB)
+    assert line.count("no_chase") == 1 and "339" in line
+
+
+def test_card_without_no_chase_stays_clean():
+    from quant.decision.entry_guard import _position_line
+    zb = {**_ZB, "no_chase": None}
+    assert "no_chase" not in _position_line("waiting", 328.57, zb)
+
+
+def test_the_position_line_keeps_its_own_content():
+    """加尾巴不许把原信息挤掉 —— 距离/语义都还在。"""
+    from quant.decision.entry_guard import _position_line
+    line = _position_line("waiting", 328.57, _ZB)
+    assert "等待区" in line and "距 z1 上沿" in line and "no_chase 339" in line

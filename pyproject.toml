@@ -1,27 +1,42 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "coreytrading"
-version = "0.1.0"
-description = "A deterministic, broker-agnostic trading-system reference pipeline"
+name = "trading-ops"
+version = "0.2.0"
+description = "A technical-first, human-reviewed trading operations framework"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-keywords = ["trading", "risk", "portfolio", "signals", "execution"]
+keywords = ["trading", "risk", "portfolio", "broker", "market-structure"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Office/Business :: Financial :: Investment",
 ]
-dependencies = []
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.2",
+]
 
-[project.urls]
-Repository = "https://github.com/Coreychen4444/coreytrading"
+[project.optional-dependencies]
+broker = [
+  "moomoo-api==10.9.6908",
+  "protobuf==3.20.3",
+]
+dev = [
+  "moomoo-api==10.9.6908",
+  "protobuf==3.20.3",
+  "pytest>=8.0",
+]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/coreytrading"]
+[tool.setuptools.packages.find]
+include = ["quant*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

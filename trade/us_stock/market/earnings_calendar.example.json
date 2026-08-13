@@ -1,0 +1,11 @@
+{
+  "as_of": "2099-01-01",
+  "tickers": {
+    "SYNTH_STOCK": {
+      "next_reaction_day": null,
+      "session": "unknown",
+      "source": "example_provider",
+      "synthetic": true
+    }
+  }
+}

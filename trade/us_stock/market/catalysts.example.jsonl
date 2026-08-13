@@ -1,0 +1,1 @@
+{"timestamp":"2099-01-01T00:00:00Z","ticker":"SYNTH_STOCK","event_type":"example","summary":"Synthetic event schema.","source":"example_provider","synthetic":true}

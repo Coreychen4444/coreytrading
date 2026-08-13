@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "generated_at": "2099-01-01T00:00:00Z",
+  "tickers": {
+    "SYNTH_STOCK": {
+      "instrument": {
+        "type": "stock"
+      },
+      "broker": {
+        "source": "example_broker",
+        "qty": 0,
+        "avg_cost": null,
+        "current_price": null,
+        "currency": "USD",
+        "synthetic": true,
+        "as_of": "2099-01-01T00:00:00Z"
+      },
+      "status": "active",
+      "agent": {
+        "thesis": {
+          "summary": "Synthetic placeholder; replace only from user-approved research.",
+          "status": "review_required",
+          "conviction": "unrated",
+          "last_reviewed": "2099-01-01T00:00:00Z"
+        },
+        "action": {
+          "intent": "review",
+          "reason": "Bootstrap placeholder",
+          "confidence": "low"
+        }
+      },
+      "lots": {
+        "base": [],
+        "position": []
+      },
+      "position_summary": {},
+      "pending_orders": []
+    }
+  }
+}

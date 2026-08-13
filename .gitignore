@@ -1,10 +1,45 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+.mcp.json
+*.pem
+*.key
+bird-auth*
+
+# Python
+.venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .coverage
 htmlcov/
-.venv/
 dist/
 build/
-*.egg-info/
+
+# Editors and operating systems
 .DS_Store
+._*
+.idea/
+.vscode/
+
+# Claude/Codex local runtime
+.claude/settings.local.json
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+.codex/
+
+# Runtime scratch
+tmp/
+*.log
+
+# AI private-workspace boundary. Only contracts and synthetic examples are public.
+trade/**
+!trade/**/
+!trade/**/README.md
+!trade/**/*.example.*
+
+# Optional nested knowledge vault
+investment/
