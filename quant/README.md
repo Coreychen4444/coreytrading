@@ -104,8 +104,9 @@ git show b98a42e:scripts/migrate_to_state_v2.py
 `tests/` 镜像同一套分层——找某模块的测试就去同名子目录：
 
 ```bash
-.venv/moomoo/bin/python3 -m pytest -q             # 全量（396 项）
+.venv/moomoo/bin/python3 -m pytest -q             # 全量
 .venv/moomoo/bin/python3 -m pytest tests/core -q  # 只跑共享库
+.venv/moomoo/bin/python3 -m pytest --collect-only -q | tail -1  # 现查总数
 ```
 
 **tests/ 为什么不放进 quant/**：测试要横着 import 每一层，放进包里就成了一个「可以任意方向
@@ -125,6 +126,9 @@ import」的成员，上面那条依赖规则当场要开例外；而且它是�
 两组守卫都做过变异测试：逐条制造违规，确认**每一条都真的会红**（一个只会绿的守卫比没有守卫更坏——
  就有一次冒烟检查因为 macOS 没有 `timeout` 而对 51 个入口全部"通过"）。
 
-`UNTESTED` 里有 26 条，其中标了 **真缺口**的几条值得优先补：`sync/trade_history_sync`（往不可回滚的
-成交账本 append）、`report/perf_report`（算错没人会发现）、`research/exit_rules_backtest` 与
-`structure_downgrade_backtest`（CLAUDE.md 规定改参数前必跑，判据来源本身却没测）。
+`UNTESTED` 的条数不要抄进文档；名单和每条理由都在 `tests/test_module_coverage.py` 中，
+需要时现读现算。它是棘轮：补上测试的模块必须出列，名单只能缩短。
+
+仍标记为 **真缺口** 的项目应优先处理，尤其是 `report/perf_report`、
+`research/exit_rules_backtest` 与 `research/structure_downgrade_backtest`：
+它们会影响绩效解释或参数裁决，而判据来源本身仍需要更完整的机械件验证。

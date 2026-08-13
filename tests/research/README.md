@@ -1,14 +1,31 @@
-# `tests/research/` — 目前是空的（有意的）
+# `tests/research/` — 预注册机械件的合成数据验证
 
-`quant/research/` 是验证层旁路：一次性回测与校准，输出是统计而不是动作，
-所以整层暂时没有测试。目录留着是为了守住 `quant/<层>/ ↔ tests/<层>/` 的镜像——
-要补测试时有唯一确定的落点，不会散到别处。
+`quant/research/` 是验证层旁路：一次性回测与校准产出统计而不是动作。但这些结果会改变
+live authorization、止损语义、快车道阈值和组合预算，所以**回测机械件本身必须被测试守住**。
+一个算错的回测会把错误参数送进 live，同时看起来完全正常。
 
-**但其中两个不是"旁路"，是真缺口**（`tests/test_module_coverage.py` 的 UNTESTED 里也这么标了）：
+## 预注册纪律
 
-- `exit_rules_backtest.py` — CLAUDE.md 规定「改退出参数前必跑」。它算出来的数字直接
-  决定要不要动利润棘轮 / 趋势死亡线，本身却没有任何测试。
-- `structure_downgrade_backtest.py` — CLAUDE.md 规定「改 entry_guard 降级条件前必跑」。
-  同上：判据的来源没被守住。
+> **实现期间只允许合成数据；真实或授权历史数据在机械件锁定后运行。**
 
-这两个的共同点是**它们的输出会改变真金白银的判定参数**。要补测试，从它们开始。
+每个测试对应设计预注册中的一条机械语义：序列构造、时点、统计口径或裁决规则。
+判据必须先于结果锁定；看到历史结果后不能回头修改判据来迎合数字。
+
+## 自由度审计棘轮
+
+`test_dof_audit.py` 钉住 money-moving layer 的无出处自由度基线。
+
+设计目标是**棘轮，而不是限流**：
+
+- 有裁决或回测依据的参数新增不设置拍脑袋限额；
+- 没有出处的自由度只能减少，不能增加；
+- 当前数量以测试中的 executable baseline 为准，不能复制到文档中。
+
+## 仍需优先补齐的机械件
+
+`tests/test_module_coverage.py` 的 `UNTESTED` 名单保存准确状态和理由。优先关注：
+
+- `quant/research/exit_rules_backtest.py` — 其结果影响利润棘轮与趋势退出参数；
+- `quant/research/structure_downgrade_backtest.py` — 其结果影响 entry-guard 降级条件。
+
+共同点是：它们的输出会改变真实决策参数，但判据来源仍需要更完整的合成数据验证。

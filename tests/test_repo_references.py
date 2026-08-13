@@ -25,12 +25,16 @@ CHECK_LIVE_TASKS = os.environ.get("TRADINGOPS_CHECK_LIVE_TASKS") == "1"
 # 它们谈论路径，不使用路径 —— 排除掉，否则这条守卫只会自己咬自己。
 SELF = {"tests/test_repo_references.py", "tests/test_layering.py", "tests/test_module_coverage.py"}
 
-# 只扫我们自己维护的文本；.claude/skills/openapi/ 是上游同步来的，不归这里管
+# 只扫我们自己维护的文本；.claude/skills/openapi/ 是上游同步来的，不归这里管。
+# 根 README 与 tests/ 下的说明文档也是公开入口，必须进入同一条路径引用守卫。
+# quant/research 下的设计稿允许记录“某路径不存在”这类负向裁决，暂不整体收编。
 SCAN = [
     *(ROOT / "quant").rglob("*.py"),
     *(ROOT / "tests").rglob("*.py"),
+    *(ROOT / "tests").rglob("*.md"),
     *(ROOT / "tasks").glob("*.md"),
     *(ROOT / ".claude" / "rules").glob("*.md"),
+    *ROOT.glob("README*.md"),
     ROOT / "quant" / "README.md",
     ROOT / "CLAUDE.md",
 ]
