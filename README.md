@@ -40,6 +40,26 @@ The middle chain—transition → authorization → sizing—is gate-driven. It 
 
 ---
 
+## Positioning — what kind of system is this?
+
+In one sentence: **conventional structural-trading tools assembled into a state machine**. The project does not claim to invent volume profile, swing structure, ATR-normalized risk, trailing exits, fractional-Kelly ceilings or preregistration. Its contribution is how those standard parts are connected and verified.
+
+| Standard component | Role here |
+|---|---|
+| Volume profile, pivots and swing structure | Discover zones and transition axes |
+| ATR-normalized distance and structural stops | Put prices on a comparable risk scale |
+| Volatility, gross and single-name ceilings | Bound portfolio and position risk |
+| Preregistration and negative-result reporting | Prevent result-driven parameter selection |
+
+The framework does not infer market intent or require proprietary vocabulary. It records observable acceptance, rejection, breakdown and recovery, then applies four assembly rules:
+
+1. A gate moves the whole structural map, not only a position-size number.
+2. Authorization, timing, sizing and exit remain separate layers with separate sources of truth.
+3. A rule that is not enforced in code and guarded by a failing test is not an operating rule.
+4. Criteria are fixed before private results are inspected; rejected proposals remain part of the private research record.
+
+---
+
 ## Gate philosophy — the foundation of the system
 
 A gate is the system's **state-transition axis**: a landmark price level where the market has repeatedly made decisions. Downtrends, repairs, ranges and uptrends can all contain gates. Zones, regimes, caps, ladders, exit rules, authorization lists and operational reports are downstream of this concept.
@@ -477,6 +497,56 @@ TradingOps is a technical-first, rule-driven, semi-automated framework—not an 
 - Orders and fills can be synchronized back into state, ledgers, journals and performance review.
 
 Private holdings, watchlists, fills, journals, active-universe caches, research, strategies, credentials and account identifiers are intentionally absent from the public repository.
+
+---
+
+## Strengths and limits
+
+### What the architecture is designed to solve
+
+| Strength | Architectural basis |
+|---|---|
+| One number, one source | Entry capacity flows through one constraint funnel and is reused by plans, reports, reminder notes and authorization lists. |
+| Rules can fail visibly | Layering, module coverage, path validity, state schemas and operational ordering are executable tests. |
+| Silent failure is treated as a product risk | Infrastructure alerts, dead-man state and explicit dry-run behavior make missing data or broken automation observable. |
+| Research cannot directly operate the live path | The research layer is isolated, synthetic mechanics are tested, and live modules may not import it. |
+| A code defect cannot directly become an order | The canonical pipeline produces instructions but never submits an order. |
+
+### What it does not solve
+
+- It does not forecast returns, produce a calibrated alpha score or optimize a covariance matrix.
+- Daily-bar confirmation and periodic patrols are inherently late for intraday moves and gaps.
+- Structural cards still require judgment; automating the launch of an AI analysis does not make the analysis infallible.
+- Whole-unit sizing can be coarse for small accounts or expensive instruments.
+- Broker integration is not portable by itself; adapting another broker generally means implementing a new `quant/sync/` boundary.
+- The public repository contains no private dataset, live performance history or evidence that its default parameters fit another user.
+
+---
+
+## Who it fits
+
+This framework is most suitable for daily or weekly swing workflows in which an operator can read Python, maintain structured cards, accept mechanical vetoes and keep final execution under human review.
+
+It is not intended for high-frequency or intraday trading, autonomous execution, market-neutral portfolio optimization, a signal-to-buy black box, or anyone seeking a return forecast or advertised win rate.
+
+---
+
+## Before reusing it
+
+1. Treat every risk constant as a placeholder until it is justified for your account, instruments and loss tolerance.
+2. Populate only ignored runtime files built from the examples under `trade/`; never commit real holdings, account history or credentials.
+3. Use `--read-only` for in-session reports and dry-run modes for state writers and detached agents.
+4. Re-run the relevant private study before changing a money-moving parameter, with criteria fixed before results are viewed.
+5. Verify scheduled tasks in the actual runtime registry; a prompt file on disk is not proof that a task is registered or firing.
+6. Use completed bars for close-dependent state transitions, and test every alert path end to end.
+
+---
+
+## Disclaimer
+
+This repository is software and research infrastructure, not investment advice or an investment-advisory service. Trading can result in substantial or total loss. Historical or backtested results do not guarantee future outcomes, and the public scaffold intentionally contains neither a performance claim nor a recommendation to trade any instrument.
+
+The code is provided under the MIT License without warranty. Defects, stale data, unavailable broker services, misconfigured tasks or incorrect structural analysis may cause financial loss. Anyone connecting the framework to real money is responsible for independent validation, local legal and tax requirements, broker terms and every execution decision.
 
 ---
 

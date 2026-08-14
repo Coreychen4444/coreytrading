@@ -42,7 +42,7 @@ from typing import List, Optional, Tuple
 from quant.core import technical  # noqa: E402
 from quant.core.episodes import (# noqa: E402  gate 结构身份: 与回测同一份判别式
     DELTA_ATR, MIN_BARS, breakdown_in_window, episodes_of, gate_path, merge_bars_by_date)
-from quant.core.holdings import is_managed, live_tickers  # noqa: E402  「谁算持仓」单一真源
+from quant.core.holdings import is_managed, is_traded, live_tickers  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (# noqa: E402
     KLINE_CACHE_DIR, KLINE_DEEP_DIR, MARKET_DIR, POSITIONS_PATH, WATCHLIST_PATH)
@@ -459,10 +459,9 @@ def skhy_premium_line(market_dir: Path = MARKET_DIR) -> Optional[str]:
 def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
                  market_dir: Path = MARKET_DIR, pos_path: Path = POSITIONS_PATH) -> str:
     wl = json.loads(Path(wl_path).read_text())["tickers"]
-    # volume_reference 票 (SPY/QQQ/SMH/SOXX) 不出 ticker 块 — 读数已在 🏭 板块表头
+    # Reference instruments do not get ticker blocks; their readings are in the sector header.
     active = {tk: c for tk, c in wl.items()
-              if c.get("moomoo_listed", True)
-              and (c.get("instrument") or {}).get("role") != "volume_reference"}
+              if c.get("moomoo_listed", True) and is_traded(c)}
     # 持仓侧 (用户: 持仓卡同样带 gate 阶梯, 只报 watchlist 是覆盖缺口)。
     # 判据 = holdings.live_tickers (broker.qty 单一真源); 结构豁免层无 gate 不渲染。
     held: dict = {}
@@ -505,7 +504,7 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
             f"  (ladder_entry  采纳; 只对 next_regime 那道线, 止跌/修复线无此路)\n"
             f"  增益带 0.5-1.0N; >1.0N 与等 ×2 平局 — 幅度不是越大越好 (§10c)\n"
             f"线名=结构层 (止跌/收复/修复/突破); 仓位档由结构判别式定\n"
-            f"(v3 2026-08-04 纯结构单腿, thesis 仅 [FYI]), 不由单一 gate 解锁。\n"
+            f"(v3 纯结构单腿, thesis 仅 [FYI]), 不由单一 gate 解锁。\n"
             f"gate 成立 → regime_transition 机械转移 (两个桶都扫,  裁决 A);\n"
             f"  转移 ≠ 已授权: provisional 带补画锁, 补画前 entry_guard 不给 ladder\n")
     sec = sector_lines(kdir)

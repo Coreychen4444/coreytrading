@@ -317,15 +317,23 @@ The dependency order is:
 6. lot reconciliation;
 7. watchlist membership reconciliation;
 8. watchlist-to-position migration;
-9. completed K-line update for close-dependent modes;
-10. regime transition;
-11. NAV snapshot before any consumer that sizes from NAV;
-12. broker reminder reconciliation;
-13. entry-authorization group reconciliation;
-14. IV, earnings and optional premium datasets;
-15. structure-drift observation;
-16. portfolio brief after all producer stages;
-17. entry plan after current state, market data and NAV are complete.
+9. `card_autopaint.py` detection and detached agent launch for eligible empty cards;
+10. completed K-line update for close-dependent modes;
+11. regime transition;
+12. NAV snapshot before any consumer that sizes from NAV;
+13. broker reminder reconciliation;
+14. entry-authorization group reconciliation;
+15. IV, earnings and optional premium datasets;
+16. structure-drift observation;
+17. portfolio brief after all producer stages;
+18. entry plan after current state, market data and NAV are complete.
+
+`card_autopaint.py` must return without waiting for analysis. It excludes reference
+instruments, unmanaged positions, option contracts and cards that already have zones.
+`pipeline --read-only` converts it to `--dry-run`, because a detached card agent is a
+state writer that cannot be recalled when the preview session exits. Scheduled use
+requires a Claude CLI (`CLAUDE_BIN` may override discovery) and either `timeout` or
+`gtimeout` to enforce the detached process wall-clock limit.
 
 Mode semantics:
 

@@ -109,8 +109,8 @@ STAGES: List[Stage] = [
           parse_json=True, needs_opend=False),
     Stage("watchlist_sync", ["quant/sync/watchlist_sync.py", "--json"], BOTH,
           "moomoo 自选分组 ↔ watchlist.json 对账 (briefing 须先于 kline_cache, 新 stub "
-          "当轮即可拉 K 线)。已持仓 → 自动移出分组 (入场候选语义, 2026-08-05) / 平仓 → "
-          "自动加回分组 (每次平仓一次并盖章) + 平仓卡 agent 块原样搬回候选卡 (2026-08-13, "
+          "当轮即可拉 K 线)。已持仓 → 自动移出分组 (入场候选语义) / 平仓 → "
+          "自动加回分组 (每次平仓一次并盖章) + 平仓卡 agent 块原样搬回候选卡 ("
           "待过期重画; 已有 zones 的卡不覆盖) — 进 heartbeat "
           "让成交后 ≤6h 清理, 须在 positions/fills 之后 (broker 真值当轮新)、**reconcile "
           "之后**(加回判据是 close_reconcile 落的 exit_info.closed_at, 排在它之前 = "
@@ -118,6 +118,11 @@ STAGES: List[Stage] = [
           parse_json=True),
     Stage("watchlist_migrate", ["quant/sync/watchlist_migrate.py", "--apply", "--json"], BOTH,
           "watchlist→positions 迁移并执行 (--apply 缺失 = 只检测不写)", parse_json=True),
+    Stage("autopaint", ["quant/ops/card_autopaint.py", "--json"], BOTH,
+          "Detect eligible cards without zones and start detached card-building agents. "
+          "Runs after watchlist reconciliation so new stubs are visible immediately; "
+          "returns without waiting, so completed cards take effect on a later pipeline run.",
+          parse_json=True, needs_opend=False),
     Stage("klines", ["quant/data/kline_cache.py"], (BRIEFING, POSTCLOSE),
           "日线缓存增量 — 收盘依赖; exit/entry guard 的结构标签靠它"),
     Stage("regime", ["quant/decision/regime_transition.py", "--apply", "--json"],
@@ -125,7 +130,7 @@ STAGES: List[Stage] = [
           "gate 触发即机械转移卡片 regime — 收盘依赖", parse_json=True),
     Stage("nav", ["quant/data/nav_snapshot.py", "--json"], (BRIEFING, POSTCLOSE),
           "每日 NAV + 基准快照 — **必须先于 reminders/portfolio_brief**(预算行与 "
-          "moomoo z1 备注金额的分母)。2026-08-10 起进 postclose: 收盘后即刷当日 NAV, "
+          "moomoo z1 备注金额的分母)。postclose 收盘后即刷当日 NAV, "
           "转移后重画的备注金额用当日收盘账户; 此前只在盘前跑 = cap 数学落后一个交易日, "
           "且 briefing 里 reminders 排在 nav 前 = 画线用旧 NAV、brief 用新 NAV 两处打架",
           parse_json=True, eod_only=True),
@@ -246,7 +251,7 @@ def handle_opend_recovered(send: bool) -> bool:
 def stamp_heartbeat() -> None:
     """dead-man 专属时间戳。**只有 heartbeat 模式写**, briefing 不能碰 ——
     briefing 每天也跑 portfolio_brief, 用 lastChecks.portfolio_brief 判死活会
-    掩盖 heartbeat 停摆 (2026-04-15→07-17 停了 3 个月没人发现的直接原因)。"""
+    掩盖 heartbeat 停摆。"""
     st = load_state()
     st.setdefault("lastChecks", {})["heartbeat"] = int(time.time())
     save_state(st)
@@ -286,7 +291,7 @@ def main(argv: List[str]) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", required=True, choices=[HEARTBEAT, BRIEFING, POSTCLOSE])
     ap.add_argument("--event-day", action="store_true",
-                    help="宏观/财报事件日标记 → entry_guard 仅 [FYI] 播报 (v3 2026-08-04: 不降级)")
+                    help="宏观/财报事件日标记 → entry_guard 仅 [FYI] 播报 (不降级)")
     ap.add_argument("--json", action="store_true", help="结构化输出 (定时任务用)")
     ap.add_argument("--dry-run", action="store_true", help="只印执行计划, 不跑")
     ap.add_argument("--no-notify", action="store_true",
@@ -352,8 +357,9 @@ def main(argv: List[str]) -> int:
             extra.append("--event-day")
         if a.read_only and s.key == "brief":
             extra.append("--read-only")          # 不消耗真 heartbeat 的告警窗口
-        if a.read_only and s.key in ("reconcile", "lots"):
-            # "预览"能改交易状态本身就是设计错误 (ET 13:56 事故的教训)。
+        if a.read_only and s.key in ("reconcile", "lots", "autopaint"):
+            # A preview must not mutate trading state.
+            # Autopaint launches a detached writer, so preview mode only reports targets.
             extra.append("--dry-run")
         r = run_stage(s, extra, drop=["--log"] if (a.read_only and s.key == "entry") else None)
         result["stages"][s.key] = r

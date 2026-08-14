@@ -54,6 +54,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, earnings  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓)
+from quant.core.holdings import is_traded  # noqa: E402
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (# noqa: E402
@@ -762,7 +763,7 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
     if veh in OPTION_VEHICLES:
         _g = caps.get("gate_no") or 1
         out["reasons"].append(
-            f"⛔ 期权 gate1 严禁 (OPTION_MIN_GATE={OPTION_MIN_GATE}, 2026-08-13: 期权样本少"
+            f"⛔ 期权 gate1 严禁 (OPTION_MIN_GATE={OPTION_MIN_GATE}: 期权样本少"
             f" 需更高确定性) — 本档正股执行; gate{OPTION_MIN_GATE}+ 可期权 (手动跑 "
             f"option_plan, 保费上限 gate2 {option_premium_cap_frac(2):.0%} / "
             f"gate3 {option_premium_cap_frac(3):.0%} NAV)"
@@ -794,7 +795,7 @@ _ICON = {"PLAN": "🟢", "STALE": "⚠️", "NEEDS_CARD": "📇", "VETO": "⛔"}
 def _summary_line(r: dict) -> str:
     """一览表单行 (display-only,  用户: 简报要像 gate-ladder-report 一目了然)。
     数据全部取自本文件自己渲染的 lines/结构化字段 —— 机械抽取, 不是散文改写。
-    PLAN 行的信息 = 挂哪 (z1 带 + 回踩距离) + 挂多少 (首档股数) —— 2026-08-10 起
+    PLAN 行的信息 = 挂哪 (z1 带 + 回踩距离) + 挂多少 (首档股数) ——
     verdict 不含市价语义, 一览要回答的就是这两问。"""
     seg = f"{_ICON.get(r['verdict'], '?')} {r['ticker']}"
     if r.get("close"):
@@ -975,7 +976,7 @@ def _last_plan_signatures() -> Dict[str, str]:
 
 def log_decisions(results: List[dict]) -> int:
     """PLAN 计划落 decisions.jsonl —— **价位/股数/档位相对上次落库有变才写一行**
-    (2026-08-10: verdict 改挂单授权语义后 PLAN 是常态, 逐日全落 = 噪音淹掉重锚轨迹;
+    (verdict 改为挂单授权语义后 PLAN 是常态, 逐日全落 = 噪音淹掉重锚轨迹;
     变动才落让「未成交档只升不降」第一次有了审计轨迹)。"""
     last = _last_plan_signatures()
     n = 0
@@ -1075,7 +1076,7 @@ def main(argv: List[str]) -> int:
             continue
         # 量能参考票 (SPY/QQQ/SMH/SOXX, 用户): 只供 kline/量比/板块读数,
         # 不交易不评估 — 不进计划、不渲染 NEEDS_CARD 噪音 (--tickers 显式点名仍评估)
-        if explicit is None and (card.get("instrument") or {}).get("role") == "volume_reference":
+        if explicit is None and not is_traded(card):
             reference.append(tk)
             continue
         results.append(evaluate_ticker(tk, card, today, nav, event_day=a.event_day,

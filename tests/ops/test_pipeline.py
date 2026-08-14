@@ -50,8 +50,8 @@ def test_heartbeat_is_a_subset_of_briefing():
 
 def test_postclose_is_lean_close_layer_only():
     """盘后转移轮 (用户: 盘后/夜盘可交易 → 转移不等次日 18:30):
-    只跑收盘依赖链, 顺序固定。regime 转移世界 → nav 刷当日收盘账户 (2026-08-10
-    H4: 转移后重画的 z1 备注金额分母; 此前 nav 只在盘前跑 = cap 数学落后一个
+    只跑收盘依赖链, 顺序固定。regime 转移世界 → nav 刷当日收盘账户
+    (转移后重画的 z1 备注金额分母; 此前 nav 只在盘前跑 = cap 数学落后一个
     交易日) → reminders/today_group 把授权渲染成 App 白名单。brief 不进来 ——
     说明渲染与重画是任务 prompt 里的 agent 工作, 不是 pipeline 步骤。"""
     kp = keys(pipeline.POSTCLOSE)
@@ -61,7 +61,7 @@ def test_postclose_is_lean_close_layer_only():
 
 def test_nav_lands_before_reminders_in_every_mode_it_runs():
     """z1 备注金额的分母 (available_cap(nav))。nav 排在 reminders 之后 = 画线用
-    昨天的 NAV、brief 用今天的, 两处口径打架 (2026-08-10 顺序修正)。"""
+    昨天的 NAV、brief 用今天的, 两处口径打架。"""
     for mode in (pipeline.BRIEFING, pipeline.POSTCLOSE):
         k = keys(mode)
         assert k.index("nav") < k.index("reminders"), mode
@@ -96,7 +96,7 @@ def test_both_modes_reconcile_orders():
 
 def test_close_reconcile_runs_after_fills_and_before_brief():
     """收尾要读事件流算 realized_pnl → 必须在 fills 之后; 简报把 lots 未清的死卡
-    当持仓 (NBIS 2026-07-28) → 必须在 brief 之前。两个模式都要有 —— 平仓不挑
+    当持仓 → 必须在 brief 之前。两个模式都要有 —— 平仓不挑
     heartbeat 还是 briefing 那一轮发生。"""
     for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
         k = keys(mode)
@@ -105,7 +105,7 @@ def test_close_reconcile_runs_after_fills_and_before_brief():
 
 
 def test_watchlist_sync_runs_after_close_reconcile():
-    """平仓自动加回自选 (2026-08-13) 的判据是 close_reconcile 落的
+    """平仓自动加回自选的判据是 close_reconcile 落的
     exit_info.closed_at —— 排在它之前, 平仓那一轮就加不回去, 白等下一轮
     (heartbeat 6h / briefing 一天)。两个模式都要有: 平仓不挑哪一轮发生。"""
     for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
@@ -116,17 +116,24 @@ def test_watchlist_sync_runs_after_close_reconcile():
 def test_lot_reconcile_runs_after_fills_and_before_brief():
     """买入落账要读事件流的 order_id → 必须在 fills 之后; brief 的预算行/集中度
     读 lots → 必须在 brief 之前。两个模式都要有 —— 成交不挑 heartbeat 还是
-    briefing 那一轮发生 (2026-08-06 AAOI/INTC 各漏一天就是没人负责这一步)。"""
+    briefing 那一轮发生。"""
     for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
         k = keys(mode)
         assert k.index("lots") > k.index("fills"), mode
         assert k.index("lots") < k.index("brief"), mode
 
 
+def test_autopaint_runs_after_watchlist_steps_and_before_brief():
+    """New stubs must be visible before detached card agents are launched."""
+    for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
+        planned = keys(mode)
+        assert planned.index("autopaint") > planned.index("watchlist_sync"), mode
+        assert planned.index("autopaint") > planned.index("watchlist_migrate"), mode
+        assert planned.index("autopaint") < planned.index("brief"), mode
+
+
 def test_read_only_downgrades_state_writers_to_dry_run(monkeypatch):
-    """"预览"能改交易状态本身就是设计错误 (2026-07-28 ET 13:56 事故)。
-    close_reconcile / lot_reconcile 是 --read-only 之后会写 state 的两步,
-    必须一起降级 —— 漏掉任何一个, 人工预览就会往台账里写东西。"""
+    """Every state writer in a read-only pipeline must become a dry run."""
     seen = {}
 
     def fake_run_stage(s, extra=None, drop=None):
@@ -140,10 +147,11 @@ def test_read_only_downgrades_state_writers_to_dry_run(monkeypatch):
 
     assert "--dry-run" in seen["reconcile"]
     assert "--dry-run" in seen["lots"]
+    assert "--dry-run" in seen["autopaint"]
 
 
 def test_postclose_refuses_mid_session_and_alerts(monkeypatch):
-    """冬令时自检 (2026-08-05): postclose 在盘中被触发 = DST 换季 cron 没改。
+    """冬令时自检: postclose 在盘中被触发 = DST 换季 cron 没改。
     kline 守卫只会让它静默 no-op —— 静默的 no-op 就是"这一步不存在",
     必须变成会响的错误: TG 告警 + 中止 rc=3, 每天响到改为止。"""
     sent, ran = [], []
@@ -158,7 +166,7 @@ def test_postclose_refuses_mid_session_and_alerts(monkeypatch):
 
 
 def test_migrate_always_carries_apply():
-    """--apply 缺失 = 只检测不写。2026-07-25 前两个任务都漏了它。"""
+    """--apply 缺失 = 只检测不写。"""
     for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
         s = next(x for x in pipeline.plan(mode) if x.key == "watchlist_migrate")
         assert "--apply" in s.argv, mode
@@ -430,7 +438,7 @@ def test_eod_ledgers_run_premarket(monkeypatch):
 
 
 def test_watchlist_sync_runs_both_modes_after_positions():
-    """已持仓自动移出分组 (2026-08-05): 判据 broker.qty≠0, 必须在 positions 刷新
+    """已持仓自动移出分组: 判据 broker.qty≠0, 必须在 positions 刷新
     之后 — 排前面 = 拿旧 qty 判候选资格; 进 heartbeat = 成交后 ≤6h 清理, 不等 18:30。"""
     for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
         k = keys(mode)

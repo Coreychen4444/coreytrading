@@ -20,11 +20,10 @@
     zones.no_chase_above  → PRICE_UP    note "nochase" (仅正股, **两桶都画**)
       = 当前 regime 的追价上限 (用户)。上穿 = 从这儿往上不追市价
       (Rule #11), 挂着的 zone 限价单照旧。**非 pin**: 它是本 regime 内的参与边界,
-      与 trim/z1 同类, 不是状态转移轴 —— 已在上方时按常规错侧规则跳过, 回落
-      自动重挂。撞价两种 (都由 collapse_same_price 让位并播报, 价位仍有线):
+      与 trim/z1 同类, 不是状态转移轴。它仍会随现价翻向而持续保留。撞价两种
+      (都由 collapse_same_price 让位并播报, 价位仍有线):
       `gate == no_chase` 是正常设计(「在追价上限处确认突破」); 单调律允许
-      `no_chase == trim 下沿`(live LITE 960 / META 593.6, 但那两张是 watchlist
-      卡 —— trim 线只画在持仓桶, 所以这一撞当前只可能发生在持仓卡上)。
+      `no_chase == trim 下沿`; trim 线只画在持仓桶, 所以后一种碰撞只会出现在持仓卡。
     zones.trim_zone[0]    → PRICE_UP    note "trim"  (仅正股)
     期权合约 G-01 下一档   → PRICE_UP    note "g01"  (lot cost×2/3/4 中高于现 mark
       的最低档; 全 lot 取 min = 下一个会响的档)
@@ -69,11 +68,9 @@ reminders < brief 被测试钉死(brief 必须最后) → 画线用上一轮 gua
 价位同而 note 不同(授权变了/行使出组/legacy 迁移) → DEL+ADD 换血, note 也是对账对象。
 get 失败 → **整轮放弃**(盲写会产生重复), 不做半份同步。
 
-现价侧过滤: PRICE_UP 只挂在现价**上方**, PRICE_DOWN 只挂现价**下方**——
-已在触发侧的线 = 设置即噪音(首版 dry-run 实测: 修复路径的已收复 gate 全在
-现价下方)。错侧线本轮丢弃, 价格回到另一侧后**下一轮对账自动重挂**
-(随 pipeline ≤6h 粒度自动重新武装)。**pin 线例外: 翻方向而不是丢弃**(见上)。
-snapshot 失败 → 跳过过滤, 错侧 ADD 由服务端拒绝兜底(单条报错不阻塞整轮)。
+现价定向: 线在现价上方使用 PRICE_UP, 在现价下方使用 PRICE_DOWN。
+价格穿越后提醒线翻向而不是消失, 继续表达回头穿越这一事件。`pin` 只控制
+每票数量上限, 不再决定一条线是否持续存在。Snapshot 缺失时保留初始方向。
 
 频率 ONCE_A_DAY(每级每天最多响一次), session 默认含盘前盘后(gap 也响)。
 纪律: 提醒 = 情报/监控层通知, 不是授权 —— 响了之后做什么, 看卡片和手册。
@@ -234,9 +231,9 @@ def _next_gate(body: dict):
 
 
 def _pinned_gate_lines(ticker: str, body: dict) -> List[Dict]:
-    """两条常驻 gate 线(cur/next)。`pin` = 不随现价消失、不被每票上限裁掉。
+    """两条 gate 轴线(cur/next)。`pin` = 不被每票上限裁掉。
 
-    初始 type 一律 PRICE_UP, 真方向由 `side_filter` 按现价改写 —— 这里拿不到
+    初始 type 一律 PRICE_UP, 真方向由 `orient_sides` 按现价改写 —— 这里拿不到
     行情(纯函数, 价格在 sync() 里才拉), 也不该拿: 侧向是**一个**地方的事。
     """
     out: List[Dict] = []
@@ -258,14 +255,12 @@ def _no_chase_line(ticker: str, zones: dict) -> List[Dict]:
     快速穿过、且穿过后行为要立刻改变的那条 (上穿 = 不追市价, Rule #11)。
     heartbeat 6h 之间就是它最常被穿的窗口, 正是本模块存在的理由。
 
-    **画的是 current regime 那条, 不是 next_regime 的**—— 同一个洞
-    entry_guard  修过一次 (COHR: 当前 339 / next 374, 差 10%,
-    块上只印了还没生效的 374)。这里天然只读 `agent.zones`, 而 zones 恒 = 当前
-    regime 的那套; 写在这儿是为了让下一个人别顺手把 next 的也加上。
+    **画的是 current regime 那条, 不是 next_regime 的**。这里天然只读
+    `agent.zones`, 而 zones 恒等于当前 regime 的配置; 不得把尚未生效的 next
+    no-chase 线混进来。
 
-    **不 pin**: pin 的语义是"状态转移轴的两个端点"(gate), 而 no_chase 是本
-    regime 内的参与上界, 与 trim/z1 同类 —— 已在其上方时按常规错侧规则跳过,
-    回落后下一轮自动重挂。
+    **不 pin**: pin 只表示在每票数量上限里保留 gate。No-chase 与其他线一样
+    随现价翻向, 不会在价格穿越后消失。
     """
     nc = coerce_float(zones.get("no_chase_above"))
     return [_line(ticker, "nochase", "PRICE_UP", nc)] if nc else []
@@ -457,34 +452,22 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
     return out, notes
 
 
-def side_filter(desired: List[Dict], prices: Dict[str, float]) -> Tuple[List[Dict], List[str]]:
-    """现价侧过滤(纯函数)。价格缺失的票不过滤(服务端拒绝兜底)。
+def orient_sides(desired: List[Dict], prices: Dict[str, float]) -> Tuple[List[Dict], List[str]]:
+    """Orient every reminder around the latest price without dropping lines.
 
-    **pin 线(两条常驻 gate)翻方向, 不丢弃**(用户): gate 在现价下方
-    = 失守线(PRICE_DOWN), 在上方 = 突破/收复线(PRICE_UP)。所以"错侧"对它不成立 —
-    穿越 gate 这件事本身在两个方向上都是状态事件。翻转产出新 dict, 不改入参。
+    A level above market is an upward-crossing reminder; a level at or below
+    market is a downward-crossing reminder. Flips create new dictionaries and do
+    not mutate the caller's desired-line objects. Missing snapshots pass through.
     """
     kept, notes = [], []
     for d in desired:
         lp = prices.get(d["code"])
         if lp:
-            wrong = ((d["type"] == "PRICE_UP" and d["value"] <= lp)
-                     or (d["type"] == "PRICE_DOWN" and d["value"] >= lp))
-            if wrong and d.get("pin"):
-                flipped = "PRICE_DOWN" if d["value"] <= lp else "PRICE_UP"
+            wanted = "PRICE_DOWN" if d["value"] <= lp else "PRICE_UP"
+            if wanted != d["type"]:
                 notes.append(f"{d['ticker']}: {d['note']} {d['value']:g} 现价 {lp:g}"
-                             f" — 常驻线翻向 {flipped}")
-                d = {**d, "type": flipped}
-                kept.append(d)
-                continue
-            if d["type"] == "PRICE_UP" and d["value"] <= lp:
-                notes.append(f"{d['ticker']}: {d['kind']} {d['value']:g} 已在现价 {lp:g} 下方"
-                             " — 跳过(回落后自动重挂)")
-                continue
-            if d["type"] == "PRICE_DOWN" and d["value"] >= lp:
-                notes.append(f"{d['ticker']}: {d['kind']} {d['value']:g} 已在现价 {lp:g} 上方"
-                             " — 跳过(回升后自动重挂)")
-                continue
+                             f" — 翻向 {wanted}(线常驻不丢)")
+                d = {**d, "type": wanted}
         kept.append(d)
     return kept, notes
 
@@ -492,9 +475,8 @@ def side_filter(desired: List[Dict], prices: Dict[str, float]) -> Tuple[List[Dic
 def collapse_same_price(desired: List[Dict]) -> Tuple[List[Dict], List[str]]:
     """同 (code, type, 价位) 只能有一条服务端提醒 → 按 kind 优先级留一条(纯函数)。
 
-    必须在 `side_filter` **之后**跑: 定向前 gate:cur 是 PRICE_UP、卡 stop 是
-    PRICE_DOWN(不同 key), 翻向后才可能撞上 —— NBIS 实况 stop 175.1 == repair_gate
-    175.1(这张卡本身违反 bfloor_buf 的 0.5N 缓冲, entry_guard 已在 advisory 提醒)。
+    必须在 `orient_sides` **之后**跑: 定向前 gate:cur 是 PRICE_UP、卡 stop 是
+    PRICE_DOWN(不同 key), 翻向后才可能撞上。
 
     此前撞了没人管: `plan_ops` 的 `want = {key: d for d in desired}` 是**后者覆盖**,
     而 desired 按优先级排序 ⇒ 低优先级的 gate 反而覆盖掉 stop, 且一声不响
@@ -609,8 +591,8 @@ def _sync(dry_run: bool) -> Dict:
                     if lp:
                         prices[str(row.get("code"))] = float(lp)
             else:
-                skip_notes.append(f"snapshot 失败 ({sdf}) — 跳过侧过滤, 错侧 ADD 由服务端拒绝兜底")
-        desired, side_notes = side_filter(desired, prices)
+                skip_notes.append(f"snapshot 失败 ({sdf}) — 保留初始方向, 由服务端校验兜底")
+        desired, side_notes = orient_sides(desired, prices)
         skip_notes.extend(side_notes)
         desired, dup_notes = collapse_same_price(desired)   # 翻向后才可能撞价
         skip_notes.extend(dup_notes)

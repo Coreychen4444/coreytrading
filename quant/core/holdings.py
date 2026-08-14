@@ -83,6 +83,26 @@ def live_tickers(doc: dict) -> set[str]:
 UNMANAGED_ROLES = frozenset({"commemorative_hold"})
 
 
+REFERENCE_ROLES = frozenset({"volume_reference"})
+
+
+def is_reference_role(role) -> bool:
+    """Return whether a flattened instrument role is reference-only."""
+    return role in REFERENCE_ROLES
+
+
+def is_traded(body: dict) -> bool:
+    """Return whether a card represents a tradable instrument.
+
+    Reference instruments may provide quotes, volume or sector context, but they
+    intentionally have no thesis, zones or entry plan. This predicate is separate
+    from ``is_managed``: an unmanaged position is real exposure outside the
+    discipline engine, while a reference instrument is not traded at all.
+    """
+    role = ((body or {}).get("instrument") or {}).get("role")
+    return not is_reference_role(role)
+
+
 def is_managed(body: dict) -> bool:
     """这个仓位参不参与交易管理与播报。
 
@@ -118,7 +138,7 @@ def derive_tier(ticker: str, cards: dict) -> tuple[str, str]:
     if role in UNMANAGED_ROLES:
         return "base", f"instrument.role={role} → 结构豁免层"
     return "position", ("默认层 — base 只给结构豁免 (holdings.UNMANAGED_ROLES); "
-                        "core/trading 已于 2026-07-25 并入 position")
+                        "旧 core/trading 层已并入 position")
 
 
 def lot_qty(body: dict) -> float:
@@ -159,6 +179,35 @@ def flat_with_lots(doc: dict) -> list[str]:
     live = live_tickers(doc)
     return [t for t, body in (doc.get("tickers") or {}).items()
             if t not in live and lot_qty(body)]
+
+
+def cardless_tickers(positions_doc: dict, watchlist_doc: dict) -> list[str]:
+    """Return stock cards that should have zones but do not.
+
+    Eligible candidates are listed watchlist entries and live positions. Option
+    contracts are excluded because their structure is anchored to the underlying
+    stock card. Reference instruments and unmanaged positions are also excluded.
+    Existing zones terminate the condition naturally, so no separate completion
+    flag is needed.
+    """
+    out: set[str] = set()
+    for doc, live_only in ((watchlist_doc, False), (positions_doc, True)):
+        tickers = (doc or {}).get("tickers") or {}
+        live = live_tickers(doc or {}) if live_only else None
+        for ticker, body in tickers.items():
+            if not ticker.isalpha():
+                continue
+            if live is not None:
+                if ticker not in live:
+                    continue
+            elif (str(body.get("status") or "") != "watching"
+                  or body.get("moomoo_listed") is False):
+                continue
+            if not is_managed(body) or not is_traded(body):
+                continue
+            if not ((body.get("agent") or {}).get("zones")):
+                out.add(ticker)
+    return sorted(out)
 
 
 def underlying_cards_missing_zones(doc: dict) -> list[str]:

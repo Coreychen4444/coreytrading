@@ -26,8 +26,8 @@ from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, earnings, sizing, structure  # noqa: E402  组合占用 + 财报缩仓 + gate 结构完整性
 from quant.core.holdings import (
-    UNMANAGED_ROLES, flat_with_lots, is_managed, live_tickers, lot_gap, lot_qty,
-    managed_tickers, underlying_cards_missing_zones)
+    UNMANAGED_ROLES, flat_with_lots, is_managed, is_reference_role, live_tickers,
+    lot_gap, lot_qty, managed_tickers, underlying_cards_missing_zones)
 from quant.core.io_json import atomic_write_json, iter_jsonl
 from quant.core.num import coerce_float as normalize_num
 from quant.core.occ import parse_occ
@@ -861,7 +861,7 @@ def index_risk() -> List[Dict]:
 
 def move_trigger_type(pct: float) -> str:
     """方向进 key。同一 ticker 的涨与跌是两个事件, 共用一个 latch 会让后一个被
-    前一个的 24h 冷却吃掉: 2026-08-04 实证 — 某标的白天 +9.43% 合法触发, 当晚自家财报
+    前一个的 24h 冷却吃掉: 某标的白天 +9.43% 合法触发, 当晚自家财报
     -7.5% 时条件仍"持续成立" → should_emit 直接 False, 夜盘那记跳空一声没有。
     (那晚真正让它没被吃掉的, 反而是 change_pct 用错基准算出的假 +1.01%。)"""
     return "adverse_move_up" if pct > 0 else "adverse_move_down"
@@ -1661,7 +1661,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
     # cap>0 的卡 (与 z1 画线  补洞同判据 — 无授权卡响铃只会邀请未授权
     # 入场)。24h 边沿冷却与持仓告警共用同一份状态。
     for wb in watchlist_basic:
-        if str(wb.get("status")) != "watching" or wb.get("role") == "volume_reference":
+        if str(wb.get("status")) != "watching" or is_reference_role(wb.get("role")):
             continue
         cap = normalize_num(wb.get("cap_pct_nav"))
         px = normalize_num(wb.get("price"))
@@ -1781,7 +1781,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
                     if ar["stop"] is not None else ar["stop_basis"])
         detail = (f"{tk} ⚠️ 单笔 at-risk 超顶: 止损打掉亏 ${ar['at_risk_usd']:,.0f} "
                   f"= {ar['pct_nav']:.1f}% NAV > cap ${ar['cap_usd']:,.0f} "
-                  f"({sizing.AT_RISK_CAP_FRAC * 100:g}% NAV, N1 2026-08-09) "
+                  f"({sizing.AT_RISK_CAP_FRAC * 100:g}% NAV, N1) "
                   f"[{stop_txt}] → 减 {ar['trim_units']} {unit_cn}至合规, 或书面 override 进 journal")
         zone_signals.append(detail)
         if emit_gate(tk, "at_risk_breach"):

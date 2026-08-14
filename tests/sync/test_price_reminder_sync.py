@@ -47,7 +47,7 @@ def test_desired_lines_positions_and_watchlist():
 
 
 def test_notes_are_owned_vocabulary():
-    """note = 词表本身 (2026-08-06 定版, cc: 前缀废): 裸 kind / stop:来源 / z1:预算,
+    """note = 词表本身 (cc: 前缀已废): 裸 kind / stop:来源 / z1:预算,
     全部能被 _owned_note 认领; 自定义文字/空 = 手动。"""
     lines, _ = prs.desired_lines(POS, WL, TODAY)
     assert lines and all(prs._owned_note(d["note"]) for d in lines)
@@ -63,7 +63,7 @@ def test_notes_are_owned_vocabulary():
 
 
 def test_z1_note_carries_budget_for_today_members():
-    """Today 白名单成员的 z1 备注带 比例+起步预算 (2026-08-06): 响铃即见
+    """Today 白名单成员的 z1 备注带比例与起步预算: 响铃即见
     "这轮能下多少"; 非成员保持裸 z1 = 无授权观察线。"""
     lines, _ = prs.desired_lines(POS, WL, TODAY, budgets={"INTC": "2%:450"})
     notes = {(d["ticker"], d["kind"]): d["note"] for d in lines}
@@ -167,7 +167,7 @@ def test_z1_budgets_uses_actual_cap_and_nav():
 
 
 def test_z1_budgets_closed_position_card_does_not_shadow_watchlist():
-    """AAOI 2026-08-06 实证: positions 有 closed 残卡 (qty 0 无 regime) 时,
+    """Positions 有 closed 残卡 (qty 0 无 regime) 时,
     授权真源是 watchlist 卡 — 卡源判别式 = live_tickers (qty), 不是 dict 有无 key。
     修前: 死卡遮真源 → 组里有授权、备注却裸线。"""
     pos = {"tickers": {"AAOI": {"status": "closed", "broker": {"qty": 0}, "agent": {}}}}
@@ -241,24 +241,30 @@ def test_plan_ops_add_del_keep_and_manual_untouched():
     assert kept == 1 and kept_manual == 1
 
 
-def test_side_filter_drops_already_triggered_side():
+def test_orient_sides_never_drops_a_line():
     desired = [
         {"code": "US.INTC", "ticker": "INTC", "kind": "gate", "type": "PRICE_UP",
-         "value": 92.5, "note": "gate"},   # 现价 100 → 已收复, 挂了就是噪音
+         "value": 92.5, "note": "gate"},
         {"code": "US.INTC", "ticker": "INTC", "kind": "z1", "type": "PRICE_DOWN",
-         "value": 84.0, "note": "z1"},     # 现价下方 → 有效
+         "value": 84.0, "note": "z1"},
         {"code": "US.NBIS", "ticker": "NBIS", "kind": "trim", "type": "PRICE_UP",
-         "value": 226.8, "note": "trim"},  # 现价 217 上方 → 有效
+         "value": 226.8, "note": "trim"},
     ]
-    kept, notes = prs.side_filter(desired, {"US.INTC": 100.0, "US.NBIS": 217.0})
-    assert [(d["ticker"], d["kind"]) for d in kept] == [("INTC", "z1"), ("NBIS", "trim")]
-    assert any("回落后自动重挂" in n for n in notes)
+    kept, notes = prs.orient_sides(desired, {"US.INTC": 100.0, "US.NBIS": 217.0})
+    assert len(kept) == len(desired)
+    assert [(d["ticker"], d["kind"], d["type"]) for d in kept] == [
+        ("INTC", "gate", "PRICE_DOWN"),
+        ("INTC", "z1", "PRICE_DOWN"),
+        ("NBIS", "trim", "PRICE_UP"),
+    ]
+    assert any("翻向" in note for note in notes)
+    assert desired[0]["type"] == "PRICE_UP"
 
 
-def test_side_filter_passes_through_when_price_missing():
+def test_orient_sides_passes_through_when_price_missing():
     desired = [{"code": "US.X", "ticker": "X", "kind": "gate", "type": "PRICE_UP",
                 "value": 10.0, "note": "gate"}]
-    kept, notes = prs.side_filter(desired, {})
+    kept, notes = prs.orient_sides(desired, {})
     assert kept == desired and notes == []
 
 
@@ -314,32 +320,33 @@ def test_current_gate_falls_back_to_regime_history():
     assert [(d["note"], d["value"]) for d in lines] == [("gate:cur", 98.0)]
 
 
-def test_pinned_gates_flip_direction_instead_of_vanishing():
-    """两条常驻 gate 不随现价消失, 换方向: 上方=突破线, 下方=失守线。
-    reclaim 梯不在此列 —— 收复即完成使命, 照旧丢弃。"""
+def test_all_gate_lines_flip_direction_instead_of_vanishing():
+    """Pinned and ordinary gate lines both remain visible after a crossing."""
     desired = [
         {"code": "US.NVDA", "ticker": "NVDA", "kind": "gate", "type": "PRICE_UP",
          "value": 204.0, "note": "gate:cur", "pin": True},    # 现价 220 上方 → 失守线
         {"code": "US.NVDA", "ticker": "NVDA", "kind": "gate", "type": "PRICE_UP",
          "value": 228.0, "note": "gate:next", "pin": True},   # 现价下方 → 突破线不变
         {"code": "US.NVDA", "ticker": "NVDA", "kind": "gate", "type": "PRICE_UP",
-         "value": 196.0, "note": "gate"},                     # reclaim 梯 → 照旧丢
+         "value": 196.0, "note": "gate"},
     ]
-    kept, notes = prs.side_filter(desired, {"US.NVDA": 220.0})
+    kept, notes = prs.orient_sides(desired, {"US.NVDA": 220.0})
     assert [(d["note"], d["type"]) for d in kept] == [
-        ("gate:cur", "PRICE_DOWN"), ("gate:next", "PRICE_UP")]
+        ("gate:cur", "PRICE_DOWN"), ("gate:next", "PRICE_UP"),
+        ("gate", "PRICE_DOWN")]
     assert any("翻向" in n for n in notes)
     assert desired[0]["type"] == "PRICE_UP"          # 入参不被就地改写
 
-    # 反向: 现价跌到两条 gate 之下 → cur 变回收复线, next 也是上行线
-    kept2, _ = prs.side_filter(desired, {"US.NVDA": 190.0})
+    # If market falls below every level, all reminders point upward.
+    kept2, _ = prs.orient_sides(desired, {"US.NVDA": 190.0})
     assert {(d["note"], d["type"]) for d in kept2} == {
         ("gate:cur", "PRICE_UP"), ("gate:next", "PRICE_UP"), ("gate", "PRICE_UP")}
 
-    # 已越过 next gate 但未 ×2 确认 (AAOI 133 @ 139.8 实况): 掉回去就清零, 必须有线
-    kept3, _ = prs.side_filter(desired, {"US.NVDA": 240.0})
+    # If market rises above every level, all reminders point downward.
+    kept3, _ = prs.orient_sides(desired, {"US.NVDA": 240.0})
     assert [(d["note"], d["type"]) for d in kept3] == [
-        ("gate:cur", "PRICE_DOWN"), ("gate:next", "PRICE_DOWN")]
+        ("gate:cur", "PRICE_DOWN"), ("gate:next", "PRICE_DOWN"),
+        ("gate", "PRICE_DOWN")]
 
 
 def test_pinned_gates_survive_the_per_ticker_cap():
@@ -550,14 +557,15 @@ def test_no_chase_line_is_drawn_in_both_buckets():
     assert len("nochase") <= 10, "moomoo note 上限 10 字符"
 
 
-def test_no_chase_is_not_pinned_and_follows_the_wrong_side_rule():
-    """非 pin: 已在上方 = 常规错侧跳过 (回落自动重挂), **不**像 gate 那样翻向。
-    pin 的语义是状态转移轴的端点; no_chase 是本 regime 内的参与上界。"""
+def test_no_chase_is_not_pinned_but_does_not_disappear():
+    """No-chase consumes the regular cap but flips direction after crossing."""
     lines, _ = prs.desired_lines(_NC_POS, {"tickers": {}}, TODAY)
     nc = [d for d in lines if d["kind"] == "nochase"]
     assert nc and not any(d.get("pin") for d in nc)
-    kept, notes = prs.side_filter(nc, {"US.MRVL": 230.0})     # 现价已在上限之上
-    assert kept == [] and any("回落后自动重挂" in n for n in notes)
+    kept, notes = prs.orient_sides(nc, {"US.MRVL": 230.0})
+    assert [(d["kind"], d["type"], d["value"]) for d in kept] == [
+        ("nochase", "PRICE_DOWN", 222.0)]
+    assert any("翻向" in note for note in notes)
 
 
 def test_no_chase_equal_to_trim_low_collapses_to_trim_and_says_so():

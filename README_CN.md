@@ -40,6 +40,26 @@ flowchart LR
 
 ---
 
+## 定位——这是什么系统
+
+一句话：**把结构交易的常规工具装配成一台状态机。** 项目不宣称发明 volume profile、摆动结构、ATR 风险归一化、trailing exit、分数 Kelly 上限或预注册；价值在于这些标准件如何连接、分层和验证。
+
+| 标准组件 | 在本系统中的职责 |
+|---|---|
+| Volume profile、pivot 与摆动结构 | 发现 zone 和状态转移轴 |
+| ATR 归一化距离与结构 stop | 把不同价格尺度转换到可比较的风险尺度 |
+| 波动率、gross 与单标的上限 | 约束组合和仓位风险 |
+| 预注册与负面结果记录 | 防止看到结果后再选择参数 |
+
+框架不推断市场主体意图，也不依赖私有词汇。它只记录可观察的 acceptance、rejection、breakdown 与 recovery，并遵守四条装配原则：
+
+1. Gate 推动整张结构图迁移，不只是修改一个仓位数字；
+2. 授权、择时、sizing 和退出保持分层，各有单一真源；
+3. 没有代码强制点和会失败测试的规则，不算运营规则；
+4. 查看私人结果前先锁定判据，被否决的提案保留在私人研究记录中。
+
+---
+
 ## Gate 哲学——系统根基
 
 Gate 是系统的**状态转移轴**：市场反复作出决策的标志性价格位。下降、修复、震荡和上升结构里都可能存在 gate。Zone、regime、cap、阶梯、退出规则、授权清单和运营报告都由它向下派生。
@@ -477,6 +497,56 @@ TradingOps 是技术面优先、规则驱动、半自动化的框架，不是端
 - 订单与成交可以同步回 state、ledger、journal 和 performance review。
 
 真实持仓、watchlist、fills、journal、active-universe cache、research、strategy、credential 和 account identifier 都有意从公开仓库移除。
+
+---
+
+## 优势与局限
+
+### 架构试图解决的问题
+
+| 优势 | 架构依据 |
+|---|---|
+| 一个数字只有一个来源 | 入场额度统一经过同一约束漏斗，计划、报告、提醒备注和授权清单共同复用。 |
+| 规则能够明确失败 | 分层、模块覆盖、路径有效性、state schema 与运营顺序都由可执行测试守住。 |
+| 把静默失效当产品风险 | 基础设施告警、dead-man state 和明确 dry-run 让数据缺失与自动化中断可见。 |
+| Research 不能直接控制 live path | Research 层隔离，合成机械件先测试，live module 禁止 import research。 |
+| 代码缺陷不能直接变成订单 | Canonical pipeline 只生成方案，不提交订单。 |
+
+### 它解决不了的问题
+
+- 不预测收益，不产出统一 alpha score，也不做 covariance optimization；
+- 日线确认与周期巡逻天然无法及时处理 intraday move 和 gap；
+- 结构 card 仍需要判断；自动启动 AI 分析不等于分析必然正确；
+- 小账户或高价 instrument 会受到整数交易单位的粗粒度影响；
+- Broker 集成本身不可直接移植；换 broker 通常需要重做 `quant/sync/` 边界；
+- 公开仓库不含私人 dataset、live performance history，也不证明默认参数适合其他用户。
+
+---
+
+## 适用场景与人群
+
+本框架更适合日线或周线 swing workflow：operator 能读 Python、持续维护结构 card、接受机械 VETO，并让最终执行保持人工复核。
+
+它不适合高频或日内交易、自动下单、市场中性组合优化、signal-to-buy 黑盒，也不适合希望获得收益预测或宣传胜率的人。
+
+---
+
+## 复用前须知
+
+1. 在针对自己的账户、instrument 和亏损承受力完成论证前，把所有风险常量视为 placeholder；
+2. 只根据 `trade/` 的 example 生成 ignored runtime file，严禁提交真实持仓、账户历史或 credential；
+3. Session 内查看报告使用 `--read-only`，state writer 与 detached agent 先走 dry-run；
+4. 修改会动钱的参数前重跑对应私人研究，并在查看结果前锁定判据；
+5. 在真实 runtime registry 中核实定时任务；磁盘上存在 prompt file 不代表已注册或会触发；
+6. Close-dependent transition 只能使用 completed bar，每条告警链都要做端到端验证。
+
+---
+
+## 免责声明
+
+本仓库是软件与研究基础设施，不构成投资建议或投顾服务。交易可能导致重大或全部本金损失。历史与回测结果不保证未来表现；公开脚手架有意不包含业绩声明，也不推荐交易任何 instrument。
+
+代码按 MIT License 原样提供，不含担保。程序缺陷、陈旧数据、broker 服务不可用、task 配置错误或结构分析错误都可能造成财务损失。任何把框架连接到真实资金的人，都必须自行验证，并自行承担当地法律、税务、broker 条款与每次执行决策的责任。
 
 ---
 

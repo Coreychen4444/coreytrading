@@ -46,6 +46,7 @@ from quant.core import env  # noqa: F401  (.env → os.environ)
 from quant.core import technical  # noqa: E402
 from quant.core.earnings import (# noqa: E402
     MIN_PRIOR, POOL_X_EARN, SHRINK_N0, shrink_ratio)
+from quant.core.holdings import is_traded  # noqa: E402
 from quant.core.io_json import atomic_write_json, iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
@@ -127,8 +128,7 @@ def card_tickers() -> List[str]:
         base = occ["underlying"] if occ else tk
         if not base.isalpha():
             continue
-        inst = body.get("instrument") or {}
-        if inst.get("role") == "volume_reference":  # SPY/QQQ/SMH: 不交易, 无财报语义
+        if not is_traded(body):
             continue
         broker = body.get("broker")
         live = bool(coerce_float((broker or {}).get("qty")))
