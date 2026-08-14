@@ -1,4 +1,4 @@
-# TradingOps — Agent Entry Point
+# coreytrading — Agent Entry Point
 
 This is a compatibility entry point, not a second project contract.
 

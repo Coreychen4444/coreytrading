@@ -1,4 +1,4 @@
-# TradingOps — AI 搭建与基础设施指南
+# coreytrading — AI 搭建与基础设施指南
 
 [English](AI_BOOTSTRAP.md)
 

@@ -1,6 +1,6 @@
-# TradingOps
+# coreytrading
 
-TradingOps 是一套开源、技术面优先的美股交易运营框架：把 broker 与市场数据转换成确定性的状态、结构授权、风险预算、进出场计划、报告和需要人工复核的订单方案。
+coreytrading 是一套开源、技术面优先的美股交易运营框架：把 broker 与市场数据转换成确定性的状态、结构授权、风险预算、进出场计划、报告和需要人工复核的订单方案。
 
 > **操作边界：** 机器决定“是否允许、最多多少”，人决定“是否执行”并亲自完成执行。Canonical pipeline 永远不会自动下单。
 
@@ -486,7 +486,7 @@ Broker-derived block 只允许 `quant/sync/` 写入。Paths、schemas、locked a
 
 ## 系统边界
 
-TradingOps 是技术面优先、规则驱动、半自动化的框架，不是端到端 ML strategy，也不是 autonomous execution bot。
+coreytrading 是技术面优先、规则驱动、半自动化的框架，不是端到端 ML strategy，也不是 autonomous execution bot。
 
 - 价格结构驱动 `zone / gate / regime / cap` 授权。
 - Fundamentals、research、earnings 和 macro 主要是 information input；明确的 event-risk rule 可以调整 size。

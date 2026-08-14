@@ -1,6 +1,6 @@
-# TradingOps
+# coreytrading
 
-TradingOps is an open-source, technical-first US-equity trading operations framework. It turns broker and market data into deterministic state, structural authorization, risk budgets, entry and exit plans, reports, and human-reviewed order instructions.
+coreytrading is an open-source, technical-first US-equity trading operations framework. It turns broker and market data into deterministic state, structural authorization, risk budgets, entry and exit plans, reports, and human-reviewed order instructions.
 
 > **Operating boundary:** the machine decides whether an action is authorized and how large it may be; a human decides whether to act and performs execution. The canonical pipeline never submits orders.
 
@@ -486,7 +486,7 @@ The public `trade/` tree contains only README contracts and synthetic `*.example
 
 ## System boundary
 
-TradingOps is a technical-first, rule-driven, semi-automated framework—not an end-to-end ML strategy and not an autonomous execution bot.
+coreytrading is a technical-first, rule-driven, semi-automated framework—not an end-to-end ML strategy and not an autonomous execution bot.
 
 - Structural price evidence drives `zone / gate / regime / cap` authorization.
 - Fundamentals, research, earnings and macro context are information inputs; explicit event-risk rules may adjust size.

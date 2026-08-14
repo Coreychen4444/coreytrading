@@ -12,6 +12,10 @@ import tokenize
 ROOT = Path(__file__).resolve().parents[1]
 DATE = re.compile(r"(?<!\d)20\d{2}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?(?!\d)")
 PERSONAL_TOKEN = re.compile("co" + "rey", re.IGNORECASE)
+BRAND_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])" + "co" + r"reytrading(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 EXCLUDED_PARTS = {".git", "." + "co" + "reytrading-sync", ".pytest_cache", "__pycache__"}
 TEXT_SUFFIXES = {".md", ".py", ".json", ".jsonl", ".toml", ".txt", ".yaml", ".yml", ".sh"}
 
@@ -37,16 +41,27 @@ def _docstring_spans(tree: ast.AST) -> set[tuple[int, int, int, int]]:
     return spans
 
 
-def test_public_paths_and_text_do_not_contain_personal_token():
+def _contains_personal_token_outside_brand(value: str) -> bool:
+    return PERSONAL_TOKEN.search(BRAND_TOKEN.sub("", value)) is not None
+
+
+def test_brand_exception_is_exact():
+    assert not _contains_personal_token_outside_brand("coreytrading")
+    assert not _contains_personal_token_outside_brand("COREYTRADING_STATE_LOCK_PATH")
+    assert _contains_personal_token_outside_brand("co" + "rey")
+    assert _contains_personal_token_outside_brand("co" + "reytradingextra")
+
+
+def test_public_paths_and_text_do_not_contain_personal_token_outside_brand():
     violations = []
     for path in _public_files():
         relative = path.relative_to(ROOT).as_posix()
-        if PERSONAL_TOKEN.search(relative):
+        if _contains_personal_token_outside_brand(relative):
             violations.append(relative)
         if path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8")
-        if PERSONAL_TOKEN.search(text):
+        if _contains_personal_token_outside_brand(text):
             violations.append(relative)
     assert violations == []
 

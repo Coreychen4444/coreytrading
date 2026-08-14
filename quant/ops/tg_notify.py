@@ -152,7 +152,7 @@ def main():
     args = parser.parse_args()
 
     if args.test:
-        text = "TradingOps test ping ✓"
+        text = "coreytrading test ping ✓"
     elif args.stdin:
         text = sys.stdin.read().strip()
     elif args.message:

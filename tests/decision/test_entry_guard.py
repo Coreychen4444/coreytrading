@@ -296,8 +296,8 @@ def test_next_regime_marks_provisional_zones():
     assert "stop 100" in switch and "provisional" not in switch.split("stop 100")[1][:20]
 
 
-@pytest.mark.skipif(os.environ.get("TRADINGOPS_CHECK_LIVE_STATE") != "1",
-                    reason="set TRADINGOPS_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
+                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
 def test_gate_sits_above_the_current_regime_no_chase():
     """核心不变式: gate 是下一个状态的入口, 按定义在本 regime 的 no_chase 之上。
     两者放同一坐标系比大小 → gate 成立即 above_no_chase → VETO 死锁

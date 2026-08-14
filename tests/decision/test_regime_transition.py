@@ -325,8 +325,8 @@ def test_schema_caps_next_regime_at_the_confirmed_ceiling():
     assert any("cap_pct_nav must be numeric in" in e for e in errors)
 
 
-@pytest.mark.skipif(os.environ.get("TRADINGOPS_CHECK_LIVE_STATE") != "1",
-                    reason="set TRADINGOPS_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
+                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
 def test_live_last_regime_blocks_carry_cap_zero_and_a_coherent_gate():
     """活跃持仓的 `last_regime` = 下行分支: **cap 恒 0**+ 一条不与 stop 倒挂的修复 gate。
 
@@ -362,8 +362,8 @@ def test_live_last_regime_blocks_carry_cap_zero_and_a_coherent_gate():
     assert checked, "一张带 last_regime 的活跃卡都没有 — 判据可能挑错了 (检查静默为空)"
 
 
-@pytest.mark.skipif(os.environ.get("TRADINGOPS_CHECK_LIVE_STATE") != "1",
-                    reason="set TRADINGOPS_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
+                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
 def test_live_current_regime_caps_are_binary():
     """cap 二值不变量 (分类轴退役 + D7 存量迁移): 全书活跃卡的
     current_regime.cap_pct_nav ∈ {0, NOTIONAL_CAP} —— 出现第三个值 = 有人在

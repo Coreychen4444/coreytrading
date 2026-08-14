@@ -40,7 +40,7 @@ SCORES_PATH = JOURNALS_DIR / "scores.jsonl"
 TMP_DIR = ROOT / "tmp"
 HEARTBEAT_STATE_PATH = TMP_DIR / "heartbeat-state.json"
 
-STATE_LOCK_PATH = Path(os.environ.get("TRADINGOPS_STATE_LOCK_PATH",
+STATE_LOCK_PATH = Path(os.environ.get("COREYTRADING_STATE_LOCK_PATH",
                                       str(STATE_DIR / ".state.lock")))
 OPTION_PLANS_PATH = STATE_DIR / "option_plans.json"   # entry_guard 落, 两个 sync 纯读
 EXIT_GUARDS_PATH = STATE_DIR / "exit_guards.json"

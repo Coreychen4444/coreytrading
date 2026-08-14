@@ -198,8 +198,8 @@ def test_advisory_needs_a_gate_to_talk_about():
                           atr20=22.65, spot=599.12) == []
 
 
-@pytest.mark.skipif(os.environ.get("TRADINGOPS_CHECK_LIVE_STATE") != "1",
-                    reason="set TRADINGOPS_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
+                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
 def test_live_book_has_no_hard_violations():
     """真账本硬违规必须为空。advisory 允许非空 —— 它是待复核清单不是判决,
     2026-08-11 收盘时 INTC 一张在列 (gate 109.6 越过 lsh 103.66 达 0.75N)。"""

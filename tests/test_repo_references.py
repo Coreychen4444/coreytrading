@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 LIVE_TASKS = Path(os.path.expanduser("~/.claude/scheduled-tasks"))
-CHECK_LIVE_TASKS = os.environ.get("TRADINGOPS_CHECK_LIVE_TASKS") == "1"
+CHECK_LIVE_TASKS = os.environ.get("COREYTRADING_CHECK_LIVE_TASKS") == "1"
 
 # 三个跨切面守卫本身**大量引用路径当例子**（"移动前是 tests/test_pipeline.py"、
 # "放一个 quant/decision/options/foo.py 进来"），那些故意指向不存在的东西。
@@ -80,7 +80,7 @@ TASKS = {p.stem for p in (ROOT / "tasks").glob("*.md") if p.stem != "README"}
 
 
 @pytest.mark.skipif(not CHECK_LIVE_TASKS or not LIVE_TASKS.exists(),
-                    reason="set TRADINGOPS_CHECK_LIVE_TASKS=1 to compare local task copies")
+                    reason="set COREYTRADING_CHECK_LIVE_TASKS=1 to compare local task copies")
 @pytest.mark.parametrize("name", sorted(TASKS))
 def test_live_scheduled_task_matches_repo(name):
     """`tasks/` 是真源，live 副本必须逐字节一致。
@@ -100,7 +100,7 @@ def test_live_scheduled_task_matches_repo(name):
 
 
 @pytest.mark.skipif(not CHECK_LIVE_TASKS or not LIVE_TASKS.exists(),
-                    reason="set TRADINGOPS_CHECK_LIVE_TASKS=1 to inspect local task copies")
+                    reason="set COREYTRADING_CHECK_LIVE_TASKS=1 to inspect local task copies")
 def test_live_tasks_reference_only_existing_scripts():
     """live 副本里的每个脚本路径都要能跑到 —— 这是监控变黑最直接的失败模式。"""
     broken = []

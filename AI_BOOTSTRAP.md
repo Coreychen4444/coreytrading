@@ -1,4 +1,4 @@
-# TradingOps — AI Bootstrap and Infrastructure Guide
+# coreytrading — AI Bootstrap and Infrastructure Guide
 
 [中文版](AI_BOOTSTRAP_CN.md)
 

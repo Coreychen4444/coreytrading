@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 # unavoidable vendor side effect at a disposable location before any test
 # imports broker-facing modules. This also prevents tests from seeing a user's
 # real OpenD files or Claude task copies through HOME-relative paths.
-TEST_HOME = Path(tempfile.gettempdir()) / "tradingops-test-home"
+TEST_HOME = Path(tempfile.gettempdir()) / "coreytrading-test-home"
 TEST_HOME.mkdir(parents=True, exist_ok=True)
 os.environ["HOME"] = str(TEST_HOME)
-os.environ["TRADINGOPS_STATE_LOCK_PATH"] = str(TEST_HOME / "state.lock")
+os.environ["COREYTRADING_STATE_LOCK_PATH"] = str(TEST_HOME / "state.lock")

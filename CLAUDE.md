@@ -1,4 +1,4 @@
-# TradingOps — Project Agent Contract
+# coreytrading — Project Agent Contract
 
 This file is the complete project-level operating contract. Claude Code reads it directly; other coding agents enter through `AGENTS.md` and must then read this file in full before changing code, state, task prompts, schemas or trading behavior. It is deliberately detailed; do not replace it with a short repository summary.
 

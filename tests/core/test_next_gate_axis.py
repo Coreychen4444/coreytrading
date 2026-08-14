@@ -109,8 +109,8 @@ def test_structurally_exempt_layer_is_out():
         _doc(SPCX=_card(gate=None, role="commemorative_hold"))) == []
 
 
-@pytest.mark.skipif(os.environ.get("TRADINGOPS_CHECK_LIVE_STATE") != "1",
-                    reason="set TRADINGOPS_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
+                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
 def test_live_book_is_scanned_not_asserted_clean():
     """真账本上这条**允许**响 (2026-08-11 有 3 张缺) —— 这里只钉扫描不炸。"""
     import json
