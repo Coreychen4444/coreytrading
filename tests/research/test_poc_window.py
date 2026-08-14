@@ -1,9 +1,4 @@
-"""poc_window (round-2) 机械件验证 (合成数据)。
-
-本轮的全部意义在于**把自变量与因变量解耦**—— round-1 里 poc60 的 AUC 0.812 是
-"POC 与 label 共用同一份 profile" 的产物。所以这里钉的第一件事就是: label 只由
-**价格转折点**产生, 与 volume profile 无关。
-"""
+"""poc_window 机械件验证：label 与 volume-profile 自变量保持解耦。"""
 import pytest
 
 from quant.research import poc_window as pw
@@ -56,13 +51,10 @@ def test_label_source_is_price_only_not_volume():
         assert forbidden not in src, forbidden
 
 
-# ---------- 估计量一致性 (冒烟时抓到的真 bug) ----------
+# ---------- 估计量一致性 ----------
 
 def test_all_comparisons_run_on_the_common_scorable_subset():
-    """POC_MIN_SESSIONS 让 k=3/5 无读数; 点估计在全样本、CI 在子集 = 两个估计量。
-
-    冒烟实测点估计 −0.1603 落在自己的 CI [−0.039,−0.033] 之外, 正是这个错。
-    """
+    """POC 无读数时，点估计和 CI 必须使用同一个共同可评分子集。"""
     rows = []
     for k, poc in ((3, None), (5, None), (10, 1.0), (20, 2.0)):
         for lab, ticker in ((1, "A"), (0, "B")):
@@ -93,13 +85,10 @@ def _res(keep, switch):
 
 
 def test_failing_keep_criteria_drops_the_dimension():
-    # 文案  改已裁决态 (ledger R5): drop 分支 = 复算确认无待办;
-    # 两个 keep 分支 = 与已执行裁决相反, 必须标翻案警告而不是产出待办。
     a = pw.final_action(_res(keep=False, switch=True))
-    assert a["action"] == "drop_dimension" and "已裁决" in a["text"]
-    assert "无待办" in a["text"]
+    assert a["action"] == "drop_dimension" and "建议移除" in a["text"]
     for keep_res in (_res(keep=True, switch=True), _res(keep=True, switch=False)):
-        assert "与  已执行裁决" in pw.final_action(keep_res)["text"]
+        assert "production review" in pw.final_action(keep_res)["text"]
 
 
 def test_keep_plus_window_switch():

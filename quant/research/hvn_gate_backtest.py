@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HVN 锚定 gate vs pivot 簇 gate — 主回测 (预注册 hvn_gate_design.md, 已锁定)。
+"""HVN 锚定 gate vs pivot 簇 gate — 主回测 (预注册 private preregistration, 已锁定)。
 
 ## 为什么是一个衍生脚本而不是改 gate_backtest2
 预注册要求「原三种 kind 必须复现 round-2 的数字, 复现不了就中止」。这条纪律只有在
@@ -46,30 +46,23 @@ PREMIUM_TOL = 0.005            # 判据 2: expectancy 最多差 0.5pp
 FIRE_TOL = 0.15                # 判据 3: 触发率 ±15pp
 FALLBACK_MAX = 0.20            # 判据 4: 回退比例 ≤ 20%
 
-# ---------- 回归对照: round-2 报告原文 (tmp/backtest/gate2_report.md,) ----------
-# 复现不了 = 环境有问题 = 中止, 不带着可疑环境往下跑。
-ROUND2 = {
-    "n_episodes": 4670, "months": 362, "kish_n": 194.0,
-    "A_primary_T60": {"mean": 0.025, "median": -0.034, "p10": -0.118, "stop_rate": 0.57},
-    # cell -> (fire_rate, diff_mean, ci_lo, ci_hi)  [primary T+60, 报告表原文]
-    "cells": {
-        "swing_x1":       (1.00, -0.008, -0.015, -0.001),
-        "swing_x1_vol":   (0.98, -0.011, -0.018, -0.005),
-        "swing_x2":       (1.00, -0.009, -0.016, -0.002),
-        "swing_x2_vol":   (0.92, -0.014, -0.021, -0.008),
-        "ma60_x1":        (0.99, -0.011, -0.018, -0.005),
-        "ma60_x1_vol":    (0.98, -0.013, -0.020, -0.007),
-        "ma60_x2":        (0.98, -0.011, -0.018, -0.004),
-        "ma60_x2_vol":    (0.95, -0.014, -0.021, -0.008),
-        "cluster_x1":     (0.94, -0.008, -0.011, -0.005),
-        "cluster_x1_vol": (0.90, -0.012, -0.016, -0.008),
-        "cluster_x2":     (0.92, -0.009, -0.014, -0.005),
-        "cluster_x2_vol": (0.86, -0.014, -0.018, -0.009),
-    },
-}
-# 报告里的数字是**四舍五入到 0.1pp / 1%**印出来的, 所以比对容差就是那个印刷精度。
+# Private baseline values are loaded from an ignored JSON receipt. Public source
+# retains only comparison mechanics and print-precision tolerances.
 TOL_PCT = 0.0005 + 1e-9        # ±0.05pp = 印刷精度的一半
 TOL_FIRE = 0.005 + 1e-9        # ±0.5pp
+
+
+def load_baseline(path: Path) -> dict:
+    """Load a private regression receipt without embedding study results."""
+    if not path.exists():
+        raise FileNotFoundError(f"private baseline not found: {path}")
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    required = {"n_episodes", "months", "kish_n", "A_primary_T60", "cells"}
+    if not isinstance(baseline, dict) or not required <= set(baseline):
+        raise ValueError(f"baseline requires keys: {sorted(required)}")
+    if not isinstance(baseline["A_primary_T60"], dict) or not isinstance(baseline["cells"], dict):
+        raise ValueError("baseline A_primary_T60 and cells must be JSON objects")
+    return baseline
 
 
 def hvn_builder(ctx):
@@ -163,21 +156,25 @@ def head_to_head(summary, suffixes=("_x1", "_x1_vol", "_x2", "_x2_vol"),
     return out
 
 
-def regression_check(summary):
-    """原三 kind 必须复现 round-2。返回 (ok, [失配说明])。"""
+def regression_check(summary, baseline):
+    """Compare incumbent cells with a private baseline receipt."""
     bad = []
 
     def cmp(label, got, want, tol):
         if got is None or abs(got - want) > tol:
             bad.append(f"{label}: got {got!r} want {want!r} (tol {tol})")
 
-    cmp("n_episodes", summary["n_episodes"], ROUND2["n_episodes"], 0)
-    cmp("months", summary["months"], ROUND2["months"], 0)
-    cmp("kish_n", summary["kish_n"], ROUND2["kish_n"], 0.05 + 1e-9)
+    cmp("n_episodes", summary["n_episodes"], baseline["n_episodes"], 0)
+    cmp("months", summary["months"], baseline["months"], 0)
+    cmp("kish_n", summary["kish_n"], baseline["kish_n"], 0.05 + 1e-9)
     a = summary["A"].get("primary_T60") or {}
-    for k, want in ROUND2["A_primary_T60"].items():
+    for k, want in baseline["A_primary_T60"].items():
         cmp(f"A.primary_T60.{k}", a.get(k), want, TOL_PCT if k != "stop_rate" else TOL_FIRE)
-    for key, (fire, dm, lo, hi) in ROUND2["cells"].items():
+    for key, values in baseline["cells"].items():
+        if not isinstance(values, list) or len(values) != 4:
+            bad.append(f"{key}: baseline cell must be [fire_rate, diff_mean, ci_lo, ci_hi]")
+            continue
+        fire, dm, lo, hi = values
         cell = summary["cells"].get(key)
         if not cell:
             bad.append(f"{key}: 缺失")
@@ -303,7 +300,7 @@ def final_verdict(verdicts, h2h):
 
     判据全过 **不等于**采纳: H1 问的是「拒绝权是否不弱」, 是**非劣性**假设。
     非劣通过之后还要问"有没有更好", 而"更好"的读数只有配对 gap 差的 CI。
-    CI 含 0 = 拒绝权无差异 = 平手 = 保留 cluster (语义更简单, live 已跑三个月)。
+    CI 含 0 = 拒绝权无差异 = 平手 = 保留更简单的 incumbent。
     """
     dec = next((v for v in verdicts if v["suffix"] == DECISION_CELL), None)
     if not dec or not dec.get("all_pass"):
@@ -327,12 +324,15 @@ def final_verdict(verdicts, h2h):
                      "VERDICT: **不采纳 hvn**— 配对 gap 差显著为正 = 拒绝权显著更弱")}
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="HVN gate 主回测")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--report", type=Path, default=None)
+    ap.add_argument("--baseline", type=Path, help="ignored JSON incumbent receipt")
     ap.add_argument("--limit", type=int, default=None, help="只扫前 N 个文件 (冒烟用, 不可裁决)")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    if not a.limit and not a.baseline:
+        ap.error("--baseline is required for a full adjudicating run")
 
     kdir = gb2.KDIR
     if a.limit:
@@ -354,7 +354,8 @@ def main():
     h2h = head_to_head(summary)      # 同上
     gb2.strip_private(summary)
 
-    reg_ok, reg_bad = (True, []) if a.limit else regression_check(summary)
+    reg_ok, reg_bad = ((True, []) if a.limit else
+                       regression_check(summary, load_baseline(a.baseline)))
     verdicts = ([] if not reg_ok else
                 [pair_verdict(summary, s, fallback_rate)
                  for s in ("_x1", "_x1_vol", "_x2", "_x2_vol")])

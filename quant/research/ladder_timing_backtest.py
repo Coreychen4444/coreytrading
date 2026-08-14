@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """ladder 的起步日 —— 「早一天」单自由度 × 双构造。
 
-预注册全文: quant/research/ladder_timing_design.md
-**判据由 用户  锁定并先于本次运行 commit (8d49f84)。真数据只跑一次。**
+预注册全文: private preregistration
+**判据必须在运行前由私人预注册锁定；查看结果后不得修改本次协议。**
 
-## 问题 (gate_path_taxonomy §12c / RULINGS_LEDGER A7)
+## 问题
 live `fastlane_k=0.5` 的采纳对照是 **ladder@D1 vs 单点@D2**—— 执行结构与时点绑在
 一起, 「早一天」从未被单独验过。本轮两臂**都是**ladder, 唯一差别是从哪天起步。
 
@@ -28,7 +28,7 @@ ANCHOR×off = 主裁决 (逐字复现 ladder_entry 的池 ⟹ 与它的差异只
 
 ## 判据 (= gate_path_taxonomy 同一套六条, ①在两轮之间苹果对苹果)
 六条全过 → fastlane_k=0.5 独立成立; 任一不过 → **建议撤下 _fastlane 回 ×2**
-(这是对 incumbent 的检验, 「未获支持」= 撤下不是维持; 实施等 用户, 本轮不动 live)。
+(这是对 incumbent 的检验；「未获支持」= 建议撤下。脚本不自动修改 production。)
 
 Usage: .venv/moomoo/bin/python3 quant/research/ladder_timing_backtest.py [--json] [--report PATH]
 """
@@ -189,7 +189,7 @@ def verdict_of(res):
     miss = [k for k, v in res["crit"].items() if not v and k != "all_pass"]
     return {"decision": "reject",
             "text": "**未获支持 → 建议撤下 `_fastlane` 回 ×2**(未过: "
-                    + ", ".join(miss) + ") — 实施等 用户, 本轮不动 live"}
+                    + ", ".join(miss) + ") — 不自动修改 production"}
 
 
 def trigger_234(main_v, repl_v):
@@ -201,23 +201,19 @@ def trigger_234(main_v, repl_v):
                 "两格中有一格数据不足 → 构造效应未测出, ②③④ **维持但标注未复验**")
     if len(both) == 1:
         return ("hold",
-                "ANCHOR 与 ROLL 裁决**一致**→ 构造效应实测 ≈0; "
-                "`gate_path_taxonomy` 的 ②③④ **维持**, 那轮结论加固")
+                "ANCHOR 与 ROLL 裁决**一致**→ 未观察到构造方向分叉；"
+                "`gate_path_taxonomy` 的 ②③④ **维持**")
     return ("downgrade",
             "ANCHOR 与 ROLL 裁决**相反**→ ②③④ 降级为「**构造敏感, 不作结论**」; "
             "且**无法在 ANCHOR 上复验**(破位锚构造产不出②③④, 结构性限制)")
 
 
-LADDER_ENTRY_C = {"deploy": 0.86, "riskN": 1.07, "stop": 0.67, "R": 0.480}
-
-
 def reproduction_check(res):
-    """§7: ANCHOR 的 FAST 臂应当数值接近 ladder_entry 的 C 臂。对不上 = 实现有问题。"""
+    """Return current ANCHOR FAST metrics without embedding a private baseline."""
     if not res or not res.get("n"):
         return None
     f = res["FAST"]
-    return {"ladder_entry_C": LADDER_ENTRY_C,
-            "anchor_FAST": {"deploy": f["deploy"], "riskN": f["riskN_median"],
+    return {"anchor_FAST": {"deploy": f["deploy"], "riskN": f["riskN_median"],
                             "stop": f["stop_rate"], "R": f["R_winsor"]}}
 
 
@@ -234,12 +230,9 @@ def render(by_cell, by_cell20, verds, trig, path_mix, drops, repro):
              + ("✅ 全部 = ①修复, §3e 恒等式经验成立" if ok
                 else "🚨 **出现非 repair —— 恒等式推导有误, 停下来查**"))
     if repro:
-        a, c = repro["anchor_FAST"], repro["ladder_entry_C"]
-        L.append(f"【复现】ANCHOR FAST vs ladder_entry C 臂: "
-                 f"部署 {a['deploy']:.0%}/{c['deploy']:.0%} · "
-                 f"风险N {a['riskN']}/{c['riskN']} · "
-                 f"止损 {a['stop']:.0%}/{c['stop']:.0%} · "
-                 f"R {a['R']:+.3f}/{c['R']:+.3f}")
+        a = repro["anchor_FAST"]
+        L.append(f"【审计】ANCHOR FAST: 部署 {a['deploy']:.0%} · "
+                 f"风险N {a['riskN']} · 止损 {a['stop']:.0%} · R {a['R']:+.3f}")
     L.append("")
 
     for cell in CELLS:
@@ -291,8 +284,7 @@ def render(by_cell, by_cell20, verds, trig, path_mix, drops, repro):
     L.append("VERDICT (主裁决 = ANCHOR):")
     L.append(f"  {verds[ADJUDICATING]['text']}")
     L.append(f"§5 ②③④ 触发 [{trig[0]}]: {trig[1]}")
-    L.append("④ 无论如何标「边缘未结案」(⑤ CI 骑守卫线 / ②R 下界贴 0 / n=136), "
-             "等 +12 个月复测窗。")
+    L.append("边缘结果必须标为 inconclusive，并由 private preregistration 定义重跑条件。")
     return "\n".join(L)
 
 

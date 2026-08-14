@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """hvn_gate 预注册的**早停筛查**: HVN gate 与 cluster gate 的重合率。
 
-预注册 (hvn_gate_design.md §4) 写死: 重合率 (gate 价位差 < 1 bucket) **> 70%
+预注册 (private preregistration §4) 写死: 重合率 (gate 价位差 < 1 bucket) **> 70%
 则本假设几乎无信息, 直接停**—— 省得跑完全套才发现两者本来就是一回事。
 
 只做这一件事, 不看任何前向收益 (看了就污染了主回测)。
@@ -30,7 +30,7 @@ HVN_N = 5                  # 与 level_map 默认同拍
 
 
 def hvn_gate(bars, i, close_i, atr14_i):
-    """价格上方最近 HVN 带的上沿 (预注册定义, hvn_gate_design §2)。
+    """价格上方最近 HVN 带的上沿（定义必须锁入 private preregistration）。
 
     profile = 破位日 i 往前 60 根日线 (含 i), 三角铺开; bucket = auto_bucket。
     无上方 HVN → None (由调用方决定回退)。

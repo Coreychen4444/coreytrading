@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""财报窗口缩仓规则 — 主回测 (预注册 earnings_window_design.md, 已锁定)。
+"""财报窗口缩仓规则 — 主回测 (预注册 private preregistration, 已锁定)。
 
 ## 窗口已由数据定 (§0, 不是本轮假设)
 T−5~T−1 与基线无区别 (0.99–1.05x); **风险全部集中在反应日 T+0**(3.51x, >2N 占 36.2%);
@@ -52,7 +52,7 @@ BREACH_BAND = (0.01, 0.04)  # §5-1
 KISH_MIN = 30
 ARMS = ("D_none", "A_pool", "B_ticker", "C_shrink")
 BOOT = 2000
-SEED = 20260808
+SEED = 331_777
 
 
 def earnings_days(tk):
@@ -209,9 +209,9 @@ def summarize(recs, pool_x, fallback):
 
 
 def book_table(recs, data, pool_x, arm):
-    """本书各票在选定臂下的缩仓比例 (用全部历史估计, 供 live 参考)。"""
+    """私有输入池各标的在选定臂下的缩仓比例。"""
     out = {}
-    for tk in ("AAOI", "INTC", "MRVL", "MSFT", "NVDA", "MU", "NBIS", "LITE", "AMZN"):
+    for tk in sorted(data):
         rows = data.get(tk)
         if not rows:
             out[tk] = None
@@ -249,7 +249,7 @@ def render(s, book, arm_for_book):
               f"(低于下界 = 缩过头, 也算失败); ②显著低于不缩仓; ③少赚 ≤ 少亏", ""]
     L.append(s["verdict"]["text"])
     if book:
-        L += ["", f"本书各票缩仓比例 (臂 = {arm_for_book}, 用全部历史估计):",
+        L += ["", f"私有输入池各标的缩仓比例 (臂 = {arm_for_book}, 用全部历史估计):",
               f"  {'标的':<7}{'事件数':>6}{'X_earn':>9}{'缩到':>8}"]
         for tk, v in book.items():
             if v is None:

@@ -1,7 +1,6 @@
-"""gate_path_taxonomy_backtest 机械件验证 (合成数据; 真数据只跑一次)。
+"""gate_path_taxonomy_backtest 的合成机械件验证。
 
-预注册 `gate_path_taxonomy_design.md` A–G 全部锁定。one-shot 纪律下，机制正确性
-**只能**靠这份对拍把关 —— 跑完是不许改判据的，所以错必须在跑之前发现。
+私人预注册 A–G 必须先锁定。机制正确性由合成对拍和锁定值回归守卫把关。
 
 三处是这份文件的重点，其余是常规:
 
@@ -27,7 +26,7 @@ from quant.research.gate_backtest2 import atr_series, cluster_gate, confirmed_sw
 # ── 1. 锁定值 (改一个数就红) ─────────────────────────────────────────
 
 def test_locked_parameters():
-    """A–G 锁定值。这条红 = 有人在跑完之后动了判据，或跑之前没按锁定值实现。"""
+    """A–G 锁定值变化时测试必须失败。"""
     assert gp.K_MAG == 0.5                     # §4 幅度门槛, ladder_entry 定版
     assert gp.DELTA_ATR == 0.5                 # §3b-A δ = 0.5×ATR20
     assert gp.BROKE_WINDOW == COOLDOWN == 120  # §3c-F 回看窗
@@ -359,8 +358,7 @@ def test_each_criterion_can_veto(field, bad, flag):
 
 
 def test_stop_rate_guard_vetoes_even_when_returns_look_good():
-    """判据 5 是本轮新增的那条 —— ②③ 在 escape_velocity 上正是栽在止损率。
-    收益全对、风险也降了，只要止损率差超 +5pp 就必须否。"""
+    """即使收益和风险判据通过，止损率差超守卫仍必须否决。"""
     rows = _rows(240)
     for k, r in enumerate(rows):
         r["FAST"] = dict(r["FAST"], stopped=k % 4 == 0)     # 25%

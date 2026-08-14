@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round-2b — 修复路径止损语义扫描 (预注册: gate_backtest2_design.md §Round-2b)。
+"""Round-2b — 修复路径止损语义扫描 (预注册: private preregistration §Round-2b)。
 
 背景: round-2 裁决落 D1 分支 3 (gate 授权只留修复路径), 顺带发现 live 止损语义
 (stop = 刚收复的 gate, ×1 日) 是全场最差变体。本轮在**保留 gate 的前提下**扫描

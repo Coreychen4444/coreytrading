@@ -269,7 +269,7 @@ def chandelier(bars: list[dict], n: float, since: str | None = None,
 
     ⚠️ 与 `exit_guard.trend_trail` **公式与常数完全一致**，差异只在**谁提供 ATR 与
     `since` 锚**（这里由调用方传，exit_guard 用布防日与自己的 ATR）—— 那是用途分工，
-    不是分叉。核实记录见 `quant/research/pending_work_impact_scope.md` §11。
+    不是分叉；共享常量由 production pin tests 强制一致。
     """
     sel = [b for b in bars if not since or str(b["time"])[:10] >= since]
     if not sel or not n:

@@ -32,7 +32,7 @@ flowchart LR
     P --> E(("Human review<br/>and execution"))
     E --> F["Feedback<br/>orders · fills · lots · exits · review"]
     F --> D
-    R["research/<br/>preregistered backtests + rulings"] -. calibrates .-> T
+    R["research/<br/>synthetic mechanics + private studies"] -. calibrates .-> T
     TS["tests/<br/>invariants · ratchets · mechanics"] -. guards .-> A
 ```
 
@@ -144,7 +144,7 @@ Consequences:
 - promoted holdings may receive incremental add-on authorization only through the next confirmed state;
 - changing confirmation or stop semantics requires rerunning the designated research mechanics.
 
-Research implementations and their rulings live under `quant/research/`; live code never imports the research layer.
+Reusable research mechanics live under `quant/research/`; private protocols, datasets, results and rulings remain in the ignored workspace. Live code never imports the research layer.
 
 ### 6. Gate and zone live, expire and anchor together
 
@@ -452,15 +452,15 @@ The public `trade/` tree contains only README contracts and synthetic `*.example
 
 ---
 
-## Research and the rulings ledger
+## Research workspace
 
-`quant/research/` is isolated historical verification. It produces statistics, not actions, and live code may not import it.
+`quant/research/` is an isolated public scaffold for reusable validation mechanics. Private studies produce statistics, not actions, and live code may not import the research layer.
 
 - Criteria are preregistered before results.
 - Synthetic tests validate mechanics before authorized historical runs.
-- [`quant/research/RULINGS_LEDGER.md`](quant/research/RULINGS_LEDGER.md) records adopted, rejected and scoped decisions.
-- Before citing a ruling, inspect the live parameter and its domain rather than relying on a copied line number.
-- Designated backtests must run before changing the parameters they govern.
+- [`quant/research/README.md`](quant/research/README.md) defines the AI bootstrap and public/private boundary.
+- Populated preregistrations, datasets, reports, charts, rulings and backlog remain ignored private artifacts.
+- Before proposing a parameter change, inspect the live parameter and rerun the authorized private study for its domain.
 
 ---
 

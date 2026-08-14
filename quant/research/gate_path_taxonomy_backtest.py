@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """gate 结构身份四分类 × 快车道适用域 — 主回测。
 
-预注册全文: quant/research/gate_path_taxonomy_design.md
-**A–G 全部由 用户 锁定 (, 运行前)。真数据只跑一次, 跑完不改判据。**
+预注册全文: private preregistration
+**A–G 必须在运行前由私人预注册锁定。读取结果后不得修改判据。**
 
-## 问题 (用户)
+## 问题
 `ladder_entry` 采纳的快车道 (幅度达标 → 当日转移 → ladder 入场) 只在**修复 gate**
 的样本上验过。live 的 `regime_transition._fastlane` **没有适用域判别式**, 突破 gate
 也走同一条。那么: 快车道的收益依不依赖 gate 的**结构身份**?
@@ -80,7 +80,7 @@ DEPLOY_MIN = 0.80           # 判据 3
 STOP_GUARD = 0.05           # 判据 5: 止损率差上界 < +5pp (escape_velocity 同阈值)
 KISH_MIN = 30               # 判据 6
 BOOT_DRAWS = 10_000
-BOOT_SEED = 20260808
+BOOT_SEED = 360_555
 CI_Q = (0.05, 0.95)
 ARMS = ("FAST", "SLOW")
 CLASSES = ("repair", "uptrend", "range_top", "ath")
@@ -480,8 +480,7 @@ def render(by_cls, by_cls20, vd, drops, total, cov="—"):
          f"滚动上穿构造 (§3e-G) / gate=cluster / 幅度 k={K_MAG} / 量腿 RelVR≥{VOL_RATIO} @D1 / "
          f"stop=gate−{BFLOOR_BUF}N@确认日 / 限价 {LIMIT_DAYS}d / 裁决终点 D1+{DECISION_T}",
          f"样本合计 {total} episode; drops={drops}",
-         f"coverage: {cov}   ⚠️ SMH 深度缓存自 2012-02 / QQQ 自 2006-07 起 —— "
-         f"量腿要基准, 更早的 episode 全部出局 (§3e 已知并接受的代价)", ""]
+         f"coverage: {cov}   ⚠️ 量腿需要同日 benchmark；基准缺失的 episode 明确剔除。", ""]
     for c in CLASSES:
         r = by_cls.get(c)
         if not r or not r.get("n"):

@@ -32,7 +32,7 @@
                sizing · structure · drift · technical · holdings
                episodes · book · earnings · sectors · patterns（形态判别式，Lo 2000 工序）
 
-  research     验证层（回测/校准）—— 旁路，不参与实时决策
+  research     验证层（可复用机械件/合成脚手架）—— 旁路，不参与实时决策
 ```
 
 ## 每层一句话
@@ -48,7 +48,7 @@
 | `journal/` | 决策与成交写进账本 | 往 `events/` / `scores.jsonl` append |
 | `report/` | 读时计算的人类可读输出 | 只读不写（除告警冷却状态） |
 | `ops/` | 编排、通知、仓库运维 | 调别的脚本，或与外部系统（Telegram/git）打交道 |
-| `research/` | 回测与校准 | 只吃历史数据，产出统计而非动作 |
+| `research/` | 公开研究机械件与合成脚手架 | 只产出统计，不保存私人数据、结果或裁决 |
 
 ## 约定
 
@@ -129,6 +129,6 @@ import」的成员，上面那条依赖规则当场要开例外；而且它是�
 `UNTESTED` 的条数不要抄进文档；名单和每条理由都在 `tests/test_module_coverage.py` 中，
 需要时现读现算。它是棘轮：补上测试的模块必须出列，名单只能缩短。
 
-仍标记为 **真缺口** 的项目应优先处理，尤其是 `report/perf_report`、
-`research/exit_rules_backtest` 与 `research/structure_downgrade_backtest`：
-它们会影响绩效解释或参数裁决，而判据来源本身仍需要更完整的机械件验证。
+仍标记为 **真缺口** 的项目应优先处理；准确名单以
+`tests/test_module_coverage.py` 为准。私人研究脚本不进入公开 coverage ledger，
+可复用机械件只有在完成脱敏与 synthetic test 后才能加入 `quant/research/`。

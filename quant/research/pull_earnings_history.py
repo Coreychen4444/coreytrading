@@ -5,8 +5,7 @@
 vendor 期权隐含 implied move ~2021 起), 原始 JSON 落
 `trade/us_stock/market/earnings_deep/<TICKER>.json` (gitignore, 回测专用)。
 
-该端点**不消耗**30 日 300 只历史 K 线 quota (实测, 见
-earnings_gate_backtest_design.md 数据节), 仅受频率限制 → 0.8s/票限速。
+端点配额、授权与频率限制必须写入 private preregistration；脚本默认限速请求。
 幂等: 已存在且 --force 未给 → 跳过。ETF/无财报票端点返回空 → 记 skip 不报错。
 
 用法: .venv/moomoo/bin/python3 quant/research/pull_earnings_history.py [--force]

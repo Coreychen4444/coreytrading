@@ -1,7 +1,7 @@
 """earnings_gate_backtest — 财报前入场 clamp 按 implied move 分级是否有依据。
 
-预注册: quant/research/earnings_gate_backtest_design.md (锁定 , 用户 批准)。
-真数据只跑一次; 本 docstring 复制设计稿要点作为正式预注册。
+运行前必须锁定私人预注册；公开脚本不保存批准记录或研究结果。
+私人数据按锁定协议运行；本 docstring 仅保留通用机械摘要。
 
 ── 预注册要点 (运行前锁定) ──────────────────────────────────────────
 对赌: H-proposal (趋势成立 + 低 implied move → pre-print 建仓无显著惩罚 → 解除 clamp)
@@ -29,9 +29,9 @@ D1 裁决按 IM 桶独立 (桶内 regime 合并), T60 主口径:
 - 其余 → 维持现行 (证据不足不改规则)
 D2: 本回测测单位暴露差, size 政策在结论层折算。D3: 只作用于卡片财报 constraint, 宏观事件域外。
 
-统计: 按月 (E 月) block bootstrap CI90, seed=20260731, 10,000 draws (p10 差 seed+1,
+统计: 按月 (E 月) block bootstrap CI90, 使用固定中性 seed 与 10,000 draws (p10 差 seed+1,
 1,000 draws); Kish 按月 (财报集中季报月, 聚类重); 任一 D1 桶 Kish < 30 → 数据不足不裁决。
-Cohort (2021-22 / 2023-24 / 2025-26) 只报点估计。
+Cohort 仅按数据中存在的年份分组报告点估计。
 
 Survivorship 声明: 存续票池 → 财报暴雷退市者缺席 → 偏向低估 pre-print 风险
 (对 H-proposal 有利); 若仍测出左尾肥, 结论更稳。
@@ -40,14 +40,14 @@ Survivorship 声明: 存续票池 → 财报暴雷退市者缺席 → 偏向低�
 无 IM 期不进主样本。数据陷阱: 端点有缺期 → 按 pub 日期去重, 不假设期数连续。
 
 ── 验收修正 (对抗性审查 , 全部在真数据运行之前; 非结果驱动,
-   用户 保留否决权; 同批追记设计稿「运行前修订」段) ──────────────────
+   任何修订必须生成新的私人协议版本）──────────────────
 #1 (blocker) E 日判定改为 vendor day-0 (schedule_delta==0 的 trading_day_str) 优先,
-   退 pub_type (1=BMO/2=AMC 实测), 再退干净时间戳; 全不可判 → 剔除计数不猜。
-   原因: pub_time_str 有系统性 '00:00:00' 哨兵 (~6% 期, 集中 2021-22, AA/AAOI/ADBE),
+   退 provider contract 中的 pub_type 映射, 再退干净时间戳; 全不可判 → 剔除计数不猜。
+   原因: pub_time_str 可能出现系统性 '00:00:00' 哨兵，
    纯时间 heuristic 把 AMC 错判 BMO → E 错一天。语义不变 (E 仍 = print 反应日)。
-#2 设计稿预注册的 3N 止损敏感性补实现 (只报告不裁决)
+#2 3N 止损敏感性只报告不裁决
 #3 D1 桶的 n/Kish/bootstrap 全部收窄到 t60 承载子样本 (右截断条款的正确执行)
-#4 每主格补 ΔT60/ΔT20 CI90 (设计稿承诺, 同 seed 零自由度)
+#4 每主格报告 ΔT60/ΔT20 CI90（同 seed 零自由度）
 #5 (pin) 分支 A 与 B 同真时 A 优先 — −1pp materiality 覆盖显著性; Kish 闸门定义在
    D1 桶级 (kish_t60), 薄格以 thin_cells 标记可见不整桶 abort
 #6 BMO 期 newest-IM 时点 caveat 上报 + session/E 日来源构成进报告
@@ -80,7 +80,7 @@ def _count_by(rows, key):
     return out
 
 EARNINGS_DEEP_DIR = MARKET_DIR / "earnings_deep"
-SEED = 20260731
+SEED = 314_159
 DRAWS = 10_000
 P10_DRAWS = 1_000
 WARMUP = 126
@@ -102,7 +102,7 @@ def im_bucket(im: float) -> str:
 def periods_of(path: Path):
     """按 pub 日期去重的期列表。验收修正 #1 (blocker): 同时抽取 vendor day-0
     (schedule_delta==0 行的 trading_day_str) 作为反应日首选真源 — pub_time_str 存在
-    系统性 '00:00:00' 哨兵值 (~6% 期, 集中 2021-22), 纯时间 heuristic 会把 AMC 错判 BMO。"""
+    系统性 '00:00:00' 哨兵值，纯时间 heuristic 会把 AMC 错判 BMO。"""
     doc = json.loads(path.read_text())
     per: dict = {}
     for r in doc.get("data") or []:
@@ -162,7 +162,7 @@ def collect():
                 continue
             sess = session_of(pub_time)
             # 验收修正 #1 (blocker): E 日判定优先级 vendor day-0 > pub_type > 干净时间戳,
-            # 全部不可判 → 剔除计数 (不猜)。pub_type 实测 1=BMO, 2=AMC。
+            # 全部不可判 → 剔除计数 (不猜)。pub_type 语义来自 provider contract。
             if p["day0"]:
                 e_i = bisect_left(dates, p["day0"])
                 e_src = "vendor_day0"
@@ -206,7 +206,7 @@ def collect():
                 if e_i - 5 >= 0 and atr20[e_i - 5] is not None:
                     p5v, p5s = world_value(closes, atr20, e_i - 5, term)
                     pre5 = {"v": p5v, "stop": p5s}
-                # 验收修正 #2: 设计稿预注册的 3N 止损敏感性 (只报告不裁决)
+                # 3N 止损敏感性只报告不裁决。
                 pre3_v, _ = world_value(closes, atr20, e_i - 1, term, stop_mult=3)
                 post3_v, _ = world_value(closes, atr20, e_i + 1, term, stop_mult=3)
                 ep[label] = {"fast": pre_v, "fast_stop": pre_s,
@@ -266,7 +266,7 @@ def summarize(episodes):
                 "n_t60": len(rows60),
                 "kish_t60": round(kish([e["month"] for e in rows60]), 1),
                 "t20": _pool(rows, "t20"), "t60": _pool(rows, "t60"),
-                # 验收修正 #4: 设计稿承诺每格 CI90 — T20/T60 均补 (同 seed 零自由度)
+                # 每格报告 CI90；T20/T60 使用同 seed。
                 "diff_ci90": _boot_metric(rows, "t60", _mean_diff, DRAWS, SEED),
                 "diff_t20_ci90": _boot_metric(rows, "t20", _mean_diff_t20, DRAWS, SEED)}
         pool_all = [e for e in episodes if e["bucket"] == b]
@@ -282,9 +282,13 @@ def summarize(episodes):
                             "mean_diff_3n": (sum(e["t60"]["diff_3n"] for e in pool) / len(pool))
                             if pool else None}
         out["d1_pools"][b] = d
-    for name, lo, hi in (("2021-22", "2021", "2022"), ("2023-24", "2023", "2024"),
-                         ("2025-26", "2025", "2026")):
-        rows = [e for e in episodes if lo <= e["month"][:4] <= hi]
+    years = sorted({int(e["month"][:4]) for e in episodes})
+    first = (years[0] // 2) * 2 if years else 0
+    last = (years[-1] // 2) * 2 if years else -1
+    for index, lo in enumerate(range(first, last + 1, 2)):
+        hi = lo + 1
+        name = f"cohort_{index + 1}"
+        rows = [e for e in episodes if lo <= int(e["month"][:4]) <= hi]
         out["cohorts"][name] = {"n": len(rows), "t60": _pool(rows, "t60")}
     p5 = [e for e in episodes if e.get("t60") and e["t60"]["pre5"]]
     if p5:
@@ -297,7 +301,7 @@ def summarize(episodes):
 def d1_flags(summary):
     """预注册 D1 机械读数 (按 IM 桶, T60, kish_t60 闸门)。
 
-    验收修正 #5 (pin, 非结果驱动, 用户 可否决): A 与 B 同真时 (lo≥0 且 p10 差
+    机械修正 #5（pin，非结果驱动）：A 与 B 同真时（lo≥0 且 p10 差
     CI ⊂ (−1pp, 0)) **A 优先**— −1pp 是 materiality 阈值, 统计显著但幅度 <1pp
     的左尾恶化不构成保留 clamp 的理由 (分支书写顺序即优先级)。
     闸门定义在 D1 桶级 (kish_t60); 成员格 kish_t60 < 30 → verdict 附 thin_cells

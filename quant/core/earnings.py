@@ -1,6 +1,6 @@
-"""earnings.py — 财报反应日缩仓 (earnings_window 路 A, 用户  批准)。
+"""Earnings reaction-session sizing adjustment.
 
-规则 (`quant/research/earnings_window_design.md` §10e):
+Production rule:
 
     财报反应日 T+0 的仓位上限 = 名义上限 × 缩仓比例(per-ticker) × 0.7
     恢复 = T+1 起全额 (缩仓只压 T+0 那一天; T+1 开盘前 event_state 已回 1.0)
@@ -9,7 +9,7 @@
     X_earn   = C 收缩臂: λ·单票 p98 + (1−λ)·池级 p90, λ = n/(n+10);
                先验事件 <8 → 直接用池级 p90 (3.00N)
 
-为什么需要它 (`shock_budget_design.md` §2.3b): 40% 名义上限之下, 单票 4N 财报事件
+Why it exists: under a 40% nominal ceiling, a single-name 4N earnings event
 是 **13–21% NAV 一天**, 已经超过 15% 的组合总预算本身。**40% 若不配财报窗口缩仓,
 等于把整个组合预算押在一次财报上。**
 

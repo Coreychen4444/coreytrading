@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""修复 gate 的幅度条件快车道 — 主回测 (预注册 fastlane_repair_gate_design.md, 已锁定)。
+"""修复 gate 的幅度条件快车道 — 主回测 (预注册 private preregistration, 已锁定)。
 
-## 问题 (用户)
+## 问题
 「如果是强势突破 gate 并且突破幅度够大, 是否可以不等 ×2、当天确认」
 
-## 为什么 escape_velocity 答不了 (设计稿 §0)
+## 与 escape_velocity 的边界
 它测的是箱体顶逃逸不是修复 gate; 且两个世界都用**入场锚定**止损 (entry − 2N),
 于是 FAST 与 SLOW 的每股风险按构造相同 —— 把快车道在真实系统里唯一的收益来源消掉了。
 **本回测的关键差异: 两世界都用 gate 锚定止损**`gate − 0.5×ATR20@确认日` (= live bfloor_buf)。
@@ -45,7 +45,7 @@ from quant.core.paths import KLINE_DEEP_DIR as KDIR  # noqa: E402
 from quant.research.gate_backtest import (# noqa: E402
     load, sma_series, episodes_of, confirmed_swing_highs)
 from quant.research.gate_backtest2 import (# noqa: E402
-    ERAS, SLIP, WINDOW, atr_series, cluster_gate, confirmed_swing_lows, stop_scan)
+    SLIP, WINDOW, atr_series, cluster_gate, confirmed_swing_lows, era_bounds, stop_scan)
 
 TERMINALS = (20, 60)
 DECISION_T = 60                 # §5b-C
@@ -54,7 +54,7 @@ BFLOOR_BUF = 0.5                # live bfloor_buf: stop = gate − 0.5×ATR20@�
 STOP_CI_MAX = 0.08              # 判据 2: 止损率差 CI90 上界 < +8pp
 KISH_MIN = 30                   # 判据 4
 BOOT_DRAWS = 10_000
-BOOT_SEED = 20260807
+BOOT_SEED = 223_607
 CI_Q = (0.05, 0.95)
 
 # fast_nomag = §6 明确要求的"无幅度"对照池: 同样 c+1 早进, 但**不看幅度**。
@@ -74,7 +74,7 @@ def _enter(entry_j, closes, end, stop):
 def build_worlds(i, end, closes, gate, atr20, k, rescan):
     """返回 {arm: segment|None}。None = 从未入场 (全程现金)。
 
-    c = 首个 close > gate 的日子。rescan=False 时只看第一次机会 (设计稿字面);
+    c = 首个 close > gate 的日子。rescan=False 时只看第一次机会（协议定义）；
     True 时首次失败后继续找下一个 c (round-1/2 fire_scan 语义)。
     """
     out = {a: None for a in ARMS}
@@ -365,7 +365,7 @@ def analyse(rows, k, T=DECISION_T, draws=BOOT_DRAWS, seed=BOOT_SEED):
 
     # era cohorts (§5b-D): 并列报, 受 Kish≥30 守卫
     out["eras"] = {}
-    for era, y0, y1 in ERAS:
+    for era, y0, y1 in era_bounds(r["year"] for r in elig):
         sub = [r for r in elig if y0 <= r["year"] <= y1]
         if not sub:
             continue

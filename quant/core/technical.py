@@ -451,9 +451,8 @@ def swing_points(klines: List[dict], wing: int = 2) -> Tuple[List[Tuple[int, flo
                                          → exit_guard 结构标签 / gate_ladder_report / gate_audit
                → level_map.cluster_pivots（**pivot 簇 = gate 画在哪条线上**）
                → regime_transition 破位后自动生成的 z1/z2/stop
-               → research/gate_backtest WING=2（所有 gate 家族回测的可比性）
-    要动必须：重跑 `structure_downgrade_backtest` + `gate_backtest2` 家族、双份常量 pin、
-    一行 ledger。完整分析见 `quant/research/pending_work_impact_scope.md` §6。
+               → 私人研究必须 import 本函数，不能复制 pivot 语义
+    修改前必须先锁定私人研究协议、运行相应验证并通过 production tests。
     注: 最近 wing 根 K 线内的新极值尚不能确认为 pivot (需右侧 wing 根), 属固有滞后。"""
     highs = [float(r.get("high", 0)) for r in klines]
     lows = [float(r.get("low", 0)) for r in klines]
@@ -561,7 +560,7 @@ def rs_series(closes: List[float], bench_closes: List[float]) -> List[Optional[f
 # ── ⚠️ 以下三个单 bar / 少数 bar 形状：证据等级 `[实证-负面为主]`（补注）──
 #
 # 它们是本仓**唯三没有出处**的技术判别式（其余判别式都能追到一篇论文或一次自家回测）。
-# 正式检验的总账（`quant/research/price_action_framework_design.md` §5.1，逐条读过摘要）:
+# 公开文献的主要无条件检验：
 #   Marshall, Young & Rose, *J. Banking & Finance* 30(9) 2006 —— DJIA 成分 1992-2002,
 #     扩展 bootstrap（**随机生成 OHLC 四价**作零分布）⇒ K 线策略对 DJIA 股票**没有价值**
 #   Marshall, Young & Cahan (2008) —— 东证前 100, 1975-2004 ⇒ **无正的异常收益**

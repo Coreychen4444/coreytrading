@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""zone_timeline.py — 从 git 历史挖 positions.json 的 zone 演化时间线。
+"""Build a zone-change timeline from an authorized private Git history.
 
-为什么可行: state/positions.json 每天被 commit_state.sh 提交 — git 历史就是
-免费的 zone 快照流 (v2 cutover  起)。这是 zone 方法论回测的地基:
-"X 日 Y ticker 的 zone1 是多少" 不再依赖记忆。
+The public repository contains no populated state. In a private workspace that
+deliberately versions state snapshots, Git history can provide point-in-time
+zone observations without embedding them in this module.
 
 CLI:
-    python3 quant/research/zone_timeline.py [--ticker NOK] [--json]
+    python3 quant/research/zone_timeline.py [--ticker <SYMBOL>] [--json]
 输出: 每 (commit_date, ticker) 一行 zone 快照 (只输出 zone 实际变化的行)。
 """
 from __future__ import annotations
@@ -98,7 +98,7 @@ def main() -> int:
             print(f"{r['date']} {r['ticker']:22s} z1={z.get('accumulation_zone_1')} "
                   f"z2={z.get('accumulation_zone_2')} trim={z.get('trim_zone')} "
                   f"stop={z.get('stop_level')} valid={z.get('valid_until')}")
-        print(f"\n{len(tl)} zone changes (v2 era 2026-05-06+; 更早的 zone 在旧 schema, 不挖)")
+        print(f"\n{len(tl)} zone changes available under the current private schema")
     return 0
 
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""量族冗余体检 —— OBV / A-D Line / CMF / MFI **vs**我们已在用的 RelVR。
+"""量族冗余体检 —— OBV / A-D Line / CMF / MFI **vs** 当前实现使用的 RelVR。
 
 **只算相关与提升度，不算任何收益。**与 `indicator_redundancy.py` 同一条纪律：
 看见收益就会忍不住调阈值，而那正是 Sullivan-Timmermann-White / Bajgrowicz-Scaillet
 （7,846 条规则 FDR 后无一存活）要防的。本脚本里**没有前向收益计算**，是刻意的。
 
-## 它回答什么（`technical_engine_landing_plan.md` §5 阶段 7D 的唯一前置）
+## 它回答什么（`private preregistration` §5 阶段 7D 的唯一前置）
 
 syllabus 第七阶段 D 族列了 12 个量能指标。landing plan 把它标成
 **「唯一可能有正交增量的一族」**—— 理由是 Neely 等 (2014) 的 14 个指标里有 6 个是 OBV 类，
-而我们现在只有 **RelVR**（当日相对量）这一个量读数。
+当前实现只有 **RelVR**（当日相对量）这一个量读数。
 
 但那是**猜测**，本脚本把它变成数字，回答三问：
 
@@ -30,8 +30,7 @@ syllabus 第七阶段 D 族列了 12 个量能指标。landing plan 把它标成
 - RelVR **不重新实现**：`volume_ratio` 的数学、`sectors.benchmark_for` 的冻结表、
   `regime_transition.REL_FLOOR` 的常数全部 import 既有真源，
   **只有数据源不同**（本脚本读 `klines_deep` 深度池，live 量腿读 13 个月常规缓存）。
-- 池 = `klines_deep`（去相关扩容池），不是 live 的 32 票 ——
-  那是「几乎纯 AI/半导体、单个宏观周期」。
+- 池 = `klines_deep`（去相关扩容池），不使用操作者的活跃标的清单。
 
 Usage:
     .venv/moomoo/bin/python3 quant/research/volume_family_redundancy.py --limit 60 [--json]

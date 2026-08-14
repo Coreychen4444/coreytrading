@@ -1,8 +1,8 @@
 """relative_volume_backtest 合成数据回归 — 量腿四世界机械件 + collect 端到端。
 
-预注册纪律: 实现期间只允许合成数据 (设计稿 v1 锁定), 真数据只跑一次。
-场景钉住立项源头 (INTC 8/4-8/5): 价格腿 ×2 成立、绝对量比不过、全场同缩量 →
-RelVR 过 → W1 进场而 W0 空手。
+预注册纪律: 实现期间只允许合成数据，私有真数据按独立协议运行。
+合成场景：价格腿 ×2 成立、绝对量比不过、全场同缩量；RelVR 过，
+因此 W1 进场而 W0 空手。
 """
 import json
 
@@ -38,7 +38,7 @@ def test_fire_scan_v_resets_streak_on_dip():
     assert rv.fire_scan_v(0, 6, closes, 104, 2, lambda j: False) is None
 
 
-def test_world_entries_intc_shape():
+def test_world_entries_relative_volume_shape():
     """价格腿共同锚 p; 绝对量平 (1.0×) 不过, RelVR 过 → W1=W3=p, W0=None。"""
     closes = [100] * 5 + [96, 103, 104, 105, 106, 107, 108]
     vols = [1000] * len(closes)
@@ -86,7 +86,7 @@ def _mk_bars(closes, vols, start="2020-01-01"):
 
 
 def test_collect_end_to_end_relative_leg_rescues_quiet_reclaim(tmp_path):
-    """合成 INTC 场景全链: 破位 episode → cluster gate → 价格腿 ×2 →
+    """合成场景全链: 破位 episode → cluster gate → 价格腿 ×2 →
     绝对量平 (W0 永不进) / tape 缩量 RelVR 过 (W1 进) → 覆盖率与 pv 分离。"""
     n_pad, n_dec, n_rec = 130, 60, 100
     closes = [100.0] * n_pad
@@ -140,9 +140,7 @@ def test_summarize_and_verdict_shapes(tmp_path):
 
 
 def test_semi_mapping_frozen():
-    """映射表冻结: 光模块/衬底归半导体 (用户), 运营商/纯 HDD 归 QQQ。"""
-    for t in ("AAOI", "LITE", "AXTI", "INTC", "MU", "NVDA", "SNDK"):
-        assert t in rv.SEMI_SMH, t
-    for t in ("NBIS", "CRWV", "WDC", "NOK", "AMZN"):
-        assert t not in rv.SEMI_SMH, t
+    """研究脚本复用 production 的冻结映射，不保存第二份私人清单。"""
+    assert rv.SEMI_SMH is not None
+    assert rv.SEMI_SMH == set(rv.SEMI_SMH)
     assert len(rv.SEMI_SMH) == 24

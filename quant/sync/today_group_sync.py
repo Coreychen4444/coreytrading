@@ -9,9 +9,9 @@
 "现价在参与带内"(时点)当成了"允许挂单"(状态): 有授权的卡在等回踩时是 WAIT,
 无 GO 行, 白名单整晚空着(当晚 MRVL/MSFT 案, 用户 抓的)。
 
-membership 判据一句话(用户): **就看当前所处的 regime 有没有给 cap**。
-regime 统一落地(, 设计真源 quant/research/regime_field_unification_design.md)
-后, 这句话在数据层字面成立 —— 每张有 zones 的正股卡显式携带 current_regime
+membership 判据：**只读取当前 regime 是否给出 cap**。
+Schema 要求每张有 zones 的正股卡显式携带 current_regime，
+因此这句话在数据层字面成立，
 (schema 同生同死强制), 本模块 = 纯字段读, 零推断:
     cap_pct_nav > 0  → 授权(转移机落的 gate 达标 cap, 或 card 源常规参与天花板)
     cap 0 / 无 regime → 稳态静默(修复观察·持仓无加仓授权·观察层·stub)

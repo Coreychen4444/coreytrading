@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-"""longcall_historical_replay.py — 2026 年初真实 Jan27 LEAPS 重放 (S1 whipsaw 真实定价)
+"""Replay long-call campaigns from an explicit private manifest.
 
-用户 : 「模拟我在今年年初买入其他标的的一些明年到期的合约, 注意不要过拟合」。
-防过拟合固定规则 (运行前声明, 无运行时自由度):
-  票池   = iv_history 现有票池 15 只有期权者 (系统自然池, 非为结果挑选)
-  入场日 = 机械日历: 2026 年 1/2/3 月首个交易日 (不看行情); 合约首根晚于入场日
-           ≤10 交易日 → 用首根, 否则弃该入场点
-  合约   = Jan27 (270115), strike 由 HV20×1.1 目标 Δ0.70 反解 snap 标准网格
-           (执行误差存在 → 报告按**真实入场 delta**反解分桶, 不假装都是 0.70)
-  退出栈 = 与 synthetic_longcall 同款 base (棘轮 50/100 + 趋势死亡线 3×ATR20 +
-           数据尾截断) + S1 独立臂; whipsaw 定义沿用已锁的 60 交易日收复成本
-数据 = moomoo 真实合约日 K (option_klines/ 已归档, 到期退市不可重拉)。
-
-research 旁路: 无人 import 本模块。
+The public module contains pricing and exit mechanics only. Symbols, entry
+sessions, option codes, provider observations and study results stay in the
+ignored private workspace. The manifest fixes the population before results are
+read and prevents public source from becoming a portfolio snapshot.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import re
 import statistics
 import sys
 from datetime import date
@@ -31,43 +25,31 @@ ROOT = Path(__file__).resolve().parents[2]
 OPT_DIR = ROOT / "trade/us_stock/market/option_klines"
 KL = ROOT / "trade/us_stock/market/klines"
 DEEP = ROOT / "trade/us_stock/market/klines_deep"
-REPORT = ROOT / "tmp/backtest/longcall_historical_replay_report.md"
+DEFAULT_MANIFEST = ROOT / "trade/us_stock/knowledge/research/longcall_replay/campaigns.json"
+DEFAULT_REPORT = ROOT / "tmp/backtest/longcall_historical_replay_report.md"
 R = 0.045
-EXPIRY = "2027-01-15"
 WHIPSAW_DAYS = 60
 MAX_LATE = 10  # 合约首根晚于入场日历日的最大交易日数
 
-# (ticker, entry_date, code) — 由 longcall_candidates 机械生成, 拉取失败/不存在的已剔
-CAMPAIGNS = [
-    ("AAOI", "2026-01-02", "AAOI270115C60000"), ("AAOI", "2026-02-02", "AAOI270115C60000"),
-    ("AAOI", "2026-03-02", "AAOI270115C150000"),
-    ("AMZN", "2026-01-02", "AMZN270115C220000"), ("AMZN", "2026-02-02", "AMZN270115C230000"),
-    ("AMZN", "2026-03-02", "AMZN270115C190000"),
-    ("GOOGL", "2026-01-02", "GOOGL270115C300000"), ("GOOGL", "2026-02-02", "GOOGL270115C320000"),
-    ("GOOGL", "2026-03-02", "GOOGL270115C280000"),
-    ("INTC", "2026-01-02", "INTC270115C35000"), ("INTC", "2026-02-02", "INTC270115C55000"),
-    ("INTC", "2026-03-02", "INTC270115C40000"),
-    ("LITE", "2026-01-02", "LITE270115C380000"), ("LITE", "2026-02-02", "LITE270115C460000"),
-    ("LITE", "2026-03-02", "LITE270115C720000"),
-    ("META", "2026-01-02", "META270115C620000"), ("META", "2026-02-02", "META270115C640000"),
-    ("META", "2026-03-02", "META270115C620000"),
-    ("MRVL", "2026-01-02", "MRVL270115C80000"), ("MRVL", "2026-02-02", "MRVL270115C75000"),
-    ("MRVL", "2026-03-02", "MRVL270115C75000"),
-    ("MSFT", "2026-01-02", "MSFT270115C460000"), ("MSFT", "2026-02-02", "MSFT270115C380000"),
-    ("MSFT", "2026-03-02", "MSFT270115C360000"),
-    ("MU", "2026-01-02", "MU270115C300000"), ("MU", "2026-02-02", "MU270115C400000"),
-    ("MU", "2026-03-02", "MU270115C380000"),
-    ("NOK", "2026-01-02", "NOK270115C5000"), ("NOK", "2026-02-02", "NOK270115C5000"),
-    ("NVDA", "2026-01-02", "NVDA270115C180000"), ("NVDA", "2026-02-02", "NVDA270115C170000"),
-    ("NVDA", "2026-03-02", "NVDA270115C170000"),
-    ("QCOM", "2026-01-02", "QCOM270115C160000"), ("QCOM", "2026-02-02", "QCOM270115C140000"),
-    ("QCOM", "2026-03-02", "QCOM270115C130000"),
-    ("RKLB", "2026-01-02", "RKLB270115C90000"), ("RKLB", "2026-02-02", "RKLB270115C75000"),
-    ("RKLB", "2026-03-02", "RKLB270115C70000"),
-    ("AXTI", "2026-03-02", "AXTI270115C70000"),
-    ("NBIS", "2026-01-02", "NBIS270115C90000"), ("NBIS", "2026-02-02", "NBIS270115C85000"),
-    ("NBIS", "2026-03-02", "NBIS270115C100000"),
-]
+
+def load_campaigns(path: Path) -> list[tuple[str, str, str]]:
+    """Load ``ticker``, ``entry_date`` and ``option_code`` from a private JSON list."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"private campaign manifest not found: {path}; create it in the ignored workspace"
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("campaign manifest must be a non-empty JSON list")
+    campaigns = []
+    for index, row in enumerate(payload):
+        if not isinstance(row, dict):
+            raise ValueError(f"campaign[{index}] must be an object")
+        values = (row.get("ticker"), row.get("entry_date"), row.get("option_code"))
+        if not all(isinstance(value, str) and value for value in values):
+            raise ValueError(f"campaign[{index}] requires ticker, entry_date and option_code")
+        campaigns.append(values)
+    return campaigns
 
 
 def _ncdf(x):
@@ -115,9 +97,12 @@ def und_rows(t):
     return None
 
 
-def tau_of(d):
+def tau_of(d, code):
     d0 = date(*map(int, d.split("-")))
-    d1 = date(*map(int, EXPIRY.split("-")))
+    match = re.match(r"^[A-Z]+(\d{2})(\d{2})(\d{2})[CP]\d+$", code)
+    if not match:
+        raise ValueError(f"invalid option code: {code}")
+    d1 = date(2000 + int(match.group(1)), int(match.group(2)), int(match.group(3)))
     return max(0.0, (d1 - d0).days / 365.0)
 
 
@@ -143,8 +128,8 @@ def replay(t, entry_cal, code, s1=None, s2=None):
     atr = technical.atr(urows, period=20)
     uatr = {r_["date"]: atr[i] for i, r_ in enumerate(urows)}
     s0 = uclose.get(bars[0]["date"])
-    iv0 = implied_vol(cost, s0, _strike(code), tau_of(bars[0]["date"])) if s0 else None
-    d0 = bs_delta(s0, _strike(code), tau_of(bars[0]["date"]), iv0) if s0 else None
+    iv0 = implied_vol(cost, s0, _strike(code), tau_of(bars[0]["date"], code)) if s0 else None
+    d0 = bs_delta(s0, _strike(code), tau_of(bars[0]["date"], code), iv0) if s0 else None
 
     hwm_pm, hwm_close = cost, s0 or 0.0
     armed50 = armed100 = False
@@ -198,8 +183,10 @@ def replay(t, entry_cal, code, s1=None, s2=None):
 
 
 def _strike(code):
-    import re
-    return int(re.match(r"^[A-Z]+\d{6}[CP](\d+)$", code).group(1)) / 1000.0
+    match = re.match(r"^[A-Z]+\d{6}[CP](\d+)$", code)
+    if not match:
+        raise ValueError(f"invalid option code: {code}")
+    return int(match.group(1)) / 1000.0
 
 
 def p10(v):
@@ -207,17 +194,23 @@ def p10(v):
     return s[max(0, int(0.10 * len(s)))] if s else 0.0
 
 
-def main():
-    lines = ["# longcall_historical_replay — 2026 年初真实 Jan27 LEAPS 重放", "",
-             "防过拟合规则见脚本 docstring (票池/入场日/strike 全机械, 无运行时自由度)。", ""]
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Replay private long-call campaigns")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    args = parser.parse_args(argv)
+    campaigns = load_campaigns(args.manifest)
+
+    lines = ["# long-call historical replay", "",
+             "Population and entry sessions come from the locked private manifest.", ""]
     base_res = {}
     valid = []
-    for t, ed, code in CAMPAIGNS:
+    for t, ed, code in campaigns:
         r_ = replay(t, ed, code, s1=None)
         if r_:
             base_res[(t, ed)] = r_
             valid.append((t, ed, code))
-    lines.append(f"有效 campaigns: {len(valid)} (15 票 × 1/2/3 月, 首根晚 >10 交易日已弃)")
+    lines.append(f"有效 campaigns: {len(valid)}（超过最大延迟的首根记录已排除）")
     lines += ["", "## 真实入场 delta 分布 (strike 由 HV 代理反解, 执行误差如实报)", ""]
     ds = sorted(r_["delta0"] for r_ in base_res.values() if r_["delta0"])
     lines.append(f"- delta 中位 {ds[len(ds)//2]:.2f}, p25 {ds[len(ds)//4]:.2f}, "
@@ -262,8 +255,8 @@ def main():
         lines.append(f"| {t} {ed[5:7]}月 | {b['delta0']:.2f} | {b['exit']}(d{b['days']}) "
                      f"| {b['pnl']:+.1%} | {r30['exit']}(d{r30['days']}) | {r30['pnl']:+.1%} | {wh} |")
 
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text("\n".join(lines) + "\n")
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 
 

@@ -1,25 +1,9 @@
-"""sizing.py — regime cap / gate 预算 / 整股档位分配的**单一真源**.
+"""Single source for regime caps, gate budgets, and whole-unit sizing.
 
-为什么是共享层 (用户): entry_guard(入场侧) 和 portfolio_brief(持仓侧)
-此前各存一份 cap 常量, 各自实现整股逻辑 —— 同一条规则两处维护 = 迟早分叉。
-两个消费者的差异只在**渲染和时点**, 算钱的判别式必须同一份。
-
-本模块只做纯函数, 不读文件、不打印、不落库。
-
-三块:
-  1. regime cap × gate 预算 (授权量二值 {0, NOTIONAL_CAP} + gate1/2/3 累计上限表)
-  2. 卡片约束        agent.action.constraints (touch_protocol / vehicle 播报)
-  3. share_ladder   整股约束下的档数降级表 (position-tiers.md §整股约束)
-
-**分类轴 (probe/confirmed/early_risky)  退役**(用户 裁决, 设计 =
-quant/research/classification_removal_design.md): 授权量只剩 `current_regime.
-cap_pct_nav` 一个来源 —— 0 = VETO, 给了 (= NOTIONAL_CAP) 就按 gate 预算
-直接入场, 修复 gate 收复后**不再有 2% 中间档**。动机 = 两周 live 样本 (gate 收复
-后 4/4 campaign 浮盈、0 止损、收盘口径仅 INTC 浅回 gate 下 2 日) + gate round-2
-判别力证据 (止损率 −8~−30pp): gate 多维确认本身就是证据关, 过关不再打折。
-旧 CAP_FRACS {confirmed 0.40, probe 0.02, early_risky 0} / CLASS_ORDER /
-clamp_classification / derive_classification 随轴一并移除; 历史 fill 事件上的
-classification 值只读保留 (tier_legacy 先例)。
+This module contains pure functions only. Authorization comes exclusively from
+``current_regime.cap_pct_nav``: zero means VETO and a positive value enters the
+shared gate-budget calculation. Consumers may render the result but must not
+copy the formulas.
 """
 from __future__ import annotations
 
@@ -33,7 +17,8 @@ from .timeutil import et_today
 #
 # w = min(NOTIONAL_CAP, 剩余预算/(SHOCK_X × ATR/价), GROSS_CAP − 已用 gross, 分类/regime cap)
 #
-# 四个数的来历 (全部有回测存档, 见 shock_budget_design.md):
+# These pinned production constants require a locked private study and reviewed
+# production change before modification:
 #   NOTIONAL_CAP 0.40  用户  定 (风险偏好较高; 业界对照: 1940 法案 5% /
 #                      UCITS 10% / 集中型 8-15% / 极端集中 15-25%)
 #   SHOCK_BUDGET 0.15  用户 定; 组合单日冲击损失上限
@@ -71,7 +56,7 @@ GROSS_CAP = 1.10
 AT_RISK_CAP_FRAC = 0.05
 OPTION_ATRISK_LOSS_FRAC = 0.25
 
-# 熔断 (shock_budget_design §2.7, 用户  定版 §15c): 受管书**单日损失**
+# 熔断：受管书**单日损失**
 # ≥ SHOCK_BREAKER_MULT × SHOCK_BUDGET × NAV (= 22.5% NAV,「比 30 年样本里最坏的
 # 那天还糟」) → 裁决动作 = **直接清仓, 盘中立即执行**。检测在 portfolio_brief
 # (shock_breaker_signal, 火警绕过 24h 冷却)。与回测 BREAKER_MULT 的相等由

@@ -31,6 +31,7 @@ The public repository contains the complete reusable operating model while exclu
 
 - Never commit `.env`, private keys, tokens, login hashes, account identifiers, broker exports or populated OpenD configuration.
 - Never commit real holdings, watchlists, lots, orders, fills, NAV history, journals, active-universe market caches, private research cards or user-specific strategies.
+- Public `quant/research/` is limited to reusable mechanics, synthetic examples and bootstrap documentation. Populated protocols, datasets, results, rulings, backlog and operator notes remain in the ignored private research workspace.
 - Public files below `trade/` are limited to `README.md` and synthetic `*.example.*` schemas.
 - `trade/README.md` is the AI bootstrap contract. Read it and the relevant descendant READMEs before creating private runtime files.
 - Copy only the examples needed by the requested workflow. Remove `.example` from the private filename, preserve the schema, and request missing facts instead of guessing.
@@ -474,6 +475,7 @@ For analysis and state writes:
 ## Research discipline
 
 - Research is offline and cannot be imported by live modules.
+- Private preregistrations, inputs, outputs, charts, rulings and working notes remain outside Git; the public layer contains only reusable, sanitized mechanics and synthetic examples.
 - Pre-register hypotheses, metrics, thresholds, fallback branches and decision rules before reading final results.
 - Use synthetic/adversarial fixtures to verify mechanics before historical data.
 - Preserve failed results and limitations; do not tune a rule until it “passes.”

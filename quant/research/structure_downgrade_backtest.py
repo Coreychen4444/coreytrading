@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Structure downgrade backtest — entry_guard 分类降级判别式该多宽?
 
-现状 (entry_guard.py): `if trend == "down" and not repaired: → probe`
-只认 LH+LL。 漏掉两个:
-  · LITE  trend="transition" (HH+LL) —— 含确认的更低低点, 但字符串不等于 "down"
-  · NVDA  trend="up" 但 close_below_last_swing_low=True (196.51 < 197.97)
-          —— 字段**已经算出来了**, 分类逻辑从来不读
+现状 (entry_guard.py): `if trend == "down" and not repaired: → probe`，只认 LH+LL。
+候选扩展还包括 mixed transition，以及 trend="up" 但收盘低于最近 swing low 的状态。
 
 问题: 这两个状态的前向收益, 更像 clean up 还是更像 down?
       像 down → 降级有据; 像 up → 现状是对的, 别改。
@@ -34,13 +31,15 @@ from collections import defaultdict
 
 from quant.core import technical  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR as KDIR  # noqa: E402
-UNIVERSE = ["AAOI", "MU", "LITE", "MRVL", "NBIS", "INTC", "NOK", "CRWV", "RKLB",
-            "AXTI", "AMKR", "NVDA", "AMD", "GOOGL", "MSFT", "AAPL", "TSM",
-            "QCOM", "SNDK", "TSLA", "WDC", "SMR", "ASTS"]
 HORIZONS = (10, 20, 40)
 WARMUP = 60          # 结构标签需要足够左侧历史
 ZONE_LO, ZONE_HI = 0.80, 0.98   # zone proxy: 距 20d high 的回撤带
 HIGH_LOOKBACK = 20
+
+
+def available_tickers() -> list[str]:
+    """Discover the private study universe without embedding it in public source."""
+    return sorted(path.stem for path in KDIR.glob("*.jsonl") if path.is_file())
 
 
 def load(tk):
@@ -65,9 +64,9 @@ def bucket_of(s):
     if trend == "down":
         return "down (LH+LL) ←现状已降级"
     if trend == "transition":
-        return "transition (混合) ←LITE"
+        return "transition (混合)"
     if trend == "up":
-        return "up 但收盘<最近swing低 ←NVDA" if below else "up 干净 (HH+HL)"
+        return "up 但收盘<最近swing低" if below else "up 干净 (HH+HL)"
     return "sideways/其他"
 
 
@@ -91,7 +90,7 @@ def run():
     pools = {p: {h: defaultdict(list) for h in HORIZONS} for p in ("ALL", "ZONE_PROXY")}
     per_ticker_days = {}
 
-    for tk in UNIVERSE:
+    for tk in available_tickers():
         bars = load(tk)
         if len(bars) < WARMUP + max(HORIZONS) + 1:
             continue
@@ -118,7 +117,7 @@ def run():
     return pools, per_ticker_days
 
 
-ORDER = ["up 干净 (HH+HL)", "up 但收盘<最近swing低 ←NVDA", "transition (混合) ←LITE",
+ORDER = ["up 干净 (HH+HL)", "up 但收盘<最近swing低", "transition (混合)",
          "sideways/其他", "down (LH+LL) ←现状已降级"]
 BASE = "up 干净 (HH+HL)"
 DOWN = "down (LH+LL) ←现状已降级"
@@ -137,7 +136,7 @@ def wr_diff_sigma(a, b):
     return (pa - pb) / se if se > 0 else None
 
 
-def median_diff_ci(a, b, iters=2000, seed=20260729):
+def median_diff_ci(a, b, iters=2000, seed=399_989):
     """中位数差的 bootstrap 95% CI (自带 LCG, 不用 random 以便可复现)。"""
     if not a or not b:
         return None

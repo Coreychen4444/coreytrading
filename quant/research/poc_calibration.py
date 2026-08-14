@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""POC 漂移阈值校准 (预注册 poc_calibration_design.md, 已锁定)。
+"""POC 漂移阈值校准 (预注册 private preregistration, 已锁定)。
 
 ## 主问题
 POC 迁移到多少个 N 时, 机械重画会画出**实质不同**的结构? 该阈值能否把"该重画"
@@ -30,7 +30,7 @@ zone 边界就锚在这些带上; 带没动 ⇒ 重画画出同样的线 ⇒ 那
 2 打赢时间基线: AUC(POC) − AUC(距锚天数) ≥ 0.05 且 bootstrap CI90 下界 > 0
 3 选定 T 上假阳性率 ≤ 30%
 4 T ∈ [0.5N, 3.0N]
-全部成立才采纳; 任一不满足 → POC 维保持 advisory-only, 否定结果写回设计稿。
+全部成立才形成采纳建议；任一不满足 → POC 维保持 advisory-only。
 T 的选法: 满足判据 3 的候选里取 Youden's J 最大者; 平手取更大的 T。
 
 Usage: .venv/moomoo/bin/python3 quant/research/poc_calibration.py [--json] [--report PATH]
@@ -56,8 +56,7 @@ ANCHOR_STRIDE = 5                       # §2: 每票每 5 个交易日一个 an
 K_VALUES = (3, 5, 10, 15, 20, 30)       # §2
 RIGHT_GUARD = 5                         # §2: anchor+k ≤ 数据末尾 − 5
 LABEL_WINDOW = 60                       # §2: profile 用锚定日往前 60 根 (= level_map.profile_days)
-# : ②POC 维已从 live 的 drift.py 摘除。这个常量当时是 drift.py 的守卫,
-# 复制到这里是为了让本回测**保持可复跑**—— 研究件不该依赖一个已经不存在的 live 参数。
+# 研究参数在本模块中显式固定，不依赖 production 当前是否仍使用该维度。
 POC_MIN_SESSIONS = 10
 POC_WINDOWS = (20, 60)                  # §3: 预注册的两个臂
 HVN_N = 5
@@ -67,7 +66,7 @@ FPR_MAX = 0.30                          # 判据 3
 T_RANGE = (0.5, 3.0)                    # 判据 4
 T_GRID = [round(0.1 * i, 1) for i in range(1, 51)]     # 0.1N .. 5.0N
 BOOT_DRAWS = 2000
-BOOT_SEED = 20260807
+BOOT_SEED = 316_227
 
 
 # ---------- 画线 ----------

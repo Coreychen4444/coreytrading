@@ -27,7 +27,7 @@ TIERS = {"base", "position"}
 # 旧标签 → 新标签。历史 events 的 tier 已按此迁移, 原值留在 tier_legacy,
 # perf_report 想切旧口径仍切得动。
 LEGACY_TIER_MAP = {"core": "position", "trading": "position"}
-# [legacy] 分类轴  退役 (classification_removal_design.md) —— 枚举保留
+# [legacy] 退役分类枚举只为验证历史事件。
 # 只为让**历史**fill 事件过校验 (tier_legacy 先例); 新事件不写 classification,
 # 改写 auth {cap_pct_nav, gate_no} (sizing.derive_auth)。round_no =
 # 当天那一版的键 (lots 近似轮号), 只读留存 —— tier_legacy / classification 先例。
@@ -130,7 +130,7 @@ def _validate_card_regime(agent: dict, p: str, tk: str) -> list[str]:
     cr = agent.get("current_regime")
     if has_z and cr is None:
         return [f"{p}.agent.current_regime missing while zones present (同生同死; "
-                "建卡/重画走 update_position_zones 自动派生, 真源 regime_field_unification_design)"]
+                "建卡/重画走 update_position_zones 自动派生)"]
     if cr is None:
         return errs
     if not has_z:

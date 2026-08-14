@@ -176,23 +176,23 @@ def test_rejudge_insufficient_stays_insufficient():
 
 
 def test_verdict_texts_keep_the_recommendation_only_semantics():
-    """两个方向都只出建议 —— 「实施等 用户」必须在字面上。"""
-    assert "等 用户" in sg.rejudge(_base(), {"pass": True})["text"]
-    assert "等 用户" in sg.rejudge(_base(), {"pass": False})["text"]
+    """两个方向都只出建议，不能自动修改 production。"""
+    assert "不自动实施" in sg.rejudge(_base(), {"pass": True})["text"]
+    assert "不自动实施" in sg.rejudge(_base(), {"pass": False})["text"]
     assert "撤下" in sg.rejudge(_base(), {"pass": False})["text"]
 
 
 # ── 5. 未锁拒跑 ──────────────────────────────────────────────────
 
 def test_T_is_locked_to_harm_veto():
-    """T 已锁 (用户): B_harm_veto。改这个值 = 跑完改判据, 先过预注册。
+    """T 由协议锁定为 B_harm_veto；修改它必须创建新预注册版本。
 
     (锁定前这条钉的是「T_MODE is None ⟹ main 退出码 2 拒跑」—— 那半机制保留在
     main_cli 里作为未来预注册的模板, 本轮已走过它。)"""
     assert sg.T_MODE == "B_harm_veto"
 
 
-def test_seed_is_fresh_not_reused():
-    """种子不复用两轮已跑过的 20260808 (设计稿 §3)。"""
-    assert sg.BOOT_SEED == 20260809
+def test_seed_is_independent():
+    """成本守卫使用独立的固定 seed，不复用对照回测抽样序列。"""
+    assert sg.BOOT_SEED == 374_166
     assert sg.BOOT_SEED != gpt.BOOT_SEED

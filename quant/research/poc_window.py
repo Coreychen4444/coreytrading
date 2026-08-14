@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""POC 窗口与 ②维去留 — round-2 (预注册 poc_window_design.md, 已锁定)。
+"""POC 窗口与 ②维去留（由 private preregistration 锁定）。
 
-## round-1 留下的两件未了事
+## 两个决策问题
 1. `POC_WINDOW` 该不该 20 → 60 (live 参数)
-2. ②POC 维该不该留 (round-1 §5 否定分支: 判据 2 不过 ⇒ 时间基线已足够 ⇒ 考虑摘掉)
+2. ②POC 维是否提供超出时间基线的增量信息
 **二选一, 不允许"既不改也不摘"继续挂着。**
 
-## 本轮的核心修正 (设计稿 §2)
-round-1 里 poc60 的 AUC 0.812 **不可信地高**: 自变量 (POC = 60 根 profile 的 argmax) 与
-因变量 (label = 同一份 profile 的 HVN 带动没动) **共用一个分布**。
-本轮把 label 换成 **pivot 锚的 zone 组**—— 那才是 `regime_transition` 画 zone 的真实机制,
+## 构造约束
+自变量 (POC = profile 的 argmax) 不能与因变量共用同一份 profile 分布。
+因此 label 使用 **pivot 锚的 zone 组**，与 volume profile 解耦：
 且与 volume profile **不共用任何分布**:
   自变量 = 成交额在价格上的分布 (volume 来源)
   因变量 = 价格的转折点          (price 来源)
@@ -41,8 +40,7 @@ from quant.research.poc_calibration import (# noqa: E402  同一套机械件, �
     ANCHOR_STRIDE, AUC_MIN, FPR_MAX, K_VALUES, RIGHT_GUARD, T_RANGE,
     _auc_np, auc, pick_threshold)
 
-# : ②POC 维已从 live 的 drift.py 摘除。这个常量当时是 drift.py 的守卫,
-# 复制到这里是为了让本回测**保持可复跑**—— 研究件不该依赖一个已经不存在的 live 参数。
+# 研究参数在本模块中显式固定，不依赖 production 当前是否仍使用该维度。
 POC_MIN_SESSIONS = 10
 POC_WINDOWS = (20, 60)
 SWING_WING = 2          # = regime_transition.PARAMS["swing_wing"], 锁死不扫
@@ -52,7 +50,7 @@ WINDOW_MARGIN = 0.05    # 判据 5a-1
 TIME_MARGIN = 0.05      # 判据 5b-1
 PRICE_MARGIN = 0.03     # 判据 5b-2
 BOOT_DRAWS = 2000
-BOOT_SEED = 20260807
+BOOT_SEED = 412_311
 
 
 # ---------- pivot 锚的 zone 组 (新 label 的来源) ----------
@@ -187,8 +185,7 @@ def evaluate(rows):
     """⚠️ 所有**比较**都在共同可评分子集上做 (POC 有读数的那些行)。
 
     POC_MIN_SESSIONS=10 让 k=3/5 没有 POC 读数; 若点估计在全样本上算、CI 却在子集上算,
-    两者就是两个估计量 —— 冒烟时实测到点估计 −0.1603 落在自己的 CI [−0.039,−0.033]
-    之外, 正是这个错。基线 AUC 一并在同一子集上重算。
+    两者就是两个估计量，不能互相比较。基线 AUC 一并在同一子集上重算。
     """
     common = [r for r in rows
               if r.get("poc20") is not None and r.get("poc60") is not None]
@@ -255,33 +252,23 @@ def evaluate(rows):
 def final_action(res):
     w = res["window"]["switch_to_60"]
     keep = res["keep"]["keep_dimension"]
-    #  已裁决并执行: ②POC 维摘除 (drop_dimension 分支), drift 的
-    # poc_shift_n 阈值与播报已删 —— 文案改为已裁决态 (ledger R5), 复跑本脚本
-    # 不再产出指向已删符号的待办。裁决全文 poc_window_design.md §10。
     if not keep:
         return {"action": "drop_dimension",
-                "text": "已裁决 (, 即本分支): ②POC 维已从 drift 装置摘除, "
-                        "drift 的 poc_shift_n 阈值与相应播报已删。本输出为复算确认, "
-                        "无待办。判据 5b 未全过 (round-1 §5 的否定分支); "
-                        "裁决记录 poc_window_design.md §10。"}
+                "text": "判据未全过：建议移除②POC维。研究输出仅形成 production proposal。"}
     if w:
         return {"action": "switch_window_60",
-                "text": f"⚠️ 复算落在「保留②维且窗口 20→60」分支 (阈值 T = "
-                        f"{res['keep']['chosen_T']['T']}N) — 与  已执行裁决 "
-                        "(②维摘除) 相反。恢复②维是翻案不是参数调整: 先读 "
-                        "poc_window_design.md §10, 归 用户 重裁, 勿直接改 live。"}
+                "text": f"判据全过：建议保留②POC维并切换窗口，阈值 T = "
+                        f"{res['keep']['chosen_T']['T']}N。需另行 production review。"}
     return {"action": "keep_window_20",
-            "text": f"⚠️ 复算落在「保留②维, 窗口维持 20」分支 (阈值 T = "
-                    f"{res['keep']['chosen_T']['T']}N) — 与  已执行裁决 "
-                    "(②维摘除) 相反。恢复②维是翻案不是参数调整: 先读 "
-                    "poc_window_design.md §10, 归 用户 重裁, 勿直接改 live。"}
+            "text": f"判据支持保留②POC维且维持短窗口，阈值 T = "
+                    f"{res['keep']['chosen_T']['T']}N。需另行 production review。"}
 
 
 def render(res, act):
-    L = [f"=== POC 窗口与②维去留 (round-2) === {res['n_units']} 单元 / "
+    L = [f"=== POC 窗口与②维去留 === {res['n_units']} 单元 / "
          f"{res['n_tickers']} 票",
          f"label = **pivot 锚的 zone 组**(z1/z2/stop) 重画会变的比例: {res['base_rate']:.1%}",
-         "  (round-1 用的是 volume profile 的 HVN 带 = 与 POC 共用分布; 本轮已解耦)", "",
+         "  (label 与 POC 使用的 volume profile 分布解耦)", "",
          f"共同可评分子集 n={res['n_common']} (POC 有读数的行; k=3/5 结构上没有), "
          f"该子集 label 基准率 {res['base_rate_common']:.1%}",
          "  **所有 AUC 比较都在这个子集上做**—— 点估计与 CI 必须同一个估计量", "",

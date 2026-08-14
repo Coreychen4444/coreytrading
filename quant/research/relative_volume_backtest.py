@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """relative_volume_backtest — 修复 gate 量腿计量方式裁决（预注册 v1，锁定）。
 
-设计稿全文: quant/research/relative_volume_gate_design.md（四决策点 + 运行前修订 10 钉全锁）。
-立项源头 = INTC 8/4-8/5: gate 98 价格腿 2/2, 量腿 1.01×/0.73× 不过 1.2 未转移,
-而  QQQ/SMH 同为缩量日 — 用户: 全场缩量日用绝对量比惩罚个股 = 尺子瞄歪。
+完整研究协议应保存在 private preregistration。核心问题是：当个股与基准同时缩量时，
+绝对量比可能混入全市场状态，因此比较相对量比。
 
 ## 四个世界（共同锚 p = 价格腿首满足日; 唯一自由度 = 量腿; ITT, 终点 p+20/p+60）
 W0 现行: 收盘>gate ×2 + 绝对量比≥1.2 (完成日)     W1 相对: RelVR≥1.2
@@ -15,7 +14,7 @@ single-shot; 未入场 = 现金。
 ## 裁决 (D1, T60 全样本)
 R(换尺): Δmean CI90 下界≥0 且 Δ止损率 CI90 上界<+3pp 且 Δ覆盖率 CI90 下界>0
   (W1/W2 同过取 W1)
-N(量腿退休): W3 对 W0/W1/W2 全部 Δmean CI90 下界>0 且 Δ止损率上界<+3pp (触发须 用户 单独批)
+N(量腿退休): W3 对 W0/W1/W2 全部 Δmean CI90 下界>0 且 Δ止损率上界<+3pp（只形成 production proposal）
 K/no_call: 其余 = 维持现行。
 分层 (E±1 / 非) 各出全表不改写主裁决; 敏感性 = 半导体子集 QQQ 尺翻转 (不裁决)。
 
@@ -59,9 +58,9 @@ STOP_MULT = 2.0
 SLIP = 0.002
 BOOT_DRAWS = 10_000
 P10_DRAWS = 1_000
-BOOT_SEED = 20260806
+BOOT_SEED = 141_421
 CI_Q = (5.0, 95.0)         # 90% CI
-STOP_GUARD = 0.03          # +3pp (用户 锁定, 比 escape 的 +5 严)
+STOP_GUARD = 0.03          # 私人协议必须显式锁定该守卫
 WORLDS = ("W0", "W1", "W2", "W3")
 CMPS = ("W1", "W2", "W3")
 
@@ -350,7 +349,7 @@ def summarize(episodes):
 
 
 def d1_verdict(summary):
-    """机械裁决 (T60 全样本): R (W1 优先) / N (须 用户 批) / K。"""
+    """机械裁决（T60 全样本）：R（W1 优先）/ N（仅形成提案）/ K。"""
     cells = summary.get("full", {}).get(60) or {}
     if not cells or cells.get("insufficient"):
         return {"branch": "no_call", "reason": "数据不足"}
@@ -388,7 +387,7 @@ def _cell_line(w, c):
 
 
 def render(summary, drops, verdict):
-    L = ["# relative_volume gate 量腿裁决 — round-1 (, seed 20260806)", ""]
+    L = [f"# relative_volume gate 量腿裁决 — round-1 (seed {BOOT_SEED})", ""]
     L.append(f"episodes {summary['n_total']} | drops: " +
              " / ".join(f"{k} {v}" for k, v in drops.items()))
     hdr = ("| cmp | n | Kish | Δmean CI90 | Δ止损率 CI90 | Δp10 CI90(1k) "

@@ -1,8 +1,4 @@
-"""shock_budget_backtest 机械件验证 (合成数据)。
-
-钉的重点是本轮真正的发现: **冲击预算不控制杠杆**。
-w = 预算份额 / (X × ATR/价) —— 波动率越低, 同样的预算换来的名义敞口越大, 无上限。
-"""
+"""shock_budget_backtest 合成验证：冲击预算与名义杠杆是不同约束。"""
 import pytest
 
 from quant.research import shock_budget_backtest as sb
@@ -27,13 +23,9 @@ def test_x_full_is_the_lookahead_version_kept_only_for_contrast():
 
 
 def test_shock_budget_does_not_bound_leverage():
-    """**本轮的核心发现**: 同样的预算份额, 低波动标的换到的名义敞口任意大。
-
-    w = 预算 / (X × ATR/价)。这就是"正股还要不要名义 cap"的答案 ——
-    要, 而且不是为了尾部, 是因为冲击预算根本不管杠杆。
-    """
+    """同样的冲击预算份额可对应不同名义敞口，因此另需名义约束。"""
     budget, X = 0.03, 2.0
-    w_hi_vol = budget / (X * 0.13)      # AAOI 类, ATR/价 13%
+    w_hi_vol = budget / (X * 0.13)      # 合成高波动标的, ATR/价 13%
     w_lo_vol = budget / (X * 0.02)      # 低波动大盘
     assert w_hi_vol < 0.15
     assert w_lo_vol > 0.70              # 同一笔预算 → 70%+ NAV

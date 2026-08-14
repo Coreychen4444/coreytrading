@@ -49,33 +49,24 @@ UNTESTED: dict[str, str] = {
     "journal/decision_log": "薄 append 壳，写入路径由 core/io_json 测试覆盖",
     "report/perf_report": "读时统计。**真缺口**: process×outcome 矩阵算错不会有人发现",
 
-    # research —— 旁路层，一次性分析居多
-    "research/calibration": "一次性校准分析，输出报表供人读，不喂给任何实时判定",
+    # research —— 离线旁路层；待补测试的脚本需保留通用理由
     "research/zone_timeline": "从 git 历史挖 zone 快照，输出报表；正确性靠人读 git log 复核",
-    "research/zone_hit_analysis": "一次性分析 BUY fill 落点 vs zone，结论已进 memory",
-    "research/pull_gate_history": "为 gate_backtest 拉多年深度日线的一次性取数脚本",
-    "research/pull_breadth_history": "gate round-2 广度取数 (Yahoo, research-only 例外), 一次性脚本",
-    "research/pull_earnings_history": "earnings_gate_backtest 财报事件取数 (OpenD, 不占 kline quota), 一次性脚本",
-    "research/earnings_gate_backtest": "预注册回测 (design 锁定), one-shot 纪律: 机制由对抗性验收+合成数据对拍把关, 真数据只跑一次",
-    "research/repaint_trigger_backtest": "预注册回测 (当日立项当日裁决: 维持 A), one-shot; 结论已进 memory",
-    "research/options_exit_overlay_backtest": "预注册回测 (design 锁定), one-shot; n=17 案例级, S4 穿越语义修正在案",
-    "research/longcall_historical_replay": "真实 Jan27 合约重放 (用户  加样本), one-shot; 防过拟合规则在 docstring",
-    "research/synthetic_longcall_backtest": "预注册回测 (design 锁定), one-shot; 1967 campaigns, A1/A2/B1 判据裁决在案",
-    "research/sss_backtest": "预注册回测 (trend_slots §5 锁定), one-shot; 裁决 FAIL 不接线 (3fed6b1), 已结案",
-    "research/indicator_redundancy": "指标冗余体检 (price_action_framework_design §13.4), "
+    "research/pull_earnings_history": "需要 OpenD 财报端点的研究取数 CLI",
+    "research/earnings_gate_backtest": "离线预注册回测；尚缺独立构造级覆盖",
+    "research/repaint_trigger_backtest": "离线预注册回测；尚缺独立构造级覆盖",
+    "research/synthetic_longcall_backtest": "离线合成期权回测；尚缺独立构造级覆盖",
+    "research/sss_backtest": "离线信号评分回测；尚缺独立构造级覆盖",
+    "research/indicator_redundancy": "指标冗余体检，"
                                      "**只算相关不算收益**—— 纯度量脚本; B 部分刻意调真的 "
                                      "detect_bottom_signals 而不复刻实现, 所以它测的就是 live 行为",
-    "research/volume_family_redundancy": "量族冗余体检 (technical_engine_landing_plan §5 阶段7D 的前置), "
+    "research/volume_family_redundancy": "量族冗余体检，"
                                          "**只算相关不算收益**—— 纯度量脚本, 无判定逻辑可回归; "
                                          "四个候选指标就地实现(未采纳不进 core), RelVR 部件全 import 既有真源",
-    "research/interaction_census": "Step 0 信号量普查 (price_action_framework_design §8.0/§11), "
+    "research/interaction_census": "信号量普查，"
                                    "**只数事件不算收益**—— 无判定逻辑可回归; 若后续接 [FYI] 任务, "
                                    "事件判别式要搬进 decision/ 层并在那里补测试",
-    "research/escape_velocity_backtest": "预注册回测 (design 锁定), 同上; world_value/_boot_metric 被 earnings_gate 复用",
-    "research/entry_ladder_backtest": "回测，结论已固化进 trading-discipline.md",
-    "research/entry_caps_backtest": "回测，无 __main__ guard，import 即跑",
-    "research/exit_rules_backtest": "**真缺口**: CLAUDE.md 规定「改退出参数前必跑」，"
-                                    "它的数字直接决定要不要动棘轮/趋势线，本身却没测",
+    "research/escape_velocity_backtest": "离线预注册回测；world_value/_boot_metric 被 earnings_gate 复用",
+    "research/entry_ladder_backtest": "离线入场结构回测；尚缺独立构造级覆盖",
     "research/structure_downgrade_backtest": "**真缺口**: CLAUDE.md 规定「改 entry_guard "
                                              "降级条件前必跑」，判据来源却没测",
 }
@@ -160,7 +151,7 @@ def test_every_untested_entry_states_a_reason():
 
 
 def test_coverage_does_not_regress():
-    """整体覆盖率不许掉。26/52 是  建立守卫时的实测值。
+    """整体覆盖率不得低于已锁定的公开基线。
 
     这条和上面的棘轮互补: 棘轮防「个别模块偷偷退化」，这条防「一次加十个没测试的模块，
     每个都在 UNTESTED 里合规地写了理由」。

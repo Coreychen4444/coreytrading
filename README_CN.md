@@ -32,7 +32,7 @@ flowchart LR
     P --> E(("人工复核<br/>与执行"))
     E --> F["反馈<br/>订单 · 成交 · lots · 退出 · 复盘"]
     F --> D
-    R["research/<br/>预注册回测 + 裁决"] -. 校准 .-> T
+    R["research/<br/>合成机械件 + 私人研究"] -. 校准 .-> T
     TS["tests/<br/>invariant · 棘轮 · 机械件"] -. 守住 .-> A
 ```
 
@@ -144,7 +144,7 @@ Promotion 后：
 - 已 promotion 的 holding 只有通过下一次确认状态转移才能获得 add-on authorization；
 - 修改 confirmation 或 stop semantics 前必须重新运行指定研究机械件。
 
-研究实现和裁决保存在 `quant/research/`；live code 永远不能 import research 层。
+可复用研究机械件保存在 `quant/research/`；私人 protocol、dataset、result 和 ruling 留在 ignored workspace。Live code 永远不能 import research 层。
 
 ### 六、gate 与 zone 同生、同死、同锚
 
@@ -452,15 +452,15 @@ Broker-derived block 只允许 `quant/sync/` 写入。Paths、schemas、locked a
 
 ---
 
-## Research 与裁决账本
+## Research 工作区
 
-`quant/research/` 是隔离的历史验证层，产出 statistics 而不是 action，live code 禁止 import。
+`quant/research/` 是隔离的公开研究脚手架，只保存可复用验证机械件。私人研究产出 statistics 而不是 action，live code 禁止 import research 层。
 
 - 结果产生前先预注册判据；
 - 授权历史数据运行前，先用 synthetic test 验证机械件；
-- [`quant/research/RULINGS_LEDGER.md`](quant/research/RULINGS_LEDGER.md) 记录 adopted、rejected 和 scoped decision；
-- 引用裁决前检查 live parameter 及其 domain，不能依赖复制的行号；
-- 修改参数前运行其指定 backtest。
+- [`quant/research/README_CN.md`](quant/research/README_CN.md) 定义 AI 搭建流程和公开/私人边界；
+- 已填写的 preregistration、dataset、report、chart、ruling 和 backlog 都必须保持为 ignored private artifact；
+- 提议修改参数前，检查 live parameter，并针对其 domain 重新运行获准的私人研究。
 
 ---
 

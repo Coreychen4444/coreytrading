@@ -1,11 +1,11 @@
 """escape_velocity_backtest — breakout-stale 单日放量快车道 vs 现行 2 日确认。
 
-预注册: quant/research/escape_velocity_redraw_design.md (锁定 , 用户 批准)。
-真数据只跑一次; 本 docstring 复制设计稿要点作为正式预注册。
+运行前必须锁定私人预注册；公开脚本不保存批准记录或研究结果。
+私人数据按锁定协议运行；本 docstring 仅保留通用机械摘要。
 
 ── 预注册要点 (运行前锁定) ──────────────────────────────────────────
-问题: breakout-stale 需 close > trim 上沿连续 2 日 → 重画, 垂直行情识别延迟
-2-3 session (NBIS  +27% 案例)。检验单日逃逸信号当日给重画资格。
+问题: breakout-stale 需 close > trim 上沿连续 2 日 → 重画, 垂直行情可能延迟识别。
+检验单日逃逸信号当日给重画资格。
 
 对赌: H-fast (单日价量双确认可靠, 提前收益 > whipsaw 税) vs H-slow (假突破率高,
 2 日确认的保护 > 延迟成本 = 现行设计)。
@@ -25,7 +25,7 @@ Episode:
 对照池 (量比 < 2 的触发日) 与敏感性变体 (量比≥1.5 / close > level + 1×ATR20)
 只报告不裁决。
 
-统计: 按月 block bootstrap CI90, seed=20260801 固定 10,000 draws (p10 差 seed+1,
+统计: 按月 block bootstrap CI90, 使用固定中性 seed 与 10,000 draws (p10 差 seed+1,
 1,000 draws); Kish 有效 N 按月; 任一主格 Kish < 30 → 报「数据不足」不裁决。
 
 D1 裁决菜单 (按 regime 格独立, 机械执行落 JSON):
@@ -40,7 +40,7 @@ Survivorship 声明: klines_deep 存续票池 → 突破后崩掉退市的票缺
 对照池与变体不参与裁决 / whipsaw 子样本不单独裁决。
 
 ── 验收修正 (对抗性审查 , 全部在真数据运行之前; 非结果驱动,
-   用户 保留否决权; 同批追记设计稿「运行前修订」段) ──────────────────
+   任何修订必须生成新的私人协议版本）──────────────────
 #1 Kish<30 闸门措辞补「该格」— 按格独立 insufficient, 不全局 abort (对齐姊妹设计)
 #2 终点日止损悬置**不计止损率**(对齐 gate_backtest2 口径, round-2 数字可横比)
 #3 _boot_metric 月宇宙只由承载行构建, <2 月守卫过滤后判
@@ -65,7 +65,7 @@ from quant.core.paths import KLINE_DEEP_DIR  # noqa: E402
 from quant.research.entry_ladder_backtest import regime_of  # noqa: E402
 from quant.research.gate_backtest2 import atr_series  # noqa: E402
 
-SEED = 20260801
+SEED = 161_803
 DRAWS = 10_000
 P10_DRAWS = 1_000
 LEVEL_LOOKBACK = 60
@@ -272,7 +272,7 @@ def summarize(episodes):
         cell["diff_ci90"] = _boot_metric(rows, "t60", _mean_diff, DRAWS, SEED)
         cell["stop_diff_ci90"] = _boot_metric(rows, "t60", _stop_diff, DRAWS, SEED)
         cell["p10_diff_ci90"] = _boot_metric(rows, "t60", _p10_diff, P10_DRAWS, SEED + 1)
-        # 验收修正 #7: 设计稿承诺每格 ΔT20 CI90 — 同 seed 同 draws 零自由度补齐
+        # 每格 ΔT20 CI90 使用同 seed 与 draws。
         cell["diff_t20_ci90"] = _boot_metric(rows, "t20", _mean_diff_at("t20"), DRAWS, SEED)
         out["cells"][reg] = cell
     ctrl = [e for e in episodes if not e["fast_ok"]]
@@ -287,7 +287,7 @@ def summarize(episodes):
     out["whipsaw"] = {
         "n": len(wh),
         "mean_fast_t60": (sum(whv) / len(whv)) if whv else None,
-        # 验收修正 #7: whipsaw 子样本补分位 (设计稿"forward 分布")
+        # whipsaw 子样本报告预注册的 forward 分布分位。
         "p10": _p10(whv), "p50": whv[len(whv) // 2] if whv else None,
         "p90": whv[int(0.90 * len(whv))] if whv else None,
     }

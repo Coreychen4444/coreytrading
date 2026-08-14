@@ -1,4 +1,4 @@
-"""hvn gate 定义的**预注册锁**（hvn_gate_design.md §2 「运行前锁定，不许跑完再调」）。
+"""hvn gate 定义的**预注册锁**（private preregistration §2 「运行前锁定，不许跑完再调」）。
 
 这些断言不是在测"代码没崩"，是在**把预注册的定义钉死**：主回测跑起来之后，任何
 对 hvn_gate 取法的改动都会在这里变红。预注册的效力靠的就是"改了会被发现"。
@@ -33,10 +33,8 @@ def test_hvn_gate_takes_upper_edge_of_nearest_band_above_price():
 def test_hvn_gate_ignores_bands_below_price():
     """价格上方没有 HVN → None（由调用方回退 cluster，回退比例是判据 4）。
 
-    ⚠️ fixture 必须让下方**至少 5 个桶**都比当日那根重 —— 否则破位日自己那根 bar
-    的桶会轻易挤进 top-5, gate 就贴在现价上方。真实数据里这种"贴脸 gate"只占
-    2.6% (<0.2N, 全池实测), 中位在现价上方 0.90N, 所以那是 fixture 的人造极端,
-    不是定义的退化 —— 定义已预注册锁定, 不因合成边界情形而改。
+    fixture 让下方至少 5 个桶都比当日 bar 重，否则当日桶会挤进 top-5，
+    使合成边界不再覆盖“上方无 HVN”的目标场景。
     """
     below = []
     for px in (100.0, 103.0, 106.0, 109.0, 112.0, 115.0):

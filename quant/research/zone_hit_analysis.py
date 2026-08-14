@@ -12,7 +12,7 @@
 3. kline 缓存 → underlying 前瞻 +5d / +20d 收益
 4. 按落点分组统计
 
-诚实边界: v2 zone 历史从  起, 样本量小 — 输出永远带 n, 不装显著。
+诚实边界: 可用 zone 快照的起点由私有协议显式提供；输出永远带 n。
 
 CLI: python3 quant/research/zone_hit_analysis.py [--json]
 """
@@ -65,10 +65,11 @@ def classify(price: float, z: dict) -> str:
     return "waiting"
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="zone 命中 vs 前瞻收益")
     ap.add_argument("--json", action="store_true")
-    a = ap.parse_args()
+    ap.add_argument("--start", required=True, help="first trusted private zone snapshot session")
+    a = ap.parse_args(argv)
 
     timeline = build_timeline()
     rows = []
@@ -76,7 +77,7 @@ def main() -> int:
         if e.get("event_type") != "fill" or (e.get("side") or "").upper() != "BUY":
             continue
         day = str(e.get("timestamp"))[:10]
-        if day < "2026-05-06":  # v2 zone 史之前没有可信 zone 快照
+        if day < a.start:
             continue
         tk = e["ticker"]
         p = parse_occ(tk)
@@ -112,11 +113,12 @@ def main() -> int:
         }
 
     out = {"fills_analyzed": len(rows), "by_bucket": summary, "rows": rows,
-           "caveat": "v2 zone 史 2026-05-06 起, 样本小 — 看 n 别装显著; 前瞻收益是 underlying 非期权 PnL"}
+           "caveat": (f"可信 zone 快照从 {a.start} 起；按 n 解读，"
+                      "前瞻收益是 underlying 而非期权 PnL")}
     if a.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(f"BUY fills analyzed: {len(rows)} (since 2026-05-06)")
+        print(f"BUY fills analyzed: {len(rows)} (since {a.start})")
         print(f"{'bucket':16s} {'n':>3s} {'fwd5d%':>8s} {'fwd20d%':>8s}")
         for b, s in summary.items():
             print(f"{b:16s} {s['n']:>3d} {str(s['avg_fwd_5d_pct']):>8s} {str(s['avg_fwd_20d_pct']):>8s}")

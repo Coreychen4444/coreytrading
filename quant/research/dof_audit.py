@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """自由度审计 —— **系统现在到底有多少个「可以调的数」？**
 
-起因（用户）：「不应该随便按感觉拍板 你应该去审查下系统现在已经在用的
-有多少 如果已经很多 那就收紧 如果相对较少 那就放宽」。
-—— 我提 DoF 预算时把额度「每季度 ≤3」直接拍了出来，那正是本仓禁止的做法
-（`[约定]` 可以由人拍，但**基线必须去量**）。本脚本就是那个量。
+目的：审计 production 中已经存在的变量和自由度，避免凭感觉新增参数。
+分类阈值可以由协议设定，但基线必须由脚本现场计算。
 
 ## 什么算一个自由度
 
@@ -77,7 +75,7 @@ NOT_DOF_CONTAINERS = ("PRIORITY", "STOP_SRC_PRI", "OPEN_SIDES", "CLOSE_SIDES",
 NOT_DOF_ARGNAMES = ("r", "timeout", "retries", "digits", "nd", "d", "delay",
                     "num", "limit", "max_results", "hours", "top_n",
                     "max_expiries")              # 管道：利率入参 / 网络 / 分页 / 格式
-NOT_DOF_EXPLICIT = {                             # 外部约束，不是我们的选择
+NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统可调选择
     "data/x_search:HOURS_CAP", "data/x_search:MAX_RESULTS_CAP",
     "data/x_search:MAX_RESULTS_FLOOR",           # API 与计费上限
     "sync/price_reminder_sync:BUDGET_NOTE_MAX",  # moomoo note 10 字符硬限
@@ -89,15 +87,15 @@ NOT_DOF_EXPLICIT = {                             # 外部约束，不是我们�
     "core/sizing:shock_budget_cap(used_budget=)",   # 缺省 0.0 = 可选入参, 不是旋钮
     "core/sizing:shock_budget_cap(used_gross=)",
     "decision/exit_guard:_klines_for(n=)",          # 载入几根 bar = 管道
-    "options/option_plan:risk_free",                # 无风险利率 = 市场输入, 不是我们的选择
+    "options/option_plan:risk_free",                # 无风险利率 = 市场输入，不是系统可调选择
     "report/portfolio_brief:_cached_closes(n=)",
     "core/technical:_find_local_lows(window=)",     # 内部辅助, 由调用方口径决定
 }
 
 
 # ── 人工分类（谁背书这个数） ────────────────────────────────────
-#   ruled       有预注册回测/裁决在案（RULINGS_LEDGER 能查到）
-#   fiat        用户 明确拍的风险偏好（知情选择，代价已量或已声明）
+#   ruled       有私人预注册回测或裁决依据
+#   fiat        明确写入 production contract 的风险偏好
 #   definition  定义常数，不是选择（改它 = 离开那套词汇表）
 #   convention  本仓口径约定，跨模块一致性优先于最优性（如 ATR20 算钱/ATR14 读盘）
 #   ops         运维/陈旧度阈值（决定"何时喊旧了"，不改交易方向）
@@ -107,14 +105,14 @@ NOT_DOF_EXPLICIT = {                             # 外部约束，不是我们�
 # 就等于「没有出处」。想让某个数脱离这一类，去补 CLASSIFY 那一行（并附出处）。
 CLASSIFY: dict[str, str] = {
     # ── 有裁决在案 ──
-    "core/sizing:CAP_FRACS": "ruled",              # shock_budget 08-08 定版
-    "core/sizing:NOTIONAL_CAP": "fiat",            # 40% 用户  自评高风险偏好
-    "core/sizing:SHOCK_BUDGET": "fiat",            # 15% 用户
+    "core/sizing:CAP_FRACS": "ruled",              # shock-budget protocol
+    "core/sizing:NOTIONAL_CAP": "fiat",            # production contract
+    "core/sizing:SHOCK_BUDGET": "fiat",            # production contract
     "core/sizing:SHOCK_X": "ruled",                # 1.88 池级常数, 回测量出
     "core/sizing:GROSS_CAP": "fiat",               # 110% (代价 −0.17pp 已量)
-    "core/sizing:AT_RISK_CAP_FRAC": "fiat",        # 5% N1 08-09 二裁立项
-    "core/sizing:SHOCK_BREAKER_MULT": "fiat",      # 1.5× 08-09 定版
-    "core/sizing:GATE_RISK_CAPS": "fiat",          # 2./5 累计 (T×50/30/20 的累加式), 用户
+    "core/sizing:AT_RISK_CAP_FRAC": "fiat",        # locked portfolio contract
+    "core/sizing:SHOCK_BREAKER_MULT": "fiat",      # locked portfolio contract
+    "core/sizing:GATE_RISK_CAPS": "fiat",          # 累计 gate 风险预算
     "core/sizing:OPTION_ATRISK_LOSS_FRAC": "ruled",  # 0.25 锚 |S1|, pins 钉相等
     "decision/regime_transition:REL_FLOOR": "ruled",   # 0.4 relative_volume R
     "decision/regime_transition:fastlane_k": "ruled",  # 0.5 ladder_entry 采纳
@@ -130,7 +128,7 @@ CLASSIFY: dict[str, str] = {
     "core/episodes:COOLDOWN": "ruled",             # 120
     "core/episodes:BROKE_WINDOW": "ruled",         # 决策点 F 锁定
     "core/episodes:DELTA_ATR": "ruled",            # 0.5 决策点 A 锁定
-    "report/portfolio_brief:MOVE_ATR_MULT": "ruled",   # 1×ATR14 08-05 换尺
+    "report/portfolio_brief:MOVE_ATR_MULT": "ruled",   # 1×ATR14 scale
     "report/portfolio_brief:MOVE_ATR_PERIOD": "convention",
     # ── 定义 / 口径约定（不是选择） ──
     "core/technical:VALUE_AREA_FRAC": "definition",    # 70% 拍卖理论
@@ -138,7 +136,7 @@ CLASSIFY: dict[str, str] = {
     "core/earnings:EVENT_MULT": "ruled",               # 0.7 earnings_window 路 A
     "decision/level_map:TRAIL_ATR_MULT": "convention",     # = exit_guard, pin 钉
     "decision/level_map:TRAIL_PARABOLIC_PCT": "convention",
-    # ── 教科书/行业标准参数（不是我们选的；改它才成为自由度） ──
+    # ── 教科书/行业标准参数（不是系统选择；修改后才成为自由度） ──
     "core/technical:rsi(period=)": "convention",           # 14 = Wilder 原始
     "core/technical:macd(fast=)": "convention",            # 12/26/9 = Appel 原始
     "core/technical:macd(slow=)": "convention",
@@ -157,7 +155,7 @@ CLASSIFY: dict[str, str] = {
     "decision/level_map:turtle_n(period=)": "convention",
     "decision/regime_score:atr(period=)": "convention",
     "core/technical:analyze(rsi_period=)": "convention",
-    # ── canonical 文档定版（不是回测，但有明文出处 + 用户 批过） ──
+    # ── canonical 文档契约（不是回测，但有公开明文出处） ──
     "decision/exit_guard:ratchet_arm_gain": "fiat",        # +50% 保本 trend-exit §2
     "decision/exit_guard:ratchet_lock_gain": "fiat",       # +100% 回吐上限 1/3
     "decision/entry_guard:iv_hard_no_single_leg": "fiat",  # IV 闸门表 canonical §六
@@ -175,13 +173,13 @@ CLASSIFY: dict[str, str] = {
     "core/earnings:POOL_X_EARN": "ruled",
     "core/earnings:SHRINK_N0": "ruled",
     "core/sizing:binding_stop(n_mult=)": "ruled",          # 2N 只兜底 risk_allocation
-    # 分类轴退役 (, classification_removal_design.md): 旧三键
+    # 分类轴退役 (, private preregistration): 旧三键
     # confirmed/probe/early_risky 随轮预算 dict→tuple 消失, 净 DoF −2
-    # gate 语义 (同日二次定版, 用户「gate1 max 2.5% gate2 max 4% gate3 max 5%」):
+    # gate 语义：累计上限由 production contract 固定。
     # ROUND_RISK_FRACS(增量) → GATE_RISK_CAPS(累计) 是**同一个旋钮换表达**,
-    # 不是新自由度 —— 三个数的出处仍是 08-10 的 T × 50/30/20 (测试钉 provenance)。
-    "core/sizing:GATE_RISK_CAPS": "ruled",                 # 08-10 risk_allocation 三点锁定
-    "core/sizing:OPTION_MIN_GATE": "fiat",                 # 用户 「期权要到 r2 才能进」
+    # 不是新自由度 —— 三个数来自已锁定的 T × 50/30/20 分配。
+    "core/sizing:GATE_RISK_CAPS": "ruled",
+    "core/sizing:OPTION_MIN_GATE": "fiat",                 # production contract
     # gate_no 由 `sizing.gate_count` 数出来 (判据 = 卡上给 cap 的 up 转移数),
     # 不是可调参数 —— 但它是入场侧的新入参, 记在册避免"看起来像凭空多出一个旋钮"。
     "decision/entry_guard:size_caps(gate_no=)": "convention",
@@ -191,7 +189,7 @@ CLASSIFY: dict[str, str] = {
     "options/option_plan:pick_expiry(min_dte=)": "ruled",  # 270 synthetic_longcall
     "options/option_plan:ladder_weights": "ruled",         # 50/30/20 同 entry_guard
     "sync/price_reminder_sync:G01_GAINS": "ruled",         # 镜像 exit_guard, pin 钉
-    "decision/exit_guard:g01_levels": "fiat",              # G-01 档位 trend-exit canonical (NOK 源案例)
+    "decision/exit_guard:g01_levels": "fiat",              # G-01 档位 trend-exit canonical
     "decision/exit_guard:giveback_frac_low_dte": "fiat",   # 回吐上限 1/3 同族
     # ── 运维/陈旧度告警（不改交易，只决定"什么时候喊旧了"） ──
     "core/earnings:CALENDAR_STALE_DAYS": "ops",
@@ -322,7 +320,7 @@ def render(r: dict, listing: bool = False) -> str:
     L.append(f"→ **真实自由度候选 = {r['total']}**")
     L.append("按来源分类（分类是人工的，见 CLASSIFY）：")
     order = ["ruled", "fiat", "convention", "definition", "ops", "unbacked"]
-    cn = {"ruled": "有裁决/回测在案", "fiat": "用户 明确拍的风险偏好",
+    cn = {"ruled": "有裁决/回测在案", "fiat": "production contract 风险偏好",
           "convention": "本仓口径约定/教科书标准", "definition": "定义常数（不算自由度）",
           "ops": "运维/陈旧度阈值", "unbacked": "**无出处的选择**"}
     for k in order:

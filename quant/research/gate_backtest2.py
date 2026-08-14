@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Gate 回测第二轮 — 止损建模下的 gate 价值裁决 (正式预注册)。
 
-设计稿全文: quant/research/gate_backtest2_design.md
-D1/D2/D3 已由 用户 锁定 (, 运行前)。本 docstring = 预注册摘要,
+完整协议: private preregistration
+D1/D2/D3 必须在运行前由私人预注册锁定。本 docstring 仅保留通用协议摘要，
 实现期间只用合成数据验证 (tests/research/test_gate_backtest2.py), 真数据只跑一次。
 
 ## 假说
@@ -17,10 +17,10 @@ A: 破位日收盘买入。B: gate 确认日收盘买入, i→j 持现金。
 
 ## 止损 (D2 锁定)
 - primary: 对称 entry − 2×ATR20@入场, 收盘×1日触发, 次日收盘出场, 滑点 0.2%
-  (= exit_rules_backtest L12/L50 官方结构位代理; 确认单日 = live 卡口径 7/25)
+ （结构位代理与 production card 的单日确认口径保持一致）
 - bfloor: B 止损 = gate level (系统语义直译), A 不变 (primary)
 - structure: 两世界 = 入场价下方最近的已确认 swing low (wing=2, 无前视), 无则回退 2N
-  ⚠️ 设计稿原文 "episode 内最低收盘" 对 World-A 是前视退化 (A 入场日即 60 日最低收盘,
+  ⚠️ “episode 内最低收盘”对 World-A 是前视退化 (A 入场日即 60 日最低收盘,
   low 在未来) — 实现改为 swing-low 版本, 运行前记录于此, 非结果驱动的改动
 - sens3n: 对称 3×ATR20 (敏感性)
 稳健性裁决 (预注册): D1 以 primary 读数为准; bfloor 与 primary 方向矛盾 → 自动落分支 3。
@@ -57,25 +57,25 @@ p10-diff CI: 全部 12 主格 × primary × T+60, 1,000 draws 独立种子, 无 
 估计量与点估计同一索引约定 (round-1 同款)。
 D1 三分支机械读数 d1_flags 直接落 JSON (exp_win / stop_better / p10_better /
 bfloor_contradiction), 裁决不经人手挑格。
-Cohort: 1995-04 /  /  /  / 2020-26 点估计 + n。
+Cohort: 按输入数据自动生成固定宽度的年份分组，仅报告点估计与 n。
 
 ## 审查修正记录 (对抗性审查 , 全部在真数据运行之前; 前视 lane 零发现)
-1. vol 量比分母改为**含完成日**(与 technical.volume_ratio 逐点一致, 原实现偏松)
+1. vol 量比分母改为**含完成日**(与 technical.volume_ratio 逐点一致)
 2. 止损触发在窗口最后一根 bar = 出场悬置 (按终点收盘 mark, 不计滑点/止损率)
 3. terminals 为空 (end−i ∈ [50,60)) 的 episode 剔除 — n/Kish/fire_rate 只计承载裁决的样本
 4. 条件诊断与 H2 反事实改按 fired@T 分组 (原按 120 日窗口分组, 在 T+60 上错位)
 5. 止损率差 CI / notfired gap CI / p10-diff CI 全部预实现 — 防"看完结果再写统计代码"
 6. replay 重进计数只数终点前的入场
-7. S-structure 止损实现为"入场价下方最近已确认 swing low, 回退 2N" — 设计稿原文
+7. S-structure 止损实现为"入场价下方最近已确认 swing low, 回退 2N"；旧定义
    "episode 内最低收盘"对 World-A 前视退化 (入场日即 60 日最低), 该修正为非结果驱动;
-   cluster gate 固定于破位日 (卡片语义)。两处 pin 均在运行前书面记录, 用户 保留否决权
+   cluster gate 固定于破位日（卡片语义）。两处 pin 均须在运行前写入私人协议
    (否决 = 按其版本重跑该变体/该 kind, 主格 primary 2N 不受影响)
-8. 设计稿"月×行业细口径附注"运行前撤销 (未实现, 不作任何行业级 claim);
+8. “月×行业细口径附注”未进入锁定协议，因此不作任何行业级 claim；
    主口径按月聚簇不受影响
 
 ## 数据
-market/klines_deep/ 165 票 (56 OpenD 2006+ / 109 Yahoo 1995+, _sources.json 审计),
-Kish 有效独立事件 ≈197。Survivorship 偏向低估 gate 价值 (方向已声明)。
+输入来自 ignored private deep-cache，并由其 source manifest 审计。
+Survivorship 的方向必须在私人协议和报告中声明。
 
 ## Stage 0
 先原样跑 round-1 (gate_backtest.run, 无止损, conditional 口径) 于扩容池 —
@@ -107,7 +107,7 @@ VOL_RATIO = 1.2
 VOL_LOOKBACK = 20
 CLUSTER_TOL_ATR = 0.35    # level_map 同式
 BOOT_DRAWS = 10_000
-BOOT_SEED = 20260730
+BOOT_SEED = 271_828
 CI_Q = (0.05, 0.95)       # 90% CI
 KINDS = ("swing", "ma60", "cluster")
 DAYS_MAIN = (1, 2)
@@ -115,8 +115,17 @@ DAYS_APPENDIX = (3,)
 STOP_MODES = ("primary", "bfloor", "structure", "sens3n")
 MAX_REPLAY_SEGMENTS = 3   # 1 初始 + ≤2 重进
 
-ERAS = (("1995-04", 1995, 2004), ("2005-09", 2005, 2009), ("2010-15", 2010, 2015),
-        ("2016-19", 2016, 2019), ("2020-26", 2020, 2026))
+def era_bounds(years, width=5):
+    """Build deterministic cohort bounds from the years present in private input."""
+    values = sorted(set(int(year) for year in years))
+    if not values:
+        return []
+    first = (values[0] // width) * width
+    last = (values[-1] // width) * width
+    return [
+        (f"cohort_{index + 1}", start, start + width - 1)
+        for index, start in enumerate(range(first, last + 1, width))
+    ]
 
 
 # ---------- 基础序列 ----------
@@ -148,8 +157,7 @@ def confirmed_swing_lows(lows, wing=WING):
 
 def vol_ok(vols, j, ratio=VOL_RATIO, lb=VOL_LOOKBACK):
     """完成日量比 ≥ ratio。分母 = SMA20 **含完成日**, 与 technical.volume_ratio /
-    regime_transition._volume_ok 逐点一致 (审查修正 2026-07-30: 原实现不含完成日,
-    比 live 规则系统性偏松)。数据不足 = False。"""
+    regime_transition._volume_ok 逐点一致。数据不足 = False。"""
     if j < lb - 1:
         return False
     base = sum(vols[j - lb + 1:j + 1]) / lb
@@ -548,7 +556,7 @@ def summarize(episodes, kinds=KINDS):
                 out["cells"][key] = cell_out
 
     # cohorts: primary T+60 paired diff 点估计
-    for era, y0, y1 in ERAS:
+    for era, y0, y1 in era_bounds(e["year"] for e in episodes):
         sub = [e for e in episodes if y0 <= e["year"] <= y1 and 60 in e["terminals"]]
         if not sub:
             continue

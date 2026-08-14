@@ -1,7 +1,7 @@
-"""ladder_timing_backtest 机械件验证 (合成数据; 真数据只跑一次)。
+"""ladder_timing_backtest 的合成机械件验证。
 
 两臂、判据、统计口径全部**复用**`gate_path_taxonomy_backtest`（已被那份测试钉住），
-所以这里只测本轮新增的三件:
+这里只验证该模块新增的三项机械件：
 
   1. **ANCHOR 构造**= `ladder_entry.collect` 的逐字骨架 —— 与暴力参照实现对拍
   2. **§3e 恒等式的经验自证**—— 破位锚构造产出的必须全是 ①repair
@@ -19,10 +19,10 @@ from quant.research.gate_backtest import confirmed_swing_highs, sma_series
 from quant.research.gate_backtest2 import WINDOW, atr_series, cluster_gate, confirmed_swing_lows
 
 
-# ── 1. 锁定值: 全部继承自已锁定的上一轮, 不许本文件另存一份 ────────
+# ── 1. 锁定值: 继承共享协议，不在本文件另存一份 ─────────────────
 
 def test_parameters_are_inherited_not_re_typed():
-    """本轮不新增任何可调参数 —— 每个数都必须是上一轮那个对象。"""
+    """该模块不新增可调参数，每个数都必须引用共享对象。"""
     assert lt.K_MAG is gpt.K_MAG == 0.5
     assert lt.BFLOOR_BUF is gpt.BFLOOR_BUF == 0.5
     assert lt.DECISION_T is gpt.DECISION_T == 60
@@ -197,7 +197,7 @@ def _v(d):
     ("no_data", "reject", "undetermined"),
 ])
 def test_rerun_trigger_truth_table(main, repl, expect):
-    """§5 锁定的表。看完①再定就是"跑完再挑" —— 这张表必须先于结果存在。"""
+    """§5 真值表必须在读取私人结果前锁定。"""
     assert lt.trigger_234(_v(main), _v(repl))[0] == expect
 
 
@@ -210,12 +210,11 @@ def test_downgrade_text_states_the_structural_limitation():
 # ── 5. 裁决方向: 这是对 incumbent 的检验 ─────────────────────────
 
 def test_failure_recommends_retiring_the_incumbent_not_keeping_it():
-    """§1: `fastlane_k=0.5` 已经在 live 且证据基座被证明混淆 ⟹
-    「未获支持」= **建议撤下**, 不是「维持现状」。方向反了就把结论读反。"""
+    """对 incumbent 的检验中，“未获支持”必须映射为撤下建议。"""
     res = gpt.analyse(_rows_failing(), "ANCHOR", draws=500)
     v = lt.verdict_of(res)
     assert v["decision"] == "reject"
-    assert "撤下" in v["text"] and "等 用户" in v["text"]
+    assert "撤下" in v["text"] and "不自动修改 production" in v["text"]
 
 
 def test_pass_says_the_live_parameter_is_supported():

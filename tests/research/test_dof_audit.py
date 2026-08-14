@@ -1,22 +1,7 @@
-"""自由度棘轮 —— **会动钱那一层的「无出处旋钮」只能变少，不能变多。**
+"""自由度棘轮：会动钱层的无出处旋钮只能减少，不能增加。
 
-用户：「不应该随便按感觉拍板 你应该去审查下系统现在已经在用的有多少
-如果已经很多 那就收紧 如果相对较少 那就放宽」。
-
-审计结果（`quant/research/dof_audit.py`，可重跑）：
-    145 个真实自由度（202 候选 − 57 非自由度：容差/排序/编码/API/格式/利率入参）
-    其中**会动钱那一层**（授权/仓位/退出/画线）71 个：
-        24 有裁决/回测在案 · 17 用户 明确拍的 · 8 口径约定 · 5 运维 · **17 无出处**
-
-**它推翻了我原来的提案**：我提「每季度新增 ≤3 个自由度」。而  → 08-12
-两周内，光是**有裁决背书**的新增就有 ~22 个（shock_budget 4 · earnings_window 4 ·
-options_exit_overlay 4 · ladder_entry 4 · risk_allocation 3 · 其余若干）。
-**3/季度会挡掉过去两周 90% 的工作**—— 拍的数错了一个数量级。
-
-⇒ 正确的形状不是「限流」而是「**棘轮**」，且只管**无出处**那一类：
-    - 有裁决背书的新增**不设上限**—— 它的代价已经由预注册 + 守卫 + FDR 付过了，
-      一次回测带出 4 个数（opt_s1/s2/s4/s3 同源）本来就该算**一次**决定，不是四次；
-    - **无出处的旋钮只能减不能增**—— 想加一个，就得先退休或补齐一个。
+具体数量由 `quant/research/dof_audit.py` 现场计算，不在测试说明中保存历史快照。
+有依据的参数必须记录来源；无出处参数的新增会让本测试失败。
 
 这和本仓已有的 `tests/test_module_coverage.py` 的 `UNTESTED` 名单棘轮是同一个装置
 （「只能变短」），不是新发明。
@@ -64,7 +49,7 @@ def test_money_layers_cover_the_authorization_chain():
 
 
 @pytest.mark.parametrize("key", [
-    "core/sizing:NOTIONAL_CAP",          # 40% 用户 fiat
+    "core/sizing:NOTIONAL_CAP",          # production contract fiat
     "decision/regime_transition:REL_FLOOR",   # 0.4 relative_volume 裁决
     "decision/exit_guard:opt_s1_stop",   # −25% options_exit_overlay 裁决
     "core/technical:VALUE_AREA_FRAC",    # 70% 拍卖理论定义

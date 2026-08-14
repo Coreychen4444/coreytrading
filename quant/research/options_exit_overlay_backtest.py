@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""options_exit_overlay_backtest.py — 单腿 long call 退出栈 S1-S4 重放
+"""Replay single-leg long-call exit overlays from private event state.
 
-预注册: quant/research/options_exit_overlay_design.md (判据 C1/C2/C3 先锁)。
+The private preregistration must lock C1/C2/C3, exclusions and data sources.
 方法: premium 序列 = BS 重估, IV 由入/出场 fill 价反解后按交易日线性插值 (两端构造性
-锚定真实成交价); 信号 = 收盘读数, 成交 = 次日开盘重建价; 成本 = campaign 加权保费。
-样本 = 事件流全部域内 round trip 17 笔 + GOOGL 进行中 (剔除表见预注册 §3, 固定不可调)。
+锚定私人 fill 价); 信号 = 收盘读数, 成交 = 次日开盘重建价; 成本 = campaign 加权保费。
 
-research 旁路: 无人 import 本模块。
+公开源码不保存合约清单、持仓快照、排除表或研究结果。
 """
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import math
@@ -25,21 +25,24 @@ from quant.core.paths import ROOT  # noqa: E402
 KLINE_DIR = ROOT / "trade/us_stock/market/klines"
 EVENTS_GLOB = str(ROOT / "trade/us_stock/holding/events/*/trades.jsonl")
 REPORT = ROOT / "tmp/backtest/options_exit_overlay_report.md"
+DEFAULT_CONFIG = ROOT / "trade/us_stock/knowledge/research/options_exit_overlay/config.json"
 R = 0.045  # 无风险利率常数 (§5)
-
-# ---------- 预注册 §3: 域内/剔除表 (固定, 不是运行时自由度) ----------
-EXCLUDE = {
-    "AXTI260417P45000": "put",
-    "INTC260612P100000": "put",
-    "AAOI260522P103000": "卖方腿",
-    "MU260717C500000": "spread 短腿",
-    "MU260717C440000": "spread 长腿 (附表, 不进判据)",
-    "AMZN261218C280000": "同日买卖 0 持有",
-}
-OPEN_TRIP = "GOOGL270115C390000"  # 进行中, 不进 C1-C3
 
 WINNER_MIN = 0.40   # final ≥ +40% → 赢家 (C2)
 LOSER_MAX = -0.20   # final ≤ -20% → 亏家 (C1)
+
+
+def load_private_config(path: Path) -> dict:
+    """Load exclusions locked by a private preregistration."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"private study config not found: {path}; create it in the ignored workspace"
+        )
+    config = json.loads(path.read_text(encoding="utf-8"))
+    excluded = config.get("exclude_symbols")
+    if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
+        raise ValueError("private study config requires exclude_symbols as a JSON list")
+    return {"exclude_symbols": set(excluded)}
 
 
 # ---------- Black-Scholes ----------
@@ -87,7 +90,7 @@ def parse_occ(sym: str):
     return und, expiry, cp, strike / 1000.0
 
 
-def load_trips() -> list[dict]:
+def load_trips(exclude_symbols: set[str]) -> list[dict]:
     import re
     occ_re = re.compile(r"^([A-Z]+)\d{6}[CP]\d+$")
     fills: dict[str, list[dict]] = {}
@@ -95,7 +98,7 @@ def load_trips() -> list[dict]:
         for line in open(f):
             d = json.loads(line)
             sym = d.get("symbol") or d.get("ticker") or ""
-            if occ_re.match(sym) and sym not in EXCLUDE:
+            if occ_re.match(sym) and sym not in exclude_symbols:
                 fills.setdefault(sym, []).append(
                     {"date": (d.get("timestamp") or "")[:10], "side": d.get("side"),
                      "qty": float(d.get("qty") or 0), "price": float(d.get("price") or 0)})
@@ -111,7 +114,7 @@ def load_trips() -> list[dict]:
         cost = sum(b["qty"] * b["price"] for b in buys) / qty
         trip = {"sym": sym, "und": und, "expiry": expiry, "strike": strike,
                 "buys": buys, "sells": sells, "qty": qty, "avg_cost": cost,
-                "entry_date": buys[0]["date"], "open": sym == OPEN_TRIP}
+                "entry_date": buys[0]["date"], "open": not sells}
         if sells:
             sq = sum(s_["qty"] for s_ in sells)
             trip["exit_date"] = sells[-1]["date"]
@@ -133,9 +136,11 @@ OPT_KLINE_DIR = ROOT / "trade/us_stock/market/option_klines"
 
 
 def rebuild_real(trip: dict, klines: list[dict]) -> list[dict] | None:
-    """真实合约 K 线 (moomoo,  用户 指出可得; 到期即退市→已归档入 git)。
-    日轴 = 期权自己的 bar 日 (无 bar 的日子也卖不出去); IV 逐日由真实 close 反解
-    (深 ITM 反解失败记 None, S3 跳过该日)。已到期合约无档案 → None 回落 BS 合成。"""
+    """Use licensed local option bars when present, otherwise return ``None``.
+
+    The option bar calendar defines executable sessions. IV is inverted from
+    each close; deep-ITM failures remain missing for the S3 branch.
+    """
     f = OPT_KLINE_DIR / f"{trip['sym']}.jsonl"
     if not f.exists():
         return None
@@ -181,7 +186,7 @@ def rebuild(trip: dict, klines: list[dict]) -> list[dict]:
     end = trip.get("exit_date") or dates[-1]
     i0, i1 = dates.index(trip["entry_date"]), dates.index(end)
 
-    # IV 锚: 每笔 BUY + 出场 SELL (进行中笔用最新 close 的 broker mark 锚)
+    # IV 锚：每笔 BUY + 出场 SELL；未平仓 campaign 使用显式 private mark。
     anchors: list[tuple[int, float]] = []
     for b in trip["buys"]:
         iv = implied_vol(b["price"], closes[b["date"]], trip["strike"],
@@ -230,7 +235,7 @@ def rebuild(trip: dict, klines: list[dict]) -> list[dict]:
 
 # ---------- 模拟 ----------
 def simulate(trip: dict, daily: list[dict], s1=None, s2=None, s3=False, s4=None) -> dict:
-    """返回 {pnl_pct, trigger, exit_date}. 未触发 → actual (进行中笔 → mark)."""
+    """返回 ``pnl_pct``, ``trigger`` 与 ``exit_date``；未触发则读取实际结果或 mark。"""
     entry = daily[0]
     entry_close, atr0, iv0 = entry["und_close"], entry["atr20"] or 0.0, entry["iv"]
     buys_by_date = {b["date"]: b for b in trip["buys"]}
@@ -309,9 +314,14 @@ def judge(arm_results: list[dict], trips: list[dict]) -> dict:
             "C1": c1, "C2": c2, "C3": c3}
 
 
-def main():
-    trips = load_trips()
-    # GOOGL 进行中: 出场锚 = broker mark
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Replay private option exit overlays")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--report", type=Path, default=REPORT)
+    args = parser.parse_args(argv)
+    config = load_private_config(args.config)
+    trips = load_trips(config["exclude_symbols"])
+    # 未平仓 campaign 的出场锚来自 ignored positions state。
     for t in trips:
         if t["open"]:
             pos = json.load(open(ROOT / "trade/us_stock/holding/state/positions.json"))
@@ -334,14 +344,13 @@ def main():
     # 重建质量: 两端锚定误差 (应≈0) + 中段 vs iv_history 形状 (打印不裁决)
     n_real = sum(1 for v in srcs.values() if v == "real")
     calib.sort()
-    calib_line = (f"BS 合成 vs 真实 premium 相对误差 (12 笔重叠日 n={len(calib)}): "
+    calib_line = (f"BS 合成 vs 本地 premium 相对误差 (重叠日 n={len(calib)}): "
                   f"中位 {calib[len(calib)//2]:.1%}, p90 {calib[int(len(calib)*0.9)]:.1%}"
                   if calib else "")
-    lines = ["# options_exit_overlay 回测报告 (v2: 真实合约 K 线)", "",
-             f"预注册: options_exit_overlay_design.md | 样本 {len(trips)} 笔 "
+    lines = ["# options_exit_overlay 回测报告", "",
+             f"协议: private preregistration | 样本 {len(trips)} 笔 "
              f"(判据域 {sum(1 for t in trips if not t['open'])}) | "
-             f"**真实 premium {n_real} 笔**(moomoo 合约 K 线, 到期退市不可重拉→已归档 "
-             f"option_klines/), BS 合成 {len(trips)-n_real} 笔 (已到期合约)", "",
+             f"**local option bars {n_real} 笔**, BS 合成 {len(trips)-n_real} 笔", "",
              calib_line, ""]
 
     arms: list[tuple[str, dict]] = []
@@ -394,16 +403,20 @@ def main():
             f"| {name} | {v['med_imp']:+.1%} | {v['worst_loser']:+.1%} | {v['win_ratio']:.2f} "
             f"| ${v['tot_ov']:+,.0f} | ${v['tot_ac']:+,.0f} | {v['worst_single']:+.1%} |")
 
-    # GOOGL 单独节
-    g = next(t for t in trips if t["open"])
-    lines += ["", "## GOOGL 进行中 (live 对照, 不进判据)", ""]
-    for name, kw in arms:
-        r_ = simulate(g, dailies[g["sym"]], **kw)
-        if r_["trigger"] != "—":
-            lines.append(f"- {name}: {r_['exit_date']} 触发 {r_['trigger']}, "
-                         f"退出 PnL {r_['pnl_pct']:+.1%} (vs 当前 mark {g['mark']/g['avg_cost']-1:+.1%})")
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text("\n".join(lines) + "\n")
+    open_trips = [trip for trip in trips if trip["open"]]
+    if open_trips:
+        lines += ["", "## Open campaigns（不进判据）", ""]
+        for trip in open_trips:
+            for name, kw in arms:
+                r_ = simulate(trip, dailies[trip["sym"]], **kw)
+                if r_["trigger"] != "—":
+                    lines.append(
+                        f"- {trip['sym']} {name}: {r_['exit_date']} 触发 {r_['trigger']}, "
+                        f"退出 PnL {r_['pnl_pct']:+.1%} "
+                        f"(vs mark {trip['mark']/trip['avg_cost']-1:+.1%})"
+                    )
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 
 

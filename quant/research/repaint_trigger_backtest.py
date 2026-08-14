@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Repaint trigger backtest — watchlist 卡重画触发线 A vs C（预注册: repaint_trigger_design.md）。
+"""Repaint trigger backtest — watchlist 卡重画触发线 A vs C（预注册: private preregistration）。
 
 A（现行）: 收盘 > trim 上沿 ×2 连续（breakout stale, zone-maintenance）
-C（提案）: 收盘 ≥ trim 下沿 ×2 连续（"两连收在 trim 区间内或上方", 用户）
+C（候选）: 收盘 ≥ trim 下沿 ×2 连续（定义必须由私人预注册锁定）
 
-设计/判据/阈值全部在 design.md 运行前锁定 —— 本文件只是它的执行体。
+设计、判据与阈值必须在运行前锁定；本文件只是执行体。
 CLI: .venv/moomoo/bin/python3 quant/research/repaint_trigger_backtest.py [--json]
 """
 
@@ -21,9 +21,6 @@ import statistics as st
 from quant.core import technical  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR as KDIR  # noqa: E402
 
-UNIVERSE = ["AAOI", "MU", "LITE", "MRVL", "NBIS", "INTC", "NOK", "CRWV", "RKLB",
-            "AXTI", "AMKR", "NVDA", "AMD", "GOOGL", "MSFT", "AAPL", "TSM",
-            "QCOM", "SNDK", "TSLA", "WDC", "SMR", "ASTS"]
 MIN_BARS = 200
 WARMUP = 60
 BAND_LO, BAND_HI = 0.97, 1.03      # trim 代理带 × 冻结锚 M
@@ -34,7 +31,12 @@ HORIZON = 20                        # 政策持有期
 WHIPSAW_BARS = 5
 STOP_N_FRAC = 0.5                   # stop = 带边 − 0.5×ATR20 (bfloor_buf 家规)
 BOOT_DRAWS = 2000
-BOOT_SEED = 20260805
+BOOT_SEED = 173_205
+
+
+def available_tickers() -> list[str]:
+    """Discover the private study universe without embedding it in public source."""
+    return sorted(path.stem for path in KDIR.glob("*.jsonl") if path.is_file())
 
 
 def load(ticker):
@@ -137,7 +139,7 @@ def main():
     a = ap.parse_args()
 
     eps = []
-    for t in UNIVERSE:
+    for t in available_tickers():
         rows = load(t)
         if rows:
             eps.extend(episodes_for(t, rows))
@@ -165,7 +167,7 @@ def main():
         "a_never_fired_share": round(st.mean(0.0 if e["a_fired"] else 1.0 for e in eps), 4),
         "c_whipsaw_rate": round(st.mean(1.0 if e["whipsaw"] else 0.0 for e in eps), 4),
     }
-    # 判据 (design.md 锁定)
+    # 判据必须由运行前的 private preregistration 锁定。
     usable = n >= 60 and max_share <= 0.30
     passes = (lo >= 0) and ((c_stop - a_stop) * 100 <= 5.0) and (r["c_p10"] >= r["a_p10"] - 0.01)
     r["verdict"] = ("不裁决 (样本/集中度)" if not usable

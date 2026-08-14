@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """交互事件 Step 0 —— **信号量普查**（不是回测，不产出裁决）。
 
-设计稿: quant/research/price_action_framework_design.md §7 定义 / §8.0 本步骤
+所有定义必须先写入私人预注册；公开脚本不保存研究历史。
 
 只回答一个问题: **按 §7 的定义，一天会触发多少事件?**
 若单票单日常态 >1 个事件 = `tol` 或阈值错了 → 先修定义再谈回测
@@ -15,11 +15,11 @@
   profile : 滚动 60 根 → volume_profile 三角铺开 → HVN 带边界 + LVN 带边界
   pivot   : 滚动 250 根 → swing_points(wing=2) → cluster_pivots(touches≥2) → 簇中心
   ath     : 事件日之前的历史最高收盘
-  card    : **历史不可得，本普查缺这一类**(live 才有 zones/gate) —— 计数会偏低
+  card    : 历史不可得，本普查缺这一类（私人 state 才有 zones/gate）—— 计数会偏低
 
 Usage:
     .venv/moomoo/bin/python3 quant/research/interaction_census.py --limit 40 [--json]
-    .venv/moomoo/bin/python3 quant/research/interaction_census.py --tickers INTC MU COHR
+    .venv/moomoo/bin/python3 quant/research/interaction_census.py --tickers <SYMBOL_A> <SYMBOL_B>
 """
 from __future__ import annotations
 
@@ -35,13 +35,14 @@ from collections import Counter, defaultdict  # noqa: E402
 from quant.core import technical as ta  # noqa: E402
 from quant.core.episodes import merge_bars_by_date  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR, KLINE_DEEP_DIR  # noqa: E402
+from quant.core.sectors import SEMI_SMH  # noqa: E402
 from quant.decision.level_map import cluster_pivots, find_lvn, top_hvn  # noqa: E402
 from quant.sync.state_io import read_positions, read_watchlist  # noqa: E402
 
 # ── 预注册占位参数 (§7.2 — 未锁定，改动必须在跑收益之前) ────────────
 PARAMS = {
     "tol_atr_mult": 0.25,      # 带宽 = max(0.25×ATR20, profile bucket)  ← 本仓既有 0.25N 口径
-    "effort_hi": 1.2,          # RelVR ≥ → 高力 (= 08-06 relative_volume 裁决同值)
+    "effort_hi": 1.2,          # RelVR ≥ → 高力；与 production 相对量阈值同值
     "effort_lo": 0.8,          # RelVR ≤ → 低力  ← 占位，无出处
     "result_hi": 1.0,          # range/ATR20 ≥ → 大果  ← 占位
     "result_lo": 0.6,          # range/ATR20 ≤ → 小果  ← 占位
@@ -63,9 +64,7 @@ PARAMS = {
     "dedupe_atr_mult": 0.5,    # 锚合并半径 (>tol: 0.25N 内的两条线在读者眼里是同一条)
 }
 
-SEMI = {"NVDA", "AMD", "INTC", "MU", "MRVL", "QCOM", "AMKR", "AVGO", "TSM", "ASML",
-        "LRCX", "AMAT", "KLAC", "ADI", "TXN", "NXPI", "ON", "SWKS", "MCHP", "STM",
-        "WDC", "SNDK", "AAOI", "LITE", "COHR", "AXTI", "SMCI", "ARM"}
+SEMI = set(SEMI_SMH)
 
 
 def load_bars(ticker: str) -> list[dict]:
@@ -288,11 +287,11 @@ def scan_ticker(ticker: str, bars: list[dict], bench: dict[str, dict[str, float]
 
 
 def merge_same_day(events: list[dict]) -> list[dict]:
-    """同票 + 同日 + 同事件类型 + 同方向 = **一次交互**, 不是 N 次 (v0.2, 2026-08-12)。
+    """同票、同日、同事件类型、同方向合并为一次交互。
 
-    live 预览当场暴露的问题: 趋势日一根 bar 会连穿三条相邻的线 (MSFT 7/30 穿
-    390.9/402.8/410.7), 按线计数就变成三个事件。跨越了几条线是**强度信息**,
-    记进 `lines` 字段, 不是三行报表。"""
+    单根趋势 bar 可能连续穿越多条相邻线；穿越数量属于强度信息，写入
+    ``lines`` 字段，不能重复计为多次事件。
+    """
     groups: dict[tuple, list[dict]] = {}
     for e in events:
         groups.setdefault((e["ticker"], e["date"], e["event"], e["side"]), []).append(e)
@@ -308,7 +307,7 @@ def merge_same_day(events: list[dict]) -> list[dict]:
 
 
 def live_bars(ticker: str) -> list[dict]:
-    """live 卡的序列 = 深度缓存 + 常规缓存按日期去重合并 (core.episodes 同一份工具)。"""
+    """Production-card 序列由深度缓存和常规缓存按日期去重合并。"""
     deep = load_bars(ticker)
     cache: list[dict] = []
     p = KLINE_CACHE_DIR / f"{ticker}.jsonl"

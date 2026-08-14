@@ -1,8 +1,8 @@
-"""hvn_gate_backtest 的机械件验证 (合成数据; 真数据只跑一次)。
+"""hvn_gate_backtest 的合成机械件验证。
 
 本文件钉三类东西:
   1. **回归对照的效力前提**—— gb2 的扩展点默认恒等: 不传 kinds/extra_gates 时,
-     collect 产出与 round-2 逐字相同。这条一旦破, "原三 kind 复现 round-2" 就是自证。
+     collect 产出与基线构造相同，避免对照被扩展点污染。
   2. **裁决规则本身**—— final_verdict 是预注册 §3 全文 (含末句「平手 → 保留 cluster」)
      的代码强制点。判据全过 ≠ 采纳: H1 是非劣性假设, 非劣之后还要问"有没有更好"。
   3. regression_check 会红 —— 数字漂了必须失败 (变异测试), 否则它只是装饰。
@@ -37,23 +37,23 @@ def _cell_fingerprint(summary, keys):
             for k in keys}
 
 
-ROUND2_KINDS = ("swing", "ma60", "cluster")      # 字面量: 跑出 round-2 的那套 kind
+INCUMBENT_KINDS = ("swing", "ma60", "cluster")
 
 
 def test_round2_kind_set_is_pinned_literally():
     """回归对照的对象是 round-2 的**那三种**画法。用 g2.KINDS 自比是同义反复 ——
     第一版测试就是那样写的, 把 KINDS 砍成两个 kind 都照样绿。"""
-    assert g2.KINDS == ROUND2_KINDS
-    assert hg.KINDS_EXT == ROUND2_KINDS + ("hvn",)
+    assert g2.KINDS == INCUMBENT_KINDS
+    assert hg.KINDS_EXT == INCUMBENT_KINDS + ("hvn",)
 
 
 def test_extra_gates_default_is_identity(tmp_path):
     """默认路径 (无 kinds/extra_gates) 必须与显式传 round-2 kind 字面量逐字相同。"""
     _write_synth(tmp_path)
     a = g2.summarize(g2.collect(kdir=tmp_path))
-    b = g2.summarize(g2.collect(kdir=tmp_path, kinds=ROUND2_KINDS, extra_gates=None),
-                     kinds=ROUND2_KINDS)
-    assert set(a["cells"]) == {f"{k}_x{n}{v}" for k in ROUND2_KINDS
+    b = g2.summarize(g2.collect(kdir=tmp_path, kinds=INCUMBENT_KINDS, extra_gates=None),
+                     kinds=INCUMBENT_KINDS)
+    assert set(a["cells"]) == {f"{k}_x{n}{v}" for k in INCUMBENT_KINDS
                                for n in (1, 2, 3) for v in ("", "_vol")}
     assert set(a["cells"]) == set(b["cells"])
     assert _cell_fingerprint(a, a["cells"]) == _cell_fingerprint(b, b["cells"])
@@ -62,12 +62,12 @@ def test_extra_gates_default_is_identity(tmp_path):
 def test_adding_hvn_does_not_perturb_incumbent_cells(tmp_path):
     """加第 4 个 kind 不得改动原三 kind 的任何读数 —— 否则对照被污染。"""
     _write_synth(tmp_path)
-    base = g2.summarize(g2.collect(kdir=tmp_path, kinds=ROUND2_KINDS),
-                        kinds=ROUND2_KINDS)
+    base = g2.summarize(g2.collect(kdir=tmp_path, kinds=INCUMBENT_KINDS),
+                        kinds=INCUMBENT_KINDS)
     hg._FALLBACK.clear()
-    ext = g2.summarize(g2.collect(kdir=tmp_path, kinds=ROUND2_KINDS + ("hvn",),
+    ext = g2.summarize(g2.collect(kdir=tmp_path, kinds=INCUMBENT_KINDS + ("hvn",),
                                   extra_gates={"hvn": hg.hvn_builder}),
-                       kinds=ROUND2_KINDS + ("hvn",))
+                       kinds=INCUMBENT_KINDS + ("hvn",))
     incumbent = set(base["cells"])
     assert incumbent < set(ext["cells"])                 # 严格新增
     assert any(k.startswith("hvn_") for k in ext["cells"])
@@ -115,7 +115,7 @@ def _verdicts(all_pass=True):
 
 
 def test_criteria_pass_but_gap_ci_contains_zero_is_a_tie_and_keeps_cluster():
-    """**这是本次真实结论所走的分支**: 四判据全过 + gap 差 CI 含 0 → 平手 → 保留 cluster。"""
+    """合成样本覆盖：四判据全过但 gap 差 CI 含 0 时保留 incumbent。"""
     h2h = {"_x2": {"gap_diff_ci90": [-0.0077, 0.0031], "exp_diff_ci90": [-0.0048, -0.0003]}}
     v = hg.final_verdict(_verdicts(True), h2h)
     assert v["adopt"] is False and v["reason"] == "tie"
@@ -152,37 +152,55 @@ def test_preregistered_thresholds_are_pinned():
     assert (hg.PREMIUM_TOL, hg.FIRE_TOL, hg.FALLBACK_MAX) == (0.005, 0.15, 0.20)
 
 
-# ---------- 4. 回归对照会红 (变异测试) ----------
+# ---------- 4. 私人 baseline 比较机械件 (合成数据) ----------
 
-def _round2_shaped_summary():
-    """构造一份"完美复现 round-2"的 summary。"""
+BASELINE = {
+    "n_episodes": 20,
+    "months": 4,
+    "kish_n": 3.5,
+    "A_primary_T60": {"mean": 0.02, "median": 0.01, "p10": -0.10, "stop_rate": 0.25},
+    "cells": {
+        "swing_x1": [0.80, 0.01, -0.02, 0.03],
+        "cluster_x2": [0.60, -0.01, -0.04, 0.02],
+    },
+}
+
+
+def test_private_baseline_is_loaded_from_json(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps(BASELINE), encoding="utf-8")
+    assert hg.load_baseline(path) == BASELINE
+
+
+def _baseline_shaped_summary():
+    """Construct a summary that exactly matches the synthetic baseline."""
     cells = {}
-    for key, (fire, dm, lo, hi) in hg.ROUND2["cells"].items():
+    for key, (fire, dm, lo, hi) in BASELINE["cells"].items():
         cells[key] = {"fire_rate": fire,
                       "primary_T60": {"diff_mean": dm, "diff_ci90": [lo, hi]}}
-    return {"n_episodes": hg.ROUND2["n_episodes"], "months": hg.ROUND2["months"],
-            "kish_n": hg.ROUND2["kish_n"],
-            "A": {"primary_T60": dict(hg.ROUND2["A_primary_T60"])}, "cells": cells}
+    return {"n_episodes": BASELINE["n_episodes"], "months": BASELINE["months"],
+            "kish_n": BASELINE["kish_n"],
+            "A": {"primary_T60": dict(BASELINE["A_primary_T60"])}, "cells": cells}
 
 
-def test_regression_check_passes_on_exact_round2():
-    ok, bad = hg.regression_check(_round2_shaped_summary())
+def test_regression_check_passes_on_exact_private_baseline():
+    ok, bad = hg.regression_check(_baseline_shaped_summary(), BASELINE)
     assert ok and bad == []
 
 
 @pytest.mark.parametrize("mutate", [
-    lambda s: s.update(n_episodes=4671),
-    lambda s: s.update(months=361),
-    lambda s: s.update(kish_n=195.0),
-    lambda s: s["A"]["primary_T60"].update(mean=0.030),
-    lambda s: s["cells"]["cluster_x2"].update(fire_rate=0.80),
-    lambda s: s["cells"]["cluster_x2"]["primary_T60"].update(diff_mean=-0.02),
+    lambda s: s.update(n_episodes=21),
+    lambda s: s.update(months=5),
+    lambda s: s.update(kish_n=4.0),
+    lambda s: s["A"]["primary_T60"].update(mean=0.03),
+    lambda s: s["cells"]["cluster_x2"].update(fire_rate=0.70),
+    lambda s: s["cells"]["cluster_x2"]["primary_T60"].update(diff_mean=-0.03),
     lambda s: s["cells"]["cluster_x2"]["primary_T60"].update(diff_ci90=[-0.05, -0.01]),
     lambda s: s["cells"].pop("swing_x1"),
 ])
 def test_regression_check_goes_red_on_any_drift(mutate):
     """数字漂了必须失败 —— 否则「复现不了就中止」只是一句口号。"""
-    s = _round2_shaped_summary()
+    s = _baseline_shaped_summary()
     mutate(s)
-    ok, bad = hg.regression_check(s)
+    ok, bad = hg.regression_check(s, BASELINE)
     assert not ok and bad

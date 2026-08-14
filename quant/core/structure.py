@@ -51,7 +51,7 @@ ANCHOR_DRIFT_TOLERANCE_DAYS = 1
 # regime_transition 写的; 枚举 schema.REGIME_SOURCES 强制 —— "promotion" 是
 # 幽灵取值, 促升实测走本文件 derive 写 card) 一律不触碰 —— 结构变化导致的
 # 授权升降归转移机, 不归画图的手。
-# 设计真源: quant/research/regime_field_unification_design.md (语义规格表)。
+# 可执行语义以本模块、schema 和对应 production tests 为准。
 
 CARD_REGIME_SOURCE = "card"
 
@@ -99,11 +99,9 @@ def derive_card_regime(agent: Optional[dict], *, bucket: str, today: str) -> str
     return "derived_normal"
 
 
-# ── 结构修复 VETO 判别式 (用户  裁决, 前身 = 入场档位判别式) ──
+# ── 结构修复 VETO 判别式 ──
 #
-# 分类轴退役 (classification_removal_design.md D1): 旧输出「降级 probe (cap 2%)」
-# 改为 **VETO**—— 用户 逐字「结构降级反转立马 cap 0 即可」。二值世界没有打折
-# 中间态 (probe 档历史净 −$2,570 / −26%/$, 中间态的钱是负的)。
+# 授权是二元状态：结构修复无效时输出 **VETO**，不能用折扣仓位替代拒绝。
 #
 # **适用域 = card 源 cap (用户  二裁纠偏)**: 「之前给了 cap 的 probe
 # 仓位…应该是直接允许 R1 入场」——机器源 (auto/demoted) 的 cap 是**转移机在

@@ -31,8 +31,8 @@
 
 出处：Andrew W. Lo, Harry Mamaysky, Jiang Wang, *Foundations of Technical Analysis:
 Computational Algorithms, Statistical Inference, and Empirical Implementation*,
-*Journal of Finance* 55(4), 2000, 1705-1765.（本仓上一轮读了全文，见
-`quant/research/price_action_framework_design.md` §4.1）
+*Journal of Finance* 55(4), 2000, 1705-1765. The production implementation and
+its synthetic tests are the public executable contract; study notes stay private.
 
 抄它的四个理由，每个都对应本仓踩过的一个坑：
 

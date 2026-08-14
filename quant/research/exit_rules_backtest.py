@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """exit_rules_backtest.py — 反事实回测: 实际入场不变, 退出严格按当前规则栈机械执行。
 
-问题 (, 空仓窗口): 从第一笔 Moomoo 成交 () 起, 如果入场决策
+问题: 从私有成交事件的第一笔记录起, 如果入场决策
 保持原样, 但退出由 trend-exit-system 全栈机械接管 (利润棘轮 / 趋势死亡线 /
 2N 结构止损代理 / G-01 阶梯 / DTE 纪律 / no-add lock), 权益曲线长什么样?
 
@@ -14,7 +14,7 @@
 - 期权逐日 mark: Black-Scholes, IV 由该合约入场/出场真实成交价各解一次, 线性插值
   (两端锚定真实成交价, 无 vol 漂移自由度)。
 - 短权/long put/组合外孤儿腿 pass-through (两个世界完全一致, 不进规则管辖)。
-- SIVE.ST (IBKR, SEK) 排除 — 口径 = Moomoo。
+- 数据排除项由 ignored private config 提供，公开源码不保存账户特例。
 
 三个世界:
   actual       — 完全复刻实际成交
@@ -52,24 +52,23 @@ DTE_FORCE_CLOSE = 21     # DTE≤21 + OTM → force close (natural-humility-anch
 DTE_GRACE_DAYS = 3       # 入场 3 天内不触发 DTE 规则 (entry vehicle 选择不在回测范围)
 SLIP_OPT = 0.03          # 规则触发期权卖出的滑点惩罚 (premium 比例)
 SLIP_STK = 0.002         # 规则触发正股卖出的滑点惩罚
-START = "2026-01-20"
-EXCLUDED_BROKERS = {"SIVE.ST"}   # IBKR 手工事件, 非 Moomoo 口径
-BAD_KLINES = {"MULL"}            # 复权口径与成交价冲突 (kline ~7.5 vs fills ~184) → pass-through
+DEFAULT_CONFIG = ROOT / "trade/us_stock/knowledge/research/exit_rules/config.json"
 
 
 # ── 市场数据 ────────────────────────────────────────────────────
 
 class Market:
-    def __init__(self) -> None:
+    def __init__(self, bad_klines: set[str] | None = None) -> None:
         self._rows: Dict[str, List[dict]] = {}
         self._idx: Dict[str, Dict[str, int]] = {}
         self._atr: Dict[str, List[Optional[float]]] = {}
         self._mode_cache: Dict[Tuple[str, str], str] = {}
+        self._bad_klines = bad_klines or set()
 
     def rows(self, und: str) -> List[dict]:
         if und not in self._rows:
             p = KLINE_CACHE_DIR / f"{und}.jsonl"
-            rows = [] if und in BAD_KLINES else ([r for r in iter_jsonl(p)] if p.exists() else [])
+            rows = [] if und in self._bad_klines else ([r for r in iter_jsonl(p)] if p.exists() else [])
             for r in rows:
                 r["_d"] = str(r.get("time", ""))[:10]
             self._rows[und] = rows
@@ -129,8 +128,9 @@ class Market:
             if len(closes) > 126 and closes[-127] > 0:
                 q1 = c / closes[-127] - 1 >= 1.50
             ytd_base = None
+            current_year = d[:4]
             for k in range(i, -1, -1):
-                if rows[k]["_d"] < "2026-01-01":
+                if rows[k]["_d"][:4] < current_year:
                     ytd_base = closes[k]
                     break
             if not q1 and ytd_base:
@@ -395,7 +395,7 @@ class Book:
         elif side in ("SELL", "BUY_BACK"):
             ep = self.by_instr.get(instr)
             if ep is None or not ep.legs:
-                # BUY_BACK-on-flat = 窗口前开仓的孤儿短腿 (AXTI260417P45000): 真实现金流出。
+                # BUY_BACK-on-flat = 窗口前开仓的孤儿短腿：保留真实现金流方向。
                 # SELL-on-flat = sim 从未持有 (入场被拦/提前平) → no-op, 不允许幽灵卖出收现金
                 if side == "BUY_BACK":
                     self._cashflow(und, -qty * px * mult)
@@ -630,24 +630,47 @@ class Book:
 
 # ── 主流程 ──────────────────────────────────────────────────────
 
-def load_events() -> Tuple[List[dict], List[str]]:
+def load_private_config(path: Path) -> dict:
+    """读取 ignored private config；文件缺失时使用无特例的公开默认值。"""
+    if not path.exists():
+        return {"excluded_instruments": [], "bad_klines": [], "start_date": None}
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise ValueError("exit-rules config must be a JSON object")
+    for key in ("excluded_instruments", "bad_klines"):
+        if not isinstance(doc.get(key, []), list):
+            raise ValueError(f"{key} must be a JSON list")
+    return {
+        "excluded_instruments": doc.get("excluded_instruments", []),
+        "bad_klines": doc.get("bad_klines", []),
+        "start_date": doc.get("start_date"),
+    }
+
+
+def load_events(excluded_instruments: set[str] | None = None) -> Tuple[List[dict], List[str]]:
+    excluded_instruments = excluded_instruments or set()
     evs, notes = [], []
     for p in sorted(EVENTS_GLOB.glob("*/trades.jsonl")):
         for e in iter_jsonl(p):
-            if e["ticker"] in EXCLUDED_BROKERS:
+            if e["ticker"] in excluded_instruments:
                 continue
             evs.append(e)
     evs.sort(key=lambda e: e["timestamp"])
+    if not evs:
+        raise ValueError("no private trade events found after exclusions")
     notes.append(f"事件 {len(evs)} 条 ({evs[0]['timestamp'][:10]} → {evs[-1]['timestamp'][:10]}); "
-                 f"SIVE.ST (IBKR/SEK) 已排除")
+                 f"排除项 {len(excluded_instruments)} 个")
     return evs, notes
 
 
-def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
+def run(trail_confirm: bool = False, strict_lock: bool = False,
+        config_path: Path = DEFAULT_CONFIG) -> None:
     variant = trail_confirm or strict_lock
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    mkt = Market()
-    events, notes = load_events()
+    config = load_private_config(config_path)
+    mkt = Market(set(config["bad_klines"]))
+    events, notes = load_events(set(config["excluded_instruments"]))
+    start = config["start_date"] or events[0]["timestamp"][:10]
 
     # 期权模型: 全部成交价作为 IV 锚
     opt_models: Dict[str, OptionModel] = {}
@@ -658,8 +681,10 @@ def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
         m = opt_models.setdefault(e["ticker"], OptionModel(e["ticker"], occ, mkt))
         m.add_anchor(e["timestamp"][:10], float(e["price"]))
 
-    # 交易日历: QQQ kline 日 (>= START) + 事件残留日
-    qqq = [r["_d"] for r in mkt.rows("QQQ") if r["_d"] >= START]
+    # 交易日历: 基准 kline 日 (>= 私有样本起点) + 事件残留日
+    qqq = [r["_d"] for r in mkt.rows("QQQ") if r["_d"] >= start]
+    if not qqq:
+        raise ValueError("benchmark kline does not cover the configured sample")
     extra = sorted({e["timestamp"][:10] for e in events} - set(qqq))
     calendar = sorted(set(qqq) | {d for d in extra if d > qqq[-1]})
 
@@ -680,7 +705,7 @@ def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
                 b.close_day(d)
             b.curve.append((d, b.equity(d)))
 
-    # 期末未平仓 (如 SPCX) 的 mark 归因进每标的口径, 与 equity 一致
+    # 期末未平仓的 mark 归因进每标的口径, 与 equity 一致
     last_d = calendar[-1]
     for b in books:
         for ep in b.episodes:
@@ -700,7 +725,7 @@ def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
             mdd = min(mdd, v - peak)
         dd[b.name] = mdd
     qqq_rows = mkt.rows("QQQ")
-    q0 = next(float(r["close"]) for r in qqq_rows if r["_d"] >= START)
+    q0 = next(float(r["close"]) for r in qqq_rows if r["_d"] >= start)
     q1 = float(qqq_rows[-1]["close"])
 
     # ---- nav_history 验证 (nav 是盘前快照 ≈ 前收盘) ----
@@ -722,7 +747,7 @@ def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
 
     # ---- 每标的 Δ 表 ----
     unds = sorted(set(books[0].pnl_by_und) | set(books[1].pnl_by_und) | set(books[2].pnl_by_und))
-    # 末日在持仓 (SPCX) 的 mark 补进 pnl 口径: 用 equity−cash 分摊 — 简化: 单独列出
+    # 末日在持仓的 mark 补进 pnl 口径: 用 equity−cash 分摊 — 简化: 单独列出
     per_und = []
     for u in unds:
         a = books[0].pnl_by_und.get(u, 0.0)
@@ -755,7 +780,7 @@ def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
     write_svg(OUT_DIR / "equity.svg", books)
 
     rep = []
-    rep.append("# 退出规则栈反事实回测 (2026-01-20 → 2026-07-16)\n")
+    rep.append(f"# 退出规则栈反事实回测 ({calendar[0]} → {calendar[-1]})\n")
     rep.append("入场保持实际, 退出按 trend-exit-system 全栈机械执行。规则数学与 exit_guard.py 同源。\n")
     for n in notes:
         rep.append(f"- {n}")
@@ -788,7 +813,7 @@ def run(trail_confirm: bool = False, strict_lock: bool = False) -> None:
         rep.append(f"| {d} | {dn:+,.0f} | {dm:+,.0f} | {df:+,.0f} |")
     rep.append("\n## 假设与局限\n")
     for s in [
-        "规则是从这段历史的失败中提炼的 (NOK/AAOI 源案例) — 本回测是制度回填, 不是 out-of-sample 证明。",
+        "规则与回放样本并非独立生成 — 本回测是制度回填, 不是 out-of-sample 证明。",
         "退出 = min(实际退出, 规则触发): 规则只强制退出, 不会让你比实际拿得更久。",
         "期权逐日 mark = BS + 入场/出场成交价解 IV 线性插值; 规则触发卖出罚 3% premium 滑点 (正股 0.2%)。",
         "结构位止损用 2N 上界代理 (§2b 合规 stop ≤ 2N), 取最宽 = 对反事实最不利。",
@@ -857,7 +882,7 @@ def write_svg(path: Path, books: List[Book]) -> None:
         parts.append(f'<text x="{PAD+10}" y="{PAD+16+k*18}" font-size="12" fill="{colors[nm]}">'
                      f'— {names[nm]}: {fv:+,.0f}</text>')
     parts.append(f'<text x="{PAD}" y="{PAD-24}" font-size="14" fill="#222">'
-                 f'累计交易损益 (USD) — 实际 vs 退出规则栈反事实 (2026-01-20 → 2026-07-16)</text>')
+                 f'累计交易损益 (USD) — 实际 vs 退出规则栈反事实 ({dates[0]} → {dates[-1]})</text>')
     parts.append("</svg>")
     path.write_text("\n".join(parts), encoding="utf-8")
 
@@ -869,5 +894,7 @@ if __name__ == "__main__":
                     help="§2b 确认标定变体: 破线 <1N 首日不执行, 2连收/≥1N 才确认")
     ap.add_argument("--strict-lock", action="store_true",
                     help="canonical §3 严格 lock: 存活到结构修复, 拦重进")
+    ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                    help="ignored private JSON config")
     a = ap.parse_args()
-    run(trail_confirm=a.trail_confirm, strict_lock=a.strict_lock)
+    run(trail_confirm=a.trail_confirm, strict_lock=a.strict_lock, config_path=a.config)

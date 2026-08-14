@@ -1,8 +1,8 @@
-"""fastlane_backtest 机械件验证 (合成数据; 真数据只跑一次)。
+"""fastlane_backtest 的合成机械件验证。
 
 钉住的是**预注册里会驱动裁决的那几条语义**:
   - 三臂 + 无幅度对照臂各自的入场日 (c+1 vs c+2 vs 不入场)
-  - SLOW 的失败分支 = 持现金 (设计稿字面), 与 _rescan 变体的差别
+  - SLOW 的失败分支 = 持现金，与 _rescan 变体区分
   - R-multiple 的定义与未入场取 0
   - final_verdict: 任一判据不满足 → 不采纳; 两 k 都过 → 取更严者
 """
@@ -38,7 +38,7 @@ def test_unqualified_fast_hybrid_falls_back_to_slow():
 
 
 def test_slow_holds_cash_when_second_day_falls_back_under_gate():
-    """设计稿字面: 首次确认之后次日跌回 gate 下 → 不入场持现金 (不再等下一次)。"""
+    """首次确认之后次日跌回 gate 下时不入场，并持现金到终点。"""
     closes = [90, 95, 100.5, 99, 104, 105] + [105] * 20
     w, _ = fb.build_worlds(0, 20, closes, 100.0, _atr(len(closes)), 1.0, rescan=False)
     assert w["slow"] is None and w["fast_hybrid"] is None
@@ -99,7 +99,7 @@ def _res(k, all_pass, eras=None):
 
 
 def test_no_k_passes_means_not_adopted():
-    """**本次真实结论所走的分支。**"""
+    """合成样本覆盖无候选 k 通过的分支。"""
     v = fb.final_verdict([_res(1.0, False), _res(1.5, False)])
     assert v["adopt"] is False and v["reason"] == "no_k_passes"
     assert "×2 确认保留" in v["text"]

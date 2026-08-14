@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """止损守卫 v2 —— ladder_timing 三格按代价守卫重判。
 
-预注册全文: quant/research/stop_cost_guard_design.md
-**U/C 已锁 (用户): U = 止损代价 / C = 每笔已入场。T 待锁 —— 锁定前本脚本拒跑。**
+预注册全文: private preregistration
+**U/C 由协议锁定：U = 止损代价 / C = 每笔已入场。T 未锁定时本脚本拒跑。**
 
-## 原则 (设计稿 §1)
+## 原则 (private preregistration §1)
 守卫的量纲必须跟着止损模型走: 入场锚定 (escape 的对称 2N) 下两臂每股风险按构造相同
 ⟹ 次数 ≡ 代价, +5pp 次数守卫合法; gate 锚定 (live bfloor_buf) 下单位随入场时点变
 ⟹ 次数 ≠ 代价, 必须直接量代价。家系: +5pp → +8pp (手工找补) → v2 (直接量)。
@@ -13,7 +13,7 @@
 每 episode 实现止损代价 (N 计) = Σ_止损档 w × (px入 − px出·(1−SLIP)) / ATR20[D1]
 (gpt.measure 的 `stop_cost` 键; 未止损 = 0; 负值不夹取)。
 配对 = 两臂都入场的 episode (判据① 同一谓词); 按月 block bootstrap 10k draws CI90,
-seed 20260809 (新种子, 不复用已跑轮次)。
+使用独立的固定中性 seed，不复用对照回测的抽样序列。
 
 ## T (§4, 待锁)
   A_strict    代价差 CI90 上界 < 0 才过 (显著更省才过)
@@ -21,7 +21,7 @@ seed 20260809 (新种子, 不复用已跑轮次)。
 
 ## 范围 (§5)
 只重判 ladder_timing 三格 (①②③④⑥ 原样, ⑤ 换代价守卫); ANCHOR 主裁决。
-PASS → 建议 fastlane 留任 + A7 结案; FAIL → 建议撤下回 ×2。只出建议, 实施等 用户。
+PASS → 建议 fastlane 留任；FAIL → 建议撤下回 ×2。脚本只出建议，不自动实施。
 ②③④ 不重开 —— 它们的下一次机会 = +12 个月复测, 届时本守卫适用 (那才是盲的)。
 
 Usage: .venv/moomoo/bin/python3 quant/research/stop_cost_guard_backtest.py [--json] [--report PATH]
@@ -41,10 +41,10 @@ from quant.core.paths import KLINE_DEEP_DIR as KDIR  # noqa: E402
 from quant.research import gate_path_taxonomy_backtest as gpt  # noqa: E402  统计件单一真源
 from quant.research import ladder_timing_backtest as lt  # noqa: E402  样本构造单一真源
 
-# ✅ T 已锁定 (用户): **B_harm_veto**—— 代价差 CI90 下界 > 0 才否。
-# 守卫的本职是否决伤害; 收益的举证在判据①②肩上 (设计稿 §4, 含已见信息披露)。跑完不改。
+# T 由协议锁定为 **B_harm_veto**：代价差 CI90 下界 > 0 才否。
+# 守卫的本职是否决伤害；收益举证在判据①②肩上。运行后不得改判据。
 T_MODE = "B_harm_veto"
-BOOT_SEED = 20260809          # 新种子 (§3): 不复用 20260808 两轮已抽过的月索引
+BOOT_SEED = 374_166          # 独立 seed：不复用对照回测的月索引
 
 
 def cost_guard(rows, mode, draws=gpt.BOOT_DRAWS, seed=BOOT_SEED):
@@ -86,12 +86,12 @@ def rejudge(base, guard):
                 "text": f"**数据不足不裁决**(Kish {base['kish']} < {gpt.KISH_MIN})"}
     if c["all_pass"]:
         return {"decision": "support", "crit": c, "old_c5_count_guard": old5,
-                "text": "**六判据全过 (⑤=代价守卫) → 建议 `fastlane_k=0.5` 留任, A7 结案**"
-                        " — 实施等 用户"}
+                "text": "**六判据全过 (⑤=代价守卫) → 建议 `fastlane_k=0.5` 留任**"
+                        " — 不自动实施"}
     miss = [k for k, v in c.items() if not v and k != "all_pass"]
     return {"decision": "reject", "crit": c, "old_c5_count_guard": old5,
             "text": "**未获支持 → 建议撤下 `_fastlane` 回 ×2**(未过: "
-                    + ", ".join(miss) + ") — 实施等 用户"}
+                    + ", ".join(miss) + ") — 不自动实施"}
 
 
 def render(cells, verds):
@@ -116,7 +116,7 @@ def render(cells, verds):
     L.append(f"  {verds[lt.ADJUDICATING]['text']}")
     a, r = verds[lt.ADJUDICATING]["decision"], verds[lt.REPLICATION]["decision"]
     L.append(f"复制臂一致性: ANCHOR={a} / ROLL={r} → "
-             + ("一致" if a == r else "⚠️ 分叉 (构造敏感, 写回设计稿)"))
+             + ("一致" if a == r else "⚠️ 分叉 (构造敏感, 写入私人报告)"))
     L.append("范围提醒 (§5): ②③④ 不重开; ④ 的下一次机会 = +12 个月复测, 届时本守卫适用。")
     return "\n".join(L)
 
@@ -127,7 +127,7 @@ def main_cli(argv=None):
     ap.add_argument("--report", type=Path, default=None)
     a = ap.parse_args(argv)
     if T_MODE is None:
-        print("⛔ T 未锁定 (stop_cost_guard_design.md §4 待 用户 选 A_strict / B_harm_veto)。"
+        print("⛔ T 未锁定（必须先在私人预注册中选择 A_strict 或 B_harm_veto）。"
               "锁定前拒跑 —— 这是预注册纪律的代码强制点, 不是 bug。", file=sys.stderr)
         return 2
 

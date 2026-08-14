@@ -4,7 +4,7 @@
 对每个 (ticker, day, regime) 采样点模拟 7 种入场策略, 比较部署率/均价/收益/痛感.
 Regime 定义复刻 zone-maintenance.md momentum diagnosis (Q1/Q2/Q3).
 Fill 模拟: 日线 OHLC, gap-through 按 open 成交, 否则 limit 价成交.
-LADDER_RE = 系统真实行为 (unfilled rungs 每 3 日向上重锚, 只升不降).
+LADDER_RE = production behavior（unfilled rungs 每 3 日向上重锚，只升不降）。
 """
 
 import sys
@@ -17,13 +17,15 @@ import statistics as st
 from collections import defaultdict
 
 from quant.core.paths import KLINE_CACHE_DIR as KDIR  # noqa: E402
-UNIVERSE = ["AAOI", "MU", "LITE", "MRVL", "NBIS", "INTC", "NOK", "CRWV", "RKLB",
-            "AXTI", "AMKR", "NVDA", "AMD", "GOOGL", "MSFT", "AAPL", "TSM",
-            "QCOM", "SNDK", "TSLA", "WDC", "SMR", "ASTS"]
 WINDOW = 10   # 挂单有效期 (交易日)
 T1 = 20       # 主评估 horizon
 T2 = 40       # 次评估 horizon
 REANCHOR_EVERY = 3
+
+
+def available_tickers() -> list[str]:
+    """Discover the private study universe without embedding it in public source."""
+    return sorted(path.stem for path in KDIR.glob("*.jsonl") if path.is_file())
 
 
 def load(tk):
@@ -117,7 +119,7 @@ def main():
     agg = defaultdict(lambda: defaultdict(list))   # regime -> strat -> list of dict
     per_ticker = defaultdict(lambda: defaultdict(list))  # (regime,strat) -> tk -> ret
     counts = defaultdict(int)
-    for tk in UNIVERSE:
+    for tk in available_tickers():
         bars = load(tk)
         if len(bars) < 170:
             continue

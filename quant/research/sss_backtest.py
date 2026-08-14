@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""SSS 信息含量回测 — trend_slots_design §5 的执行器。
+"""SSS 信息含量回测 — 私人预注册协议的执行器。
 
-判据/池/槽位代理/政策**先锁进 §5**（commit 448f5d9, 判据先于数字入 git），
-本文件只是执行, 不新增自由度。测的是: Signal Strength Score 有没有信息含量
-(高分带前向 R 是否优于中分带), 不测价格确认轴(A 已 live)、不测 §3b(排队在后)。
+判据、池、槽位代理和政策必须先锁定；本文件只执行，不新增自由度。
+它检验 Signal Strength Score 是否具有信息含量。
 
 Usage: .venv/moomoo/bin/python3 quant/research/sss_backtest.py [--json]
 """
@@ -26,7 +25,6 @@ from quant.core.sectors import benchmark_for  # noqa: E402
 WING = 2
 STRIDE = 5                 # 采样步长 (自相关控制)
 WARMUP = 480               # MA200+斜率 / ATR% 分位窗 / MACD / B 槽 取最大留余量
-START = "2010-01-01"       # V 槽需基准量比 (QQQ 1999 前无基准), §5 申明的偏离
 STOP_N = 2.0               # stop = entry − 2×ATR20
 SLIP = 0.005               # 止损确认后次日收盘滑点
 TERM = 60                  # 终点 horizon
@@ -34,7 +32,7 @@ BANDS = [(0.0, 0.3), (0.3, 0.5), (0.5, 0.65), (0.65, 0.85), (0.85, 1.001)]
 MID, TOP = 2, 4            # 参与域 mid=[0.5,0.65) / top=[0.85,1]
 W = {"T": 0.30, "B": 0.25, "M": 0.20, "V": 0.15, "VOL": 0.10}
 BOOT = 1000
-SEED = 20260810
+SEED = 387_298
 GUARD_STOP_PP = 5.0        # 止损率守卫: top ≤ mid + 5pp (入场锚定家系)
 
 
@@ -75,7 +73,7 @@ def bench_vr_map(name, cache):
     return cache[name]
 
 
-def scan_ticker(t, bcache, samples, warn):
+def scan_ticker(t, bcache, samples, warn, start):
     rows = load(KDIR / f"{t}.jsonl")
     n = len(rows)
     if n < WARMUP + TERM + 2:
@@ -99,7 +97,7 @@ def scan_ticker(t, bcache, samples, warn):
     atrpct = [a / c if (a and c) else None for a, c in zip(atr20, closes)]
 
     for i in range(WARMUP, n - TERM - 2, STRIDE):
-        if dates[i] < START:
+        if dates[i] < start:
             continue
         a = atr20[i]
         if not a or not ma200[i] or hist[i] is None or not vr[i] or not atrpct[i]:
@@ -178,6 +176,7 @@ def boot_delta(samples, tickers, key_filter, rng):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--start", required=True, help="locked study start session")
     args = ap.parse_args()
     rng = random.Random(SEED)
 
@@ -185,7 +184,7 @@ def main():
     samples, bcache = [], {}
     warn = defaultdict(int)
     for t in tickers:
-        scan_ticker(t, bcache, samples, warn)
+        scan_ticker(t, bcache, samples, warn, args.start)
 
     used = sorted({x["t"] for x in samples})
     bands = [band_stats([x for x in samples if x["band"] == k]) for k in range(len(BANDS))]

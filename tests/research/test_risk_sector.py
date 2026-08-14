@@ -1,8 +1,4 @@
-"""risk_sector 机械件验证 (合成数据)。
-
-钉的是判据里最容易被"优化掉"的那条: **稳定性 (ARI)**。
-本轮的结论正是"分离是真的、分组不是" —— 只测 sep 会得出相反答案。
-"""
+"""risk_sector 机械件验证：分离度与聚类稳定性必须同时受检。"""
 import pytest
 
 from quant.research import risk_sector as rs
@@ -65,7 +61,6 @@ def test_preregistered_constants_are_pinned():
     assert rs.MIN_COMMON_DAYS == 15
 
 
-def test_stability_gate_is_what_actually_decided_this_round():
-    """本轮 k=6/8/10 的 sep 全部达标 (0.166-0.233) 却仍被否 —— 卡在 ARI。
-    只测 sep 会得出相反结论, 所以这条闸门不许被"优化掉"。"""
+def test_stability_gate_remains_part_of_the_contract():
+    """只测 separation 会漏掉不稳定聚类，因此 ARI 闸门必须保留。"""
     assert rs.ARI_MIN == 0.30

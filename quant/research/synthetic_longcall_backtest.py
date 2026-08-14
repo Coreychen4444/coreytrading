@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """synthetic_longcall_backtest.py — 合成 long call 大样本回测
 
-预注册: quant/research/synthetic_longcall_design.md (判据 A1-A3/B1 先锁)。
-数据: klines_deep 165 票 (至), BS 合成 premium (HV20×1.1 锚 IV, 主臂持有期
-IV 锁定)。信号 = MA20>MA50 ∧ close>MA20 ∧ 40 日新高, 边沿触发, 同票冷却 20 日。
+预注册: private preregistration (判据 A1-A3/B1 先锁)。
+数据由 ignored private deep-cache 与显式窗口提供；BS 合成 premium
+(HV20×1.1 锚 IV, 主臂持有期 IV 锁定)。信号 = MA20>MA50 ∧ close>MA20 ∧
+40 日新高, 边沿触发, 同票冷却 20 日。
 两臂共有基线 = 棘轮(+50% 保本/+100% 回吐 1/3) + 趋势死亡线(3×ATR20) + DTE≤7 强平。
 
 research 旁路: 无人 import 本模块。
@@ -11,6 +12,7 @@ research 旁路: 无人 import 本模块。
 from __future__ import annotations
 
 import glob
+import argparse
 import json
 import math
 import statistics
@@ -23,7 +25,6 @@ DEEP_DIR = Path(__file__).resolve().parents[2] / "trade/us_stock/market/klines_d
 REPORT = Path(__file__).resolve().parents[2] / "tmp/backtest/synthetic_longcall_report.md"
 R = 0.045
 IV_PREM = 1.10          # volatility risk premium 常数 (§2)
-WINDOW_START = "2024-01-01"
 COOLDOWN = 20
 WHIPSAW_DAYS = 60
 
@@ -110,11 +111,11 @@ def precompute(rows):
     return {"ma20": ma20, "ma50": ma50, "hv20": hv20, "atr20": atr20, "hi40": hi40}
 
 
-def signals(rows, ind):
+def signals(rows, ind, start, end):
     """边沿触发信号日 index 列表 (§2), 窗口内, 冷却 20 日。"""
     out, last = [], -10**9
     for i in range(50, len(rows)):
-        if rows[i]["date"] < WINDOW_START:
+        if rows[i]["date"] < start or rows[i]["date"] > end:
             continue
         c = rows[i]["close"]
         ok = (ind["ma20"][i] and ind["ma50"][i] and ind["hi40"][i]
@@ -233,7 +234,12 @@ def p10(v):
     return s[max(0, int(0.10 * len(s)) - (1 if len(s) % 10 == 0 else 0))] if s else 0.0
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Run a synthetic long-call private study")
+    parser.add_argument("--start", required=True, help="locked study start session")
+    parser.add_argument("--end", required=True, help="locked study end session")
+    parser.add_argument("--report", type=Path, default=REPORT)
+    args = parser.parse_args(argv)
     tickers = sorted(p.stem for p in DEEP_DIR.glob("*.jsonl"))
     data = {}
     for tk in tickers:
@@ -244,13 +250,13 @@ def main():
         if len(rows) < 120:
             continue
         ind = precompute(rows)
-        sig = signals(rows, ind)
+        sig = signals(rows, ind, args.start, args.end)
         if sig:
             data[tk] = (rows, ind, sig)
     n_camp = sum(len(s) for _, _, s in data.values())
     lines = ["# synthetic_longcall 回测报告", "",
-             f"预注册: synthetic_longcall_design.md | 池 {len(data)} 票, "
-             f"campaigns {n_camp} (窗 {WINDOW_START} → 2026-07-24)", ""]
+             f"预注册: private preregistration | 池 {len(data)} 票, "
+             f"campaigns {n_camp} (窗 {args.start} → {args.end})", ""]
 
     def run(entry_dte, delta_t, kw):
         by_tk, allv, exits, whip_hits, s1_fires = {}, [], {}, 0, 0
@@ -360,8 +366,8 @@ def main():
     lines += ["", "## 敏感性 (附表): 持有期 IV 逐日 = HV20×1.1 — 未实现 (主臂 IV 锁定已覆盖裁决域, "
               "逐日 HV 臂需重构 pm(); 若 A/B 判据处于边缘再补跑)", ""]
 
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text("\n".join(lines) + "\n")
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 

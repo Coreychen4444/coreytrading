@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""冲击预算 sizing 框架 — 主回测 (预注册 shock_budget_design.md, 已锁定)。
+"""冲击预算 sizing 框架 — 主回测 (预注册 private preregistration, 已锁定)。
 
 ## 两条 sizing 臂 (同一批入场信号, 只换 sizing)
 A 现行: CAP_FRACS 名义 cap (confirmed 5% NAV) + 25% 单票集中度
@@ -58,24 +58,24 @@ H4_FLOOR = -0.02
 SECTOR_SEP_MIN = 0.15
 BASKETS = 200
 BASKET_N = 5
-SEED = 20260807
+SEED = 264_575
 
 # ---- 运行前补记 (, 冒烟后、全量前) ----
 # ① 预注册 §2 **没有规定单笔可占预算的份额**, 于是"先到先得"会让第一笔吃光整个板块预算
-#    (实测 wB = room/(X·vol) = 0.10/0.06 ≈ **167% NAV 单笔**)。这不是实现 bug, 是设计缺口。
-#    两种读法都跑, 不替 用户 选:
+#    例如 room/(X·vol) 可大于 100% NAV；这不是实现 bug，而是名义约束缺口。
+#    两种读法都跑，选择必须由私人预注册提前锁定：
 #      B_greedy : 字面实现 (剩余预算全给当前这笔)
-#      B_share  : 单笔 ≤ 总预算 / BASKET_N (= 用户 那句"其他股票自然就会降低敞口"的均分读法)
+#      B_share  : 单笔 ≤ 总预算 / BASKET_N（均分解释）
 # ② H2 的 ρ 必须在**同等预算余量**下测: wB 天然含 room 这个路径依赖项, 直接测会把
 #    "开仓顺序"的噪音混进"选择性"。改测 wB/room ↔ X·vol —— 这才是 §5-H2 问的那件事
-#    (risk_unit_design §3 原话: 证明它是**选择性**收紧, 而非等比缩小)。
+#    用于检验约束是**选择性**收紧，而非等比缩小。
 SHARE_CAP = 1.0 / BASKET_N
 
 # ---- §2.9 第二轮修订 (, 运行前锁定) ----
 # (1) 取消分板块预算 (判据 4 已否, 只留总额)  (2) 名义上限 40% 并用, 不另设份额规则
-# (3) 组合 gross 做成显式对照臂 —— 用户 只定了单票没定 gross
-NOTIONAL_CAP = 0.40                       # 用户
-GROSS_ARMS = (None, 2.00, 1.50, 1.10, 1.00)   # ∞ / Reg T / 150% / **110% (用户  定)**/ 不加杠杆
+# (3) 组合 gross 做成显式对照臂，裁决格由私人协议锁定。
+NOTIONAL_CAP = 0.40                       # production contract value
+GROSS_ARMS = (None, 2.00, 1.50, 1.10, 1.00)   # ∞ / Reg T / 150% / 110% / 不加杠杆
 # §12 简化版: X 用**池级常数**替代 per-ticker。数学上 ≡ 纯波动率目标 + 重标定预算。
 SIMPLE_EQUIV_W = 0.10       # 判据①: 逐笔仓位相对差中位 ≤10%
 SIMPLE_TOL_BREACH = 0.5     # 判据②: 打穿率不得比 FULL 高出 0.5×目标频率
@@ -424,7 +424,7 @@ def render_v2(arms, sep, v):
                      f"{(r['rho_median'] if r['rho_median'] is not None else float('nan')):>7.2f}"
                      f"{r['exp_A'] * 100:>7.2f}%{r['exp_B'] * 100:>7.2f}%{r['exp_diff'] * 100:>7.2f}%")
         L.append("")
-    L.append("判据 (裁决口径 = gross ≤110%, 用户  定):")
+    L.append("判据（私人协议裁决口径 = gross ≤110%）：")
     for name, f in v.items():
         if name.startswith("_"):
             continue
@@ -549,7 +549,7 @@ def main_cli():
         tag = "gross ∞ (不设)" if g is None else f"gross ≤{g:.0%}"
         arms[tag] = run(D, rolling=True, baskets=a.baskets, v2=True, gross_cap=g)
     sep = sector_separation(D)
-    v = verdict(arms["gross ≤110%"], sep)      # 裁决口径 = 用户 定的 110%
+    v = verdict(arms["gross ≤110%"], sep)      # 私人协议锁定的裁决口径
     px = pooled_x(D)
     simp = {}
     for g in GROSS_ARMS:

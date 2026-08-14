@@ -35,7 +35,7 @@ def test_arm_B1_holds_cash_when_d2_falls_back_under_gate():
 
 
 def test_arm_B2_falls_back_to_B1_when_no_hvn_band_below():
-    """§3b-B: 没有量能货架时 live 的人仍会入场, 让 B2 空手 = 又一个稻草人。"""
+    """没有量能货架时 B2 回退 B1，避免构造一个必为空仓的对照。"""
     closes, lows, opens = _flat(40, 110.0)
     bars = [{"high": 110.0, "low": 110.0, "close": 110.0, "turnover": 0.0}] * 40
     arms, _s, fell = lb.build_arms(bars, closes, lows, opens, d1=5, gate=100.0,
@@ -118,7 +118,7 @@ def test_both_k_pass_takes_the_stricter_k():
 
 
 def test_only_loose_k_passes_is_adopted_with_an_explicit_boundary():
-    """**本次真实结论所走的分支**: k=0.5 过 / k=1.0 不过 → 采纳但必须写明边界。"""
+    """合成样本覆盖：只有较宽松 k 通过时必须显式写明边界。"""
     v = lb.final_verdict([_res(0.5), _res(1.0, c2_R_beats_both=False)])
     assert v["adopt"] is True and v["k"] == 0.5 and "⚠️" in v["text"]
 
