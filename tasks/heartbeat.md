@@ -9,3 +9,9 @@ Run the repository's periodic monitoring loop.
 5. Send the final text through `quant/ops/tg_notify.py --stdin --split` only when notification credentials are configured.
 
 Treat news and macro context as `[FYI]`. Position authorization comes from the deterministic card, structure and risk layers.
+
+When material industry events occur, add at most two sourced `[FYI]` lines for
+model releases or pricing changes, accelerator roadmaps, hyperscaler capital
+spending, major compute or data-center contracts, and supply-chain capacity or
+pricing. Trigger this track by event type rather than ticker; map it only to
+relevant holdings or candidates and state no directional recommendation.

@@ -93,6 +93,27 @@ def _is_accounted(order_id: str, blob: set[str]) -> bool:
     return any(order_id == s or order_id in s for s in blob)
 
 
+def untagged_lots(body: dict, episode_order_ids: set[str]) -> List[dict]:
+    """Return lots that cannot be associated with any known episode order.
+
+    A lot without a structured ``order_id`` can still be accounted for when an
+    order id appears in a legacy free-text field. A truly untagged lot prevents
+    idempotent fill reconciliation: every later incremental buy includes its old
+    fill again, so the pending quantity remains larger than the broker/lot gap.
+    """
+    out: List[dict] = []
+    for tier in TIERS:
+        for lot in ((body.get("lots") or {}).get(tier) or []):
+            if not isinstance(lot, dict) or lot.get("order_id"):
+                continue
+            strings = {value for value in lot.values() if isinstance(value, str)}
+            if any(order_id and _is_accounted(order_id, strings)
+                   for order_id in episode_order_ids):
+                continue
+            out.append(lot)
+    return out
+
+
 # ── 计划 ──────────────────────────────────────────────────────────
 
 def _open_episode(ticker: str, episodes: Dict[str, List[dict]]) -> Optional[dict]:
@@ -235,11 +256,30 @@ def plan(doc: dict, episodes: Dict[str, List[dict]] | None = None) -> List[dict]
             pending.setdefault(oid, []).append(e)
         pending_qty = sum(float(f.get("qty") or 0) for fs in pending.values() for f in fs)
         if abs(pending_qty - gap) > QTY_TOL:
+            episode_order_ids = {
+                str(event.get("order_id") or "") for event in (ep.get("entries") or [])
+            }
+            orphans = untagged_lots(body, episode_order_ids)
+            orphan_qty = sum(coerce_float(lot.get("qty")) or 0.0 for lot in orphans)
+            hint = ""
+            if orphans and abs((pending_qty - gap) - orphan_qty) <= QTY_TOL:
+                details = ", ".join(
+                    f"{coerce_float(lot.get('qty')) or 0:g}股@"
+                    f"{coerce_float(lot.get('avg_cost')) or 0:g}"
+                    f"({lot.get('entry_period') or '?'})"
+                    for lot in orphans
+                )
+                hint = (
+                    f" ⤷ 差额 {orphan_qty:g} 股 = 卡上挂不上号的 lot [{details}] —— "
+                    "lot 缺 order_id，去重无法识别；核对事件流后回填 order_id"
+                )
             out.append(_blocked(
                 ticker,
                 f"缺口 {gap:+g} 股, 未入账 BUY 合计 {pending_qty:g} 股 —— 对不上, 不猜"
-                + ("" if pending else " (进行中 episode 的 fill 全部已入账)"),
-                gap=gap, pending_qty=pending_qty))
+                + ("" if pending else " (进行中 episode 的 fill 全部已入账)")
+                + hint,
+                gap=gap, pending_qty=pending_qty,
+                untagged_qty=orphan_qty if orphans else 0.0))
             continue
 
         agent = body.get("agent") or {}

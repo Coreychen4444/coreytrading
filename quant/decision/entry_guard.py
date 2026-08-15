@@ -705,14 +705,18 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
     if not gate_only:
         # : 旧文案硬编码"= probe 参与资格" —— 字符串说 probe、算法给
         # confirmed, 是同一分叉的自证。资格行只说**资格**, 档位归下方判别式。
+        # 判定资格带包含 z1 与 z2，展示口径必须与判定口径一致。
         out["lines"].append(
-            f"🎫 回踩资格: z1 {zb['z1'][0]:g}-{zb['z1'][1]:g} 触碰 = 参与资格成立"
+            f"🎫 回踩资格: z1 {zb['z1'][0]:g}-{zb['z1'][1]:g}"
+            f" / z2 {zb['z2'][0]:g}-{zb['z2'][1]:g} 触碰 = 参与资格成立,"
+            " 资格带下限 = z2 下沿"
             f" (thesis {thesis.get('status', '?')}; 预挂授权, 触碰判读走 zone-touch 协议;"
             " 档位由结构判别式定, gate 只管升级/重锚, 非资格前提)")
 
     pos = zone_position(close, zb)
     out["zone_position"] = pos
     out["z1"] = zb["z1"]
+    out["z2"] = zb["z2"]
     # 真 VETO: 破位 / z2 下沿以下 (z1/z2 限价此刻在市价上方 = 即时成交不是回踩单)。
     # 其余位置 (waiting/trim/above_no_chase/zone 内) 一律出计划 ——  用户:
     # 挂的是 zone 限价单, GO/WAIT 描述的是市价, 没有意义。位置降为信息行。
@@ -812,6 +816,9 @@ def _summary_line(r: dict) -> str:
         if z1 and r.get("close"):
             dist = (z1[1] - r["close"]) / r["close"] * 100
             parts.append(f"z1 {z1[0]:g}-{z1[1]:g} ({dist:+.1f}%)")
+        z2 = r.get("z2")
+        if z2:
+            parts.append(f"z2 {z2[0]:g}-{z2[1]:g}")
         cap = (r.get("caps") or {}).get("final")
         sl = share_ladder(cap, r["ladder"], PARAMS["ladder_weights"]) if cap else None
         if sl and sl.get("tiers"):
