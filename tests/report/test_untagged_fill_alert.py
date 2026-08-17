@@ -90,3 +90,39 @@ def test_alert_reaches_the_brief_not_just_the_helper(events, monkeypatch):
     hit = [a for a in out.get("alerts") or [] if "成交无授权标签" in a]
     assert hit, "untagged_fills 有输出但 brief 的 alerts 里没有它"
     assert any(t.get("type") == "fill_untagged" for t in out.get("triggers") or [])
+
+
+def test_price_breach_fill_is_named_even_with_auth(events):
+    events.append({
+        **_fill(auth={"cap_pct_nav": 0.4, "gate_no": 1}),
+        "price_flags": ["above_no_chase", "in_trim_zone"],
+    })
+    lines = pb.price_breach_fills()
+    assert len(lines) == 1
+    assert "TEST" in lines[0]
+    assert "above_no_chase+in_trim_zone" in lines[0]
+
+
+def test_price_breach_marks_cross_day_stamp(events):
+    events.append({
+        **_fill(), "price_flags": ["above_no_chase"],
+        "stamp_stale_card_risk": True,
+    })
+    assert "跨日盖章" in pb.price_breach_fills()[0]
+
+
+def test_clean_and_stale_price_fills_are_quiet(events):
+    events.append(_fill(auth={"cap_pct_nav": 0.4, "gate_no": 1}))
+    events.append({
+        **_fill(days_ago=pb.UNTAGGED_FILL_WINDOW_DAYS + 1),
+        "price_flags": ["in_trim_zone"],
+    })
+    assert pb.price_breach_fills() == []
+
+
+def test_price_breach_alert_reaches_the_brief(events, monkeypatch):
+    monkeypatch.setattr(pb, "price_breach_fills", lambda: [
+        "TEST 1.0@1.0 (synthetic) above_no_chase"])
+    out = pb.build_brief([], "ticker", mutate_state=False)
+    assert any("成交价位违规" in alert for alert in out.get("alerts") or [])
+    assert any(t.get("type") == "fill_price_breach" for t in out.get("triggers") or [])

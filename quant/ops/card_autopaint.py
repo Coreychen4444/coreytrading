@@ -127,21 +127,25 @@ Hard boundaries:
 """
 
 
-def _timeout_prefix() -> List[str]:
-    """Resolve a wall-clock guard without assuming a platform-specific name."""
+def _timeout_argv(seconds: int) -> List[str]:
+    """Resolve a portable wall-clock guard for the detached process."""
     for name in ("timeout", "gtimeout"):
-        binary = shutil.which(name)
-        if binary:
-            return [binary, str(SPAWN_TIMEOUT_S)]
-    raise RuntimeError("card_autopaint requires timeout or gtimeout")
+        found = shutil.which(name)
+        if found:
+            return [found, str(seconds)]
+    perl = shutil.which("perl") or "/usr/bin/perl"
+    if Path(perl).exists():
+        return [perl, "-e", "alarm shift; exec @ARGV", str(seconds)]
+    return []
 
 
 def spawn(ticker: str, bucket: str, today: str, binary: str) -> Dict:
     """Start one detached agent and return without waiting."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = LOG_DIR / f"{ticker}-{time.strftime('%Y%m%dT%H%M%S')}.log"
-    argv = _timeout_prefix() + [binary, "-p", build_prompt(ticker, bucket, today),
-                                "--permission-mode", "bypassPermissions"]
+    wrapper = _timeout_argv(SPAWN_TIMEOUT_S)
+    argv = [*wrapper, binary, "-p", build_prompt(ticker, bucket, today),
+            "--permission-mode", "bypassPermissions"]
     with log.open("wb") as handle:
         process = subprocess.Popen(
             argv,
@@ -156,6 +160,7 @@ def spawn(ticker: str, bucket: str, today: str, binary: str) -> Dict:
         "bucket": bucket,
         "pid": process.pid,
         "log": _display_path(log),
+        "timeout_enforced": bool(wrapper),
         "spawned_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "spawned_at_ts": time.time(),
     }

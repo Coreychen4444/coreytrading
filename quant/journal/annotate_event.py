@@ -40,7 +40,7 @@ from quant.core.io_json import append_jsonl, iter_jsonl, read_json, state_lock  
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
 from quant.core.paths import DECISIONS_PATH, EVENTS_DIR, POSITIONS_PATH, SCORES_PATH, WATCHLIST_PATH  # noqa: E402
-from quant.core.schema import TIERS, validate_event  # noqa: E402
+from quant.core.schema import TIERS, ZONE_AT_FILL, validate_event  # noqa: E402
 from quant.core.sizing import derive_auth  # noqa: E402  授权快照判别式单一真源
 from quant.core.timeutil import et_today, parse_ts  # noqa: E402
 
@@ -198,7 +198,7 @@ def main() -> int:
                     help="省略 = 机械推导 (base 只给结构豁免仓, 其余 position)")
     ap.add_argument("--no-derive", action="store_true",
                     help="关掉自动推导 (只写显式传入的字段)")
-    ap.add_argument("--zone-at-fill", choices=["zone1", "zone2", "waiting", "trim", "above_no_chase", "unknown"])
+    ap.add_argument("--zone-at-fill", choices=sorted(ZONE_AT_FILL))
     ap.add_argument("--notes-add", default="")
     ap.add_argument("--score", choices=sorted(SCORE_SET))
     ap.add_argument("--phase", choices=["entry", "exit", "episode"], default="episode")

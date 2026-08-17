@@ -216,9 +216,9 @@ Only `quant/sync/` writes broker blocks in positions/watchlist state.
 - `stock_fetch.py` refreshes positions, prices and available option Greeks.
 - `order_sync.py` reconciles open orders into `pending_orders`.
 - `trade_history_sync.py` appends deduplicated fills and closes to the event ledger.
-- Event ingestion derives mechanical `tier` and BUY-side authorization snapshots through shared core functions. If authorization cannot be derived, leave it empty and raise an infrastructure warning.
+- Event ingestion derives mechanical `tier` and BUY-side authorization snapshots through shared core functions. It records the stamp date, marks cross-day stale-card risk and freezes stock-fill zone/price-rule flags against the card visible at ingestion. If authorization cannot be derived, leave it empty and raise an infrastructure warning.
 - `lot_reconcile.py` converts unaccounted incremental BUY fills into `lots.position` and updates `position_summary`.
-- Lot reconciliation is idempotent and keyed by order identity.
+- Lot reconciliation is idempotent and keyed by order identity. Candidate-card migration must run first so a re-entry fill derives lot plan fields from the promoted card rather than a stale closed card.
 - Partial sells, ambiguous quantity mismatches and option-lot judgment remain review items; the reconciler reports instead of guessing.
 - `close_reconcile.py` handles fully flat positions: archive closed lots, clear live lots, mark lifecycle state and compute available realized PnL from events.
 - `watchlist_sync.py` reconciles broker-side candidate membership.
@@ -314,9 +314,9 @@ The dependency order is:
 3. open-order synchronization;
 4. fill/event synchronization;
 5. close reconciliation;
-6. lot reconciliation;
-7. watchlist membership reconciliation;
-8. watchlist-to-position migration;
+6. watchlist membership reconciliation;
+7. watchlist-to-position migration;
+8. lot reconciliation;
 9. `card_autopaint.py` detection and detached agent launch for eligible empty cards;
 10. completed K-line update for close-dependent modes;
 11. regime transition;
@@ -332,8 +332,9 @@ The dependency order is:
 instruments, unmanaged positions, option contracts and cards that already have zones.
 `pipeline --read-only` converts it to `--dry-run`, because a detached card agent is a
 state writer that cannot be recalled when the preview session exits. Scheduled use
-requires a Claude CLI (`CLAUDE_BIN` may override discovery) and either `timeout` or
-`gtimeout` to enforce the detached process wall-clock limit.
+requires a Claude CLI (`CLAUDE_BIN` may override discovery). The wall-clock guard
+uses `timeout`/`gtimeout` when available, then a Perl `alarm` fallback; an
+unenforced launch must report `timeout_enforced: false` rather than failing silently.
 
 Mode semantics:
 
@@ -346,6 +347,7 @@ Pipeline invariants:
 - Producer stages precede consumers.
 - Fills precede lot/close reconciliation.
 - Close reconciliation precedes watchlist re-add logic.
+- Watchlist-to-position migration precedes lot reconciliation.
 - NAV precedes reminders, reports and entry sizing.
 - Regime transitions precede reminders and authorization-group synchronization.
 - Portfolio brief runs after every state/data producer it consumes.

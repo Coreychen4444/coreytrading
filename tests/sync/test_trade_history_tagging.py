@@ -36,6 +36,19 @@ CARDS = {
     # 结构豁免层
     "SPCX": {"instrument": {"type": "stock", "role": "commemorative_hold"},
              "agent": {"current_regime": {"name": "x", "cap_pct_nav": 0.02}}},
+    "TSTX": {
+        "instrument": {"type": "stock"},
+        "agent": {
+            "current_regime": {"name": "synthetic", "cap_pct_nav": _CONF},
+            "zones": {
+                "accumulation_zone_1": [70.0, 72.0],
+                "accumulation_zone_2": [66.0, 70.0],
+                "trim_zone": [78.0, 80.0],
+                "no_chase_above": 75.0,
+                "stop_level": 65.0,
+            },
+        },
+    },
 }
 
 
@@ -58,7 +71,10 @@ def test_buy_fill_gets_both_tags(written):
     th.append_new_fills_to_events([_row()])
     assert len(written) == 1
     assert written[0]["tier"] == "position"
-    assert written[0]["auth"] == {"cap_pct_nav": _CONF, "gate_no": 2}
+    assert written[0]["auth"]["cap_pct_nav"] == _CONF
+    assert written[0]["auth"]["gate_no"] == 2
+    assert written[0]["auth"]["stamped_at"] == th.et_today()
+    assert written[0]["stamp_stale_card_risk"] is True
     assert "classification" not in written[0]      #  停盖
 
 
@@ -66,7 +82,8 @@ def test_auth_gate_counts_from_card_transitions_not_lots(written):
     """盖的是**爬过几个给 cap 的 gate**—— MSFT 无转移史 (常规参与) = gate1,
     哪怕它将来有一堆 lots 也还是 gate1 (2026-08-13 二次定版, 判据换 regime_history)。"""
     th.append_new_fills_to_events([_row(code="MSFT", order_id="OID2")])
-    assert written[0]["auth"] == {"cap_pct_nav": _CONF, "gate_no": 1}
+    assert written[0]["auth"]["cap_pct_nav"] == _CONF
+    assert written[0]["auth"]["gate_no"] == 1
 
 
 def test_unauthorized_fill_keeps_tier_but_leaves_auth_empty(written):
@@ -78,6 +95,38 @@ def test_unauthorized_fill_keeps_tier_but_leaves_auth_empty(written):
     th.append_new_fills_to_events([_row(code="NBIS", order_id="OID3")])
     assert written[0]["tier"] == "position"
     assert "auth" not in written[0]
+    assert "需复核" in written[0]["auth_note"]
+
+
+def test_same_day_stamp_has_no_stale_marker(written, monkeypatch):
+    monkeypatch.setattr(th, "et_today", lambda: "2026-08-06")
+    th.append_new_fills_to_events([_row(order_id="OID7")])
+    assert written[0]["auth"]["stamped_at"] == "2026-08-06"
+    assert "stamp_stale_card_risk" not in written[0]
+    assert "auth_note" not in written[0]
+
+
+def test_price_flags_are_stamped_from_card_zones(written):
+    from quant.core.schema import validate_event
+
+    th.append_new_fills_to_events([
+        _row(code="TSTX", price=75.5, order_id="P1"),
+        _row(code="TSTX", price=79.0, order_id="P2"),
+        _row(code="TSTX", price=71.0, order_id="P3"),
+    ])
+    by_order = {event["order_id"]: event for event in written}
+    assert by_order["P1"]["zone_at_fill"] == "above_no_chase"
+    assert by_order["P1"]["price_flags"] == ["above_no_chase"]
+    assert by_order["P2"]["price_flags"] == ["above_no_chase", "in_trim_zone"]
+    assert by_order["P3"]["zone_at_fill"] == "zone1"
+    assert "price_flags" not in by_order["P3"]
+    assert all(validate_event(event) == [] for event in by_order.values())
+
+
+def test_cards_without_zones_skip_price_stamping(written):
+    th.append_new_fills_to_events([_row(order_id="OID8")])
+    assert "zone_at_fill" not in written[0]
+    assert "price_flags" not in written[0]
 
 
 def test_structural_exemption_gets_base_tier(written):

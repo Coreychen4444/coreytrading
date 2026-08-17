@@ -10,7 +10,10 @@ Produce a human-reviewed operating brief before the US session.
    compute or data-center contracts, and supply-chain capacity or pricing.
    Trigger it by event type rather than ticker, include at most three sourced
    lines, map only to relevant holdings or candidates, and give no directional
-   recommendation.
+   recommendation. Check each event class with an independent source query;
+   absence from one curated feed is not evidence that no event occurred. On the
+   first briefing after a weekend, use a 72-hour lookback so weekend releases are
+   not omitted.
 5. Preserve the portfolio brief, exit alerts, entry verdicts, caps, ladders, stops and warnings from the deterministic output.
 6. Separate current holdings from watchlist candidates and clearly mark stale or missing cards.
 7. Do not infer authorization from news, conviction or a chart narrative, and do not place orders.

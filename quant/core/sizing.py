@@ -146,6 +146,29 @@ def binding_stop(price: Optional[float], candidates: Sequence[Optional[float]],
     return None, "无 stop"
 
 
+def line_price(z1, fallback) -> tuple:
+    """Return the z1 upper edge used by the first ladder order, or spot fallback."""
+    if isinstance(z1, (list, tuple)) and len(z1) == 2:
+        upper = coerce_float(z1[1])
+        if upper:
+            return upper, "z1"
+    return fallback, "现价"
+
+
+def binding_label(cap: dict) -> str:
+    """Render a shared human-readable label for the binding capacity arm."""
+    binding = cap.get("binding")
+    if binding == "n_unit":
+        return f"gate{cap.get('gate_no')} 预算上限"
+    return {
+        "at_risk": "单笔 at-risk 5%NAV",
+        "shock_budget": "冲击预算余额",
+        "gross": "gross 余额",
+        "power": "现金购买力",
+        "regime": "regime cap",
+    }.get(binding, str(binding))
+
+
 def risk_notional_cap(nav: Optional[float], risk_frac: Optional[float],
                       price: Optional[float], stop: Optional[float]) -> Optional[float]:
     """风险预算 → **名义**上限。②轮预算与⑤at-risk 的**同一个公式**, 只差 risk 分数:

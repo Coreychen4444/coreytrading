@@ -102,11 +102,6 @@ STAGES: List[Stage] = [
           "平仓收尾: qty 归零的卡片清 lots + 标 closed + 落 exit_info (lots 归档不删)。"
           "须在 fills 之后 (要事件流算 realized_pnl)、brief 之前 (否则简报拿死卡当持仓)",
           parse_json=True, needs_opend=False),
-    Stage("lots", ["quant/sync/lot_reconcile.py", "--json"], BOTH,
-          "买入落账: 未入账的 BUY fill → lots.position + position_summary (tier 恒 "
-          "position, 计划字段派生自卡片 zones)。须在 fills 之后 (要事件流的 order_id)、"
-          "brief 之前 (预算行与集中度读 lots)。部分卖出/数量对不上一律不动手只报",
-          parse_json=True, needs_opend=False),
     Stage("watchlist_sync", ["quant/sync/watchlist_sync.py", "--json"], BOTH,
           "moomoo 自选分组 ↔ watchlist.json 对账 (briefing 须先于 kline_cache, 新 stub "
           "当轮即可拉 K 线)。已持仓 → 自动移出分组 (入场候选语义) / 平仓 → "
@@ -117,7 +112,14 @@ STAGES: List[Stage] = [
           "平仓当轮不回组, 白等一整轮)",
           parse_json=True),
     Stage("watchlist_migrate", ["quant/sync/watchlist_migrate.py", "--apply", "--json"], BOTH,
-          "watchlist→positions 迁移并执行 (--apply 缺失 = 只检测不写)", parse_json=True),
+          "watchlist→positions 迁移并执行 (--apply 缺失 = 只检测不写)。须在 lots 之前，"
+          "确保重进首笔成交的 lot 从新候选卡派生计划字段，而不是读取旧平仓卡",
+          parse_json=True),
+    Stage("lots", ["quant/sync/lot_reconcile.py", "--json"], BOTH,
+          "买入落账: 未入账的 BUY fill → lots.position + position_summary (tier 恒 "
+          "position, 计划字段派生自卡片 zones)。须在 fills 与 watchlist_migrate 之后、"
+          "brief 之前。部分卖出/数量对不上一律不动手只报",
+          parse_json=True, needs_opend=False),
     Stage("autopaint", ["quant/ops/card_autopaint.py", "--json"], BOTH,
           "Detect eligible cards without zones and start detached card-building agents. "
           "Runs after watchlist reconciliation so new stubs are visible immediately; "

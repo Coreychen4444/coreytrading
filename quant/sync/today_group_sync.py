@@ -72,7 +72,7 @@ from quant.core.paths import (# noqa: E402
     OPTION_PLANS_PATH, POSITIONS_PATH, WATCHLIST_PATH, add_openapi_path,
 )
 from quant.core.sizing import (# noqa: E402
-    binding_stop, entry_cap, gate_count,
+    binding_label, binding_stop, entry_cap, gate_count, line_price,
 )
 from quant.core.structure import MACHINE_REGIME_SOURCES, structure_repair_veto  # noqa: E402
 from quant.core.timeutil import et_today  # noqa: E402
@@ -125,27 +125,10 @@ def default_quote_of(ticker: str):
     return book.atr20_of(ticker), book.price_of(ticker)
 
 
-def binding_label(ac: dict) -> str:
-    """binding 播报名 —— gate 预算要说出**爬到第几个 gate**, 否则"为什么是这个数"
-    没人解释得了 (gate1 2.5% / gate2 4% / gate3 5%, 差一档就是差 60%)。"""
-    b = ac.get("binding")
-    if b == "n_unit":
-        return f"gate{ac.get('gate_no')} 预算上限"
-    return {"at_risk": "单笔 at-risk 5%NAV", "shock_budget": "冲击预算余额",
-            "gross": "gross 余额", "power": "现金购买力",
-            "regime": "regime cap"}.get(b, str(b))
-
-
 def _line_price(card: dict, fallback):
-    """算钱用的价 = **响铃那一刻的价**= z1 上沿 (提醒线就挂在那儿); 无 z1 回落现价。
-    对 zone 锚定的 ladder, 它与 entry_guard 的首档价天然相等 —— 用现价去算一条
-    挂在 z1 的线会偏大 %, 是"两个数"病的小号 (用户  Q2)。"""
+    """Thin card adapter for the shared sizing line-price convention."""
     z1 = ((card.get("agent") or {}).get("zones") or {}).get("accumulation_zone_1")
-    if isinstance(z1, (list, tuple)) and len(z1) == 2:
-        hi = coerce_float(z1[1])
-        if hi:
-            return hi, "z1"
-    return fallback, "现价"
+    return line_price(z1, fallback)
 
 
 def grant_actual_cap(ticker: str, card: dict, nav, usage=None, quote_of=None,

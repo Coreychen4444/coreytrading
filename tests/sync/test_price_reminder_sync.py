@@ -1,7 +1,27 @@
 """price_reminder_sync 纯函数回归: 期望集构造 / 对账 diff / 所有权边界。不碰 OpenD。"""
+import pytest
+
 from quant.sync import price_reminder_sync as prs
+from quant.sync import today_group_sync as tgs
 
 TODAY = "2026-08-05"
+
+
+@pytest.fixture(autouse=True)
+def pin_external_capacity_inputs(monkeypatch):
+    """Keep reminder tests independent from live calendar and account snapshots."""
+    monkeypatch.setattr(
+        tgs.earnings, "load_calendar",
+        lambda *args, **kwargs: {"as_of": TODAY, "tickers": {}},
+    )
+    monkeypatch.setattr(
+        tgs.book, "power_room",
+        lambda *args, **kwargs: {
+            "power": 1e9, "room": 1e9, "spent_today": 0.0,
+            "as_of": TODAY, "implied_cash": 1e9, "leveraged": False,
+        },
+    )
+
 
 POS = {"tickers": {
     "MU": {"broker": {"qty": 5},

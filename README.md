@@ -405,7 +405,7 @@ flowchart TD
     end
     subgraph S2["2. Reconciliation — local and idempotent"]
         direction LR
-        P4["close_reconcile<br/>close-out finalization"] --> P5["lot_reconcile<br/>buy-lot posting"] --> P6["watchlist sync/migration"]
+        P4["close_reconcile<br/>close-out finalization"] --> P5["watchlist sync/migration"] --> P6["lot_reconcile<br/>buy-lot posting"]
     end
     subgraph S3["3. Close-dependent"]
         direction LR
@@ -426,6 +426,7 @@ flowchart TD
 Ordering constraints:
 
 - fills precede lot and close reconciliation;
+- watchlist-to-position promotion precedes lot reconciliation so re-entry lots use the current card;
 - NAV lands before budget-dependent reports and authorization surfaces;
 - reports run after state collection so they never consume a half-built snapshot.
 

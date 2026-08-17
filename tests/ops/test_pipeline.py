@@ -120,6 +120,7 @@ def test_lot_reconcile_runs_after_fills_and_before_brief():
     for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
         k = keys(mode)
         assert k.index("lots") > k.index("fills"), mode
+        assert k.index("lots") > k.index("watchlist_migrate"), mode
         assert k.index("lots") < k.index("brief"), mode
 
 

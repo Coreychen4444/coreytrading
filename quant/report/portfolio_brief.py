@@ -311,6 +311,33 @@ def untagged_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
     return out
 
 
+def price_breach_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
+    """Return recent BUY fills stamped outside the card's execution rules.
+
+    The synchronization layer freezes these flags at ingestion time. Recomputing
+    them here would compare an old fill with today's potentially redrawn card.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    out: List[str] = []
+    for month_dir in sorted(p for p in EVENTS_DIR.glob("2*") if p.is_dir()):
+        for row in iter_jsonl(month_dir / "trades.jsonl"):
+            if row.get("event_type") != "fill" or str(row.get("side", "")).upper() != "BUY":
+                continue
+            flags = row.get("price_flags") or []
+            if not flags:
+                continue
+            ts = str(row.get("timestamp") or "")
+            when = parse_ts(ts)
+            if not when or when < cutoff:
+                continue
+            out.append(
+                f"{row.get('ticker')} {row.get('qty')}@{row.get('price')} "
+                f"({ts[:10]}) {'+'.join(flags)}"
+                + (" ⚠️跨日盖章" if row.get("stamp_stale_card_risk") else "")
+            )
+    return out
+
+
 def load_zone_maps_from_state() -> Tuple[Dict[str, dict], Dict[str, dict], List[dict]]:
     """v2 replacement for load_zone_maps(): pull agent zones from state/.
 
@@ -944,21 +971,21 @@ def position_budget(ticker: str, item: Dict, nav: Optional[float],
                     usage: Optional[Dict] = None,
                     calendar: Optional[Dict] = None,
                     exposure: Optional[float] = None,
-                    card: Optional[Dict] = None) -> Optional[Dict]:
+                    card: Optional[Dict] = None,
+                    power_room: Optional[float] = None) -> Optional[Dict]:
     """本轮**实际**cap 还剩多少 / 还买得起几股。
 
     None = 无法判定 (无成交记录或无 NAV) —— 沉默好过编一个数。
     cfg 带 current_regime 时, cap 与 regime cap 取小 (regime 只收紧不放宽)。
 
-     接冲击预算 (`shock_budget_wiring_todo.md` §D): cap 不再等于
-    `nav × 分类比例` —— 那只是名义天花板。实际额度还要减掉全书已用的冲击预算
-    (NAV 15% 单日冲击上限) 与 gross (110% NAV)。`usage` 不传 = 当空书算,
-    会高估余额, **调用方该传**(整轮共用一份, 逐票重算会前后不一致)。
+    正股预算统一走 `sizing.entry_cap`: regime、gate risk、at-risk、组合冲击、
+    gross 与购买力六条约束共同取小。算钱价格使用 z1 上沿，与首档限价和授权组
+    口径一致。`usage` 不传会把组合当作空仓，调用方应整轮复用同一份占用快照。
 
     期权行只用分类 cap: 组合层那两条是**标的名义**上限, 而这里的 `deployed`
     是**保费**, 两种钱不能直接取小 (换算式见 `sizing.notional_to_premium_cap`);
     换算需要 delta+spot, 拿不到就宁可只报分类 cap 并在 `portfolio_binding`
-    里写明没接 —— 不静默给一个单位错的数。
+    里写明没接。期权 gate premium 使用另一量纲，本函数不编造换算。
     """
     if not item.get("qty") or nav is None:
         return None
@@ -995,35 +1022,59 @@ def position_budget(ticker: str, item: Dict, nav: Optional[float],
     # 独立调用/测试时正确且不去读全局 state (读全局会让单测吃到 live 持仓)。
     if exposure is None:
         exposure = abs(normalize_num(item.get("qty")) or 0) * (price or 0) * mult
-    ac = sizing.available_cap(nav, cap_frac, book.atr20_of(und, KLINE_CACHE_DIR),
-                              book.price_of(und, KLINE_CACHE_DIR), usage,
-                              event_shrink=ev["shrink"] if ev["active"] else None,
-                              exposure=exposure)
-    cap = ac["regime_cap"] if ac["regime_cap"] is not None else nav * cap_frac
+    atr_value = book.atr20_of(und, KLINE_CACHE_DIR)
+    underlying_price = book.price_of(und, KLINE_CACHE_DIR)
+    event_shrink = ev["shrink"] if ev["active"] else None
+    gate_no = sizing.gate_count(card)
     portfolio_binding = None
+    unit = (price or 0) * mult
     if occ:
+        ac = sizing.available_cap(
+            nav, cap_frac, atr_value, underlying_price, usage,
+            event_shrink=event_shrink, exposure=exposure,
+        )
+        cap = ac["regime_cap"] if ac["regime_cap"] is not None else nav * cap_frac
         pc = sizing.notional_to_premium_cap(
             min(x for x in (ac["shock_budget_cap"], ac["gross_cap"]) if x is not None)
             if any(x is not None for x in (ac["shock_budget_cap"], ac["gross_cap"])) else None,
             normalize_num((cfg or {}).get("delta")),
-            book.price_of(und, KLINE_CACHE_DIR), price)
+            underlying_price, price)
         if pc is not None and pc < cap:
             cap, portfolio_binding = pc, "notional→premium"
         elif pc is None:
             portfolio_binding = "未接 (期权缺 delta/标的价 — 组合层只在书级口径生效)"
-    elif ac["cap_usd"] is not None and ac["binding"] != "regime":
-        cap, portfolio_binding = ac["cap_usd"], ac["binding"]
+    else:
+        calculation_price, _ = sizing.line_price(
+            (cfg or {}).get("accumulation_zone_1"), price)
+        stop, _ = sizing.binding_stop(
+            calculation_price,
+            [normalize_num((cfg or {}).get("stop_level"))],
+            atr_value,
+            2.0,
+        )
+        entry = sizing.entry_cap(
+            nav, cfg, atr=atr_value, price=calculation_price, stop=stop,
+            usage=usage, event_shrink=event_shrink, gate_no=gate_no,
+            power_room=power_room, exposure=exposure,
+        )
+        cap = (
+            entry["cap_usd"] if entry["cap_usd"] is not None
+            else max(nav * cap_frac - float(exposure or 0.0), 0.0)
+        )
+        if entry.get("binding") not in (None, "regime"):
+            portfolio_binding = entry["binding"]
+        if calculation_price:
+            unit = calculation_price * mult
     # cap 已经净掉当前敞口 —— **不再减 deployed**(那是成本口径, 会双重扣减)。
     # deployed 保留为"本 campaign 已投入"的展示量与 cap_multiple 的分子。
     remaining = max(0.0, cap)
-    unit = (price or 0) * mult
     addable = int(remaining // unit) if unit > 0 else 0
     return {
         # 档位 = 这张卡爬过几个 gate (`sizing.gate_count`, 判据 = regime_history)。
         #  二次定版前这里用 `campaign_round_no` (1 + 不同入场日数) ——
         # 一个连"过没过 gate"都不看的近似, 与授权侧读的根本不是同一件事。
         # card 缺省 (独立调用/测试) → 第一档, 不去读全局 state。
-        "gate_no": sizing.gate_count(card),
+        "gate_no": gate_no,
         "regime_cap_frac": cap_frac,
         "regime_name": regime.get("name"),
         "portfolio_binding": portfolio_binding,
@@ -1405,7 +1456,11 @@ def build_position_card(item: Dict, cfg: Optional[Dict], budget: Optional[Dict],
         # 组合层 binding 必须点名: 一张写着 40% 的卡今天只给 34%, 不写出来就
         # 无法解释 —— 同 regime binding 那一条 (会驱动动作的约束要可解释)。
         if budget.get("portfolio_binding"):
-            tail += (f" [组合层 {budget['portfolio_binding']} binding: 名义 "
+            label = sizing.binding_label({
+                "binding": budget["portfolio_binding"],
+                "gate_no": budget.get("gate_no"),
+            })
+            tail += (f" [{label} binding: 名义 "
                      f"${budget.get('class_cap_usd') or 0:,.0f} → 实际 ${budget['cap_usd']:,.0f}]")
         if budget.get("event_shrink"):
             tail += (f" [📉 财报反应日 {budget.get('earnings_reaction_day')} 缩仓 ×"
@@ -1520,10 +1575,14 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
 
     exp_map = exposure_map(items)
     _pos_cards = (_load_state_doc(STATE_POSITIONS_PATH).get("tickers") or {})
+    try:
+        current_power_room = (book.power_room(et_today()) or {}).get("room")
+    except Exception:                                          # noqa: BLE001
+        current_power_room = None
     budgets = {x["ticker"]: position_budget(
         x["ticker"], x, nav, current_zones.get(x["ticker"]), usage, calendar,
         exposure=exp_map.get(str(x.get("underlying") or x["ticker"]).upper()),
-        card=_pos_cards.get(x["ticker"]))
+        card=_pos_cards.get(x["ticker"]), power_room=current_power_room)
         for x in items}
     items = [enrich_with_zone_context(x, current_zones, all_items=items,
                                       budget=budgets.get(x["ticker"]))
@@ -1964,6 +2023,22 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
                           + " → 判定后 annotate_event 补注 + 落评分 (规则外成交清单)")
             triggers.append({"ticker": "INFRA", "type": "fill_untagged",
                              "value": len(untagged)})
+
+    breached = price_breach_fills()
+    if breached:
+        active_keys.add(alert_key("INFRA", "fill_price_breach"))
+        all_conditions.append({
+            "ticker": "INFRA", "type": "fill_price_breach", "value": len(breached),
+        })
+        if emit_gate("INFRA", "fill_price_breach"):
+            alerts.append(
+                "⚠️ 成交价位违规 (>no_chase 追价 / trim 区加仓, 带授权标签也点名): "
+                + "; ".join(breached)
+                + " → 规则外成交清单, annotate_event 补注 + 落评分"
+            )
+            triggers.append({
+                "ticker": "INFRA", "type": "fill_price_breach", "value": len(breached),
+            })
 
     # earnings 日历陈旧 (BACKLOG §3.5-4): 重建只挂 briefing 模式, briefing 连续
     # 失败时 heartbeat/postclose 会**静默用旧日历**—— earnings.py 自陈"静默不缩仓

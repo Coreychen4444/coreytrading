@@ -405,7 +405,7 @@ flowchart TD
     end
     subgraph S2["2. Reconciliation——本地且幂等"]
         direction LR
-        P4["close_reconcile<br/>close-out finalization"] --> P5["lot_reconcile<br/>buy-lot posting"] --> P6["watchlist sync/migration"]
+        P4["close_reconcile<br/>close-out finalization"] --> P5["watchlist sync/migration"] --> P6["lot_reconcile<br/>buy-lot posting"]
     end
     subgraph S3["3. Close-dependent"]
         direction LR
@@ -426,6 +426,7 @@ flowchart TD
 顺序约束：
 
 - fills 必须先于 lot 和 close reconciliation；
+- watchlist-to-position 促升必须先于 lot reconciliation，确保重进 lot 使用当前 card；
 - NAV 必须先于依赖预算的报告和授权界面；
 - 报告必须在 state collection 后运行，不能读取半成品 snapshot。
 

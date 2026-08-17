@@ -124,6 +124,30 @@ def test_budget_left_reports_addable_shares(env):
     assert b["exhausted"] is False
 
 
+def test_gate_budget_arm_binds_position_budget(env):
+    """A stock budget row must use the same gate-risk arm as entry authorization."""
+    env([_fill(ticker="TSTX", qty=5.0, price=200.0)])
+    item = {**HELD, "ticker": "TSTX", "qty": 5.0, "current_price": 200.0}
+    cfg = {**CFG_FULL, "stop_level": 100.0}
+    budget = pb.position_budget("TSTX", item, pb._latest_nav(), cfg)
+
+    assert budget["portfolio_binding"] == "n_unit"
+    assert budget["cap_usd"] == pytest.approx(0.025 * NAV * 2 - 1000.0, abs=0.01)
+    assert budget["addable_shares"] == 0
+    assert budget["exhausted"] is True
+
+
+def test_position_budget_prices_capacity_at_z1_upper(env):
+    env([_fill(ticker="TSTX", qty=5.0, price=200.0)])
+    item = {**HELD, "ticker": "TSTX", "qty": 5.0, "current_price": 200.0}
+    cfg = {**CFG_FULL, "stop_level": 100.0,
+           "accumulation_zone_1": [190.0, 195.0]}
+    budget = pb.position_budget("TSTX", item, pb._latest_nav(), cfg)
+
+    assert budget["cap_usd"] == pytest.approx(
+        0.025 * NAV * 195 / 95 - 1000.0, abs=0.01)
+
+
 def test_cap_comes_from_regime_only_and_counts_all_fills(env):
     """ 分类轴退役: cap 唯一来源 = regime cap; campaign 内**全部**BUY
     计入投入 (旧「按分类分轮计账」的过滤随轴退役 —— 本 campaign 的钱就是本

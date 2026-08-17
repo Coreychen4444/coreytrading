@@ -1,7 +1,6 @@
 """Cardless detection and detached card-agent orchestration."""
 import subprocess
-
-import pytest
+import time
 
 from quant.core.holdings import cardless_tickers
 from quant.ops import card_autopaint as ca
@@ -99,7 +98,7 @@ def test_spawn_is_detached_and_never_waits(monkeypatch, tmp_path):
         return FakeProcess()
 
     monkeypatch.setattr(ca, "LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(ca, "_timeout_prefix", lambda: ["/usr/bin/timeout", "1800"])
+    monkeypatch.setattr(ca, "_timeout_argv", lambda seconds: ["/usr/bin/timeout", str(seconds)])
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     job = ca.spawn("AAA", "watchlist", "2099-01-15", "/usr/bin/claude")
 
@@ -108,12 +107,32 @@ def test_spawn_is_detached_and_never_waits(monkeypatch, tmp_path):
     assert seen["kwargs"]["stdin"] is subprocess.DEVNULL
     assert "/usr/bin/claude" in seen["argv"]
     assert "AAA" in " ".join(str(item) for item in seen["argv"])
+    assert job["timeout_enforced"] is True
 
 
-def test_spawn_requires_a_wall_clock_guard(monkeypatch):
-    monkeypatch.setattr(ca.shutil, "which", lambda name: None)
-    with pytest.raises(RuntimeError, match="timeout"):
-        ca._timeout_prefix()
+def test_timeout_falls_back_to_perl_when_gnu_timeout_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        ca.shutil, "which", lambda name: "/usr/bin/perl" if name == "perl" else None)
+    argv = ca._timeout_argv(1800)
+    assert argv[0].endswith("perl")
+    assert "alarm shift; exec @ARGV" in argv
+    assert "1800" in argv
+
+
+def test_perl_timeout_fallback_enforces_wall_clock(monkeypatch):
+    monkeypatch.setattr(
+        ca.shutil, "which", lambda name: "/usr/bin/perl" if name == "perl" else None)
+    started = time.monotonic()
+    result = subprocess.run(
+        [*ca._timeout_argv(1), "/bin/sleep", "30"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert elapsed < 10
 
 
 def test_run_reports_missing_binary_without_raising(monkeypatch):

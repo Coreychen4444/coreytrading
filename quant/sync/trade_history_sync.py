@@ -49,10 +49,11 @@ import re as _re  # noqa: E402
 from quant.sync import state_io  # noqa: E402
 from quant.core.holdings import derive_tier  # noqa: E402  tier 判别式单一真源
 from quant.core.io_json import read_json  # noqa: E402
-from quant.core.occ import strip_us_prefix as _strip_us_prefix  # noqa: E402
+from quant.core.occ import parse_occ, strip_us_prefix as _strip_us_prefix  # noqa: E402
 from quant.core.paths import POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core.sizing import derive_auth  # noqa: E402  授权快照判别式单一真源
-from quant.core.timeutil import et_naive_to_iso  # noqa: E402
+from quant.core.structure import zone_bands, zone_position  # noqa: E402
+from quant.core.timeutil import et_naive_to_iso, et_today  # noqa: E402
 
 _PARENT_RE = _re.compile(r'combo leg, parent order_id (\S+)')
 
@@ -171,9 +172,36 @@ def append_new_fills_to_events(new_rows: List[dict]) -> int:
         tier, _ = derive_tier(event['ticker'], cards)
         event['tier'] = tier
         if event_type == 'fill' and side == 'BUY':
+            stamp_day = et_today()
+            cross_day = ts[:10] < stamp_day
             auth, _ = derive_auth(event['ticker'], cards)
             if auth:
-                event['auth'] = auth
+                event['auth'] = {**auth, 'stamped_at': stamp_day}
+            elif cross_day:
+                event['auth_note'] = (
+                    f'落库跨日 (fill {ts[:10]} → 盖章 {stamp_day}), '
+                    '卡片可能已被迁移或重画 — 授权需复核'
+                )
+            if cross_day:
+                event['stamp_stale_card_risk'] = True
+
+            # Freeze the fill's location against the card visible at ingestion.
+            # Options are excluded because premium and underlying zones use
+            # different price axes.
+            if not parse_occ(event['ticker']):
+                card = cards.get(event['ticker'].upper()) or {}
+                bands = zone_bands((card.get('agent') or {}).get('zones'))
+                if bands:
+                    event.setdefault('zone_at_fill', zone_position(event['price'], bands))
+                    no_chase, trim = bands.get('no_chase'), bands.get('trim')
+                    flags = []
+                    if no_chase and event['price'] >= no_chase:
+                        flags.append('above_no_chase')
+                    if (isinstance(trim, list) and len(trim) == 2
+                            and trim[0] <= event['price'] <= trim[1]):
+                        flags.append('in_trim_zone')
+                    if flags:
+                        event['price_flags'] = flags
         if r.get('parent_order_id'):
             event['parent_order_id'] = r['parent_order_id']
         if r.get('remark'):

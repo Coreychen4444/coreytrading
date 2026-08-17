@@ -32,7 +32,11 @@ LEGACY_TIER_MAP = {"core": "position", "trading": "position"}
 # 改写 auth {cap_pct_nav, gate_no} (sizing.derive_auth)。round_no =
 # 当天那一版的键 (lots 近似轮号), 只读留存 —— tier_legacy / classification 先例。
 CLASSIFICATIONS = {"confirmed", "probe", "early_risky"}
-ZONE_AT_FILL = {"zone1", "zone2", "waiting", "trim", "above_no_chase", "unknown"}
+ZONE_AT_FILL = {
+    "zone1", "zone2", "waiting", "trim", "above_no_chase", "unknown",
+    "gap_z1_z2", "below_zones",
+}
+PRICE_FLAGS = {"above_no_chase", "in_trim_zone"}
 STOP_BASES = {"underlying", "option_price"}
 
 QTY_TOL = 1e-6
@@ -314,6 +318,12 @@ def validate_event(event: dict) -> list[str]:
             gn = auth.get("gate_no", auth.get("round_no"))
             if not isinstance(gn, int) or gn < 1:
                 errors.append("auth.gate_no must be int >= 1")
+    price_flags = event.get("price_flags")
+    if price_flags is not None:
+        if not isinstance(price_flags, list) or not set(price_flags) <= PRICE_FLAGS:
+            errors.append(
+                f"price_flags must be a list ⊆ {sorted(PRICE_FLAGS)} (got {price_flags!r})"
+            )
     if event.get("fees") is not None and not _is_num(event.get("fees")):
         errors.append("fees must be numeric when present")
     return errors
