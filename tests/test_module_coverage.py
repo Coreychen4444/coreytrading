@@ -31,7 +31,6 @@ UNTESTED: dict[str, str] = {
     # data —— 全都要活的 OpenD / 网络，没做 fake 层
     "data/market_data": "OpenD 封装，需要 fake context 才测得动。**真缺口**: 它是所有行情的入口",
     "data/iv_logger": "需 OpenD 期权链。IV 历史不可重拉，写错=永久污染，**值得补**",
-    "data/nav_snapshot": "需 OpenD 账户资金",
     "data/x_fetch": "外部 HTTP 抓取，纯工具",
 
     # sync —— 写 state 的路径，风险最高的一层

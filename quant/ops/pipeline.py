@@ -62,10 +62,11 @@ STAGE_TIMEOUT_S = 300
 
 HEARTBEAT, BRIEFING, POSTCLOSE = "heartbeat", "briefing", "postclose"
 BOTH = (HEARTBEAT, BRIEFING)
-# postclose (用户 指令): 盘后+夜盘允许交易 → gate ×2 在收盘一成立就要
-# 转移/重画/同步提醒线, 不等次日 18:30 briefing。只跑收盘依赖链 klines→regime→
-# reminders; 说明渲染与重画是任务 prompt 里的 agent 工作。briefing 的 regime 步
-# 保留 = 幂等兜底 (postclose 漏跑一轮, 18:30 补上)。
+ALL_MODES = (HEARTBEAT, BRIEFING, POSTCLOSE)
+# The close-dependent modes evaluate exits against the pre-transition card before
+# applying a regime transition. Otherwise a demotion can replace the breached stop
+# before the exit stack has observed it. External effectors run only after the
+# report has emitted any alerts.
 
 
 class Stage:
@@ -85,15 +86,20 @@ class Stage:
 # ── 唯一的正确顺序 ────────────────────────────────────────────────
 #
 # 依赖链: broker 真值 → 事件/订单落库 → watchlist 对账与迁移 → 收盘数据层
-#        → NAV(预算分母) → portfolio_brief(消费以上全部) → entry_guard(消费 brief+NAV)
-# portfolio_brief 必须**最后**跑 —— 它是唯一的消费者, 排在采集中间就是在读半成品。
+#        → NAV(预算分母) → portfolio_brief(消费以上全部) → regime(转移)
+#        → entry_guard(消费 brief+NAV+转移后授权)
+# portfolio_brief 必须在**全部采集步之后**跑 —— 排在采集中间就是在读半成品。
+# Exit evaluation runs before regime transitions because a demotion may replace the
+# breached stop. Reminder and group effectors run after both the brief and transition.
 STAGES: List[Stage] = [
     Stage("account", [".claude/skills/openapi/scripts/trade/get_portfolio.py",
                       "--currency", "USD", "--json"], (BRIEFING,),
           "账户资金/购买力真值 (必须带 --currency USD, 否则服务端按 HKD 换算)",
           parse_json=True),
-    Stage("positions", ["quant/sync/stock_fetch.py"], BOTH,
-          "刷新 positions.json broker block (agent/lots/pending_orders 保留)", fatal=True),
+    Stage("positions", ["quant/sync/stock_fetch.py"], ALL_MODES,
+          "刷新 positions.json broker block (agent/lots/pending_orders 保留)。"
+          "postclose 也刷新，避免收盘异动与退出检查读取盘前报价",
+          fatal=True),
     Stage("orders", ["quant/sync/order_sync.py", "--json"], BOTH,
           "在途订单 → pending_orders (briefing 此前完全没跑这步)", parse_json=True),
     Stage("fills", ["quant/sync/trade_history_sync.py", "--json"], BOTH,
@@ -127,27 +133,12 @@ STAGES: List[Stage] = [
           parse_json=True, needs_opend=False),
     Stage("klines", ["quant/data/kline_cache.py"], (BRIEFING, POSTCLOSE),
           "日线缓存增量 — 收盘依赖; exit/entry guard 的结构标签靠它"),
-    Stage("regime", ["quant/decision/regime_transition.py", "--apply", "--json"],
-          (BRIEFING, POSTCLOSE),
-          "gate 触发即机械转移卡片 regime — 收盘依赖", parse_json=True),
     Stage("nav", ["quant/data/nav_snapshot.py", "--json"], (BRIEFING, POSTCLOSE),
           "每日 NAV + 基准快照 — **必须先于 reminders/portfolio_brief**(预算行与 "
           "moomoo z1 备注金额的分母)。postclose 收盘后即刷当日 NAV, "
           "转移后重画的备注金额用当日收盘账户; 此前只在盘前跑 = cap 数学落后一个交易日, "
           "且 briefing 里 reminders 排在 nav 前 = 画线用旧 NAV、brief 用新 NAV 两处打架",
           parse_json=True, eod_only=True),
-    Stage("reminders", ["quant/sync/price_reminder_sync.py", "--json"],
-          (HEARTBEAT, BRIEFING, POSTCLOSE),
-          "卡片+退出栈画线 → moomoo 服务端价格提醒对账 (下方线 = max(stop,棘轮,trail) "
-          "note stop:card|lock|trail, 真源 exit_guards.json; trim/gate/z1/g01; 词表所有权, "
-          "手动条目永不触碰; 6h 巡逻盲区的即时性由券商 push 补) — briefing 须在 regime 之后",
-          parse_json=True),
-    Stage("today_group", ["quant/sync/today_group_sync.py", "--json"],
-          (HEARTBEAT, BRIEFING, POSTCLOSE),
-          "入场授权白名单 (gate 达标 + regime cap 显式>0, 卡片态直读) → moomoo 'Today' "
-          "分组对账。整组归 agent (收藏放 Watchlist); 与 reminders 同拍 — 须在 regime "
-          "之后, 转移/补画解锁当轮或 ≤6h 接上",
-          parse_json=True),
     Stage("iv", ["quant/data/iv_logger.py"], (BRIEFING,), "每日 ATM IV 快照 (幂等)",
           eod_only=True),
     Stage("earnings", ["quant/data/earnings_calendar.py", "--json"], (BRIEFING,),
@@ -161,9 +152,21 @@ STAGES: List[Stage] = [
           "结构漂移观测 (四维: 离锚/区间外/gate 可达/波动率 — ②POC 已摘除) — **只观测不裁决**, "
           "阈值未校准, 产出 advisory 待重画清单", parse_json=True, needs_opend=False),
     # ↓ 消费层: 以上全部落库完成后才跑
-    Stage("brief", ["quant/report/portfolio_brief.py", "--json"], BOTH,
-          "position_cards / fired_cards / exit_guards / zone 信号 / alerts",
+    Stage("brief", ["quant/report/portfolio_brief.py", "--json"], ALL_MODES,
+          "position_cards / fired_cards / exit_guards / zone signals / alerts; "
+          "runs before regime transitions and external effectors",
           fatal=True, parse_json=True, needs_opend=False),
+    Stage("regime", ["quant/decision/regime_transition.py", "--apply", "--json"],
+          (BRIEFING, POSTCLOSE),
+          "apply close-confirmed regime transitions after exit evaluation",
+          parse_json=True),
+    Stage("reminders", ["quant/sync/price_reminder_sync.py", "--json"], ALL_MODES,
+          "reconcile owned broker reminders from the post-transition card and the "
+          "same-run exit stack; manual reminders remain untouched",
+          parse_json=True),
+    Stage("today_group", ["quant/sync/today_group_sync.py", "--json"], ALL_MODES,
+          "reconcile the optional entry-authorization group from post-transition state",
+          parse_json=True),
     Stage("entry", ["quant/decision/entry_guard.py", "--log"], (BRIEFING,),
           "入场执行计划 (PLAN 变动才落 decisions.jsonl); 输出为**渲染文本**, 原样进简报",
           needs_opend=False),
@@ -209,9 +212,9 @@ def save_state(st: Dict) -> None:
 
 def notify(msg: str) -> bool:
     try:
-        subprocess.run([PY, str(ROOT / "quant/ops/tg_notify.py"), msg],
-                       cwd=ROOT, capture_output=True, timeout=30)
-        return True
+        p = subprocess.run([PY, str(ROOT / "quant/ops/tg_notify.py"), msg],
+                           cwd=ROOT, capture_output=True, timeout=30)
+        return p.returncode == 0
     except Exception:
         return False
 
@@ -248,6 +251,24 @@ def handle_opend_recovered(send: bool) -> bool:
         save_state(st)
         return True
     return False
+
+
+def push_brief_alerts(data: Dict):
+    """Push the brief's alert payload before external effectors.
+
+    内容 = fired_cards 原文 (代码渲染的持仓状态卡) + alerts 行 —— 与 heartbeat.md
+    输出规则同一份合同, 只是发射点从"任务 agent 在整条 pipeline 之后"提前到
+    "brief 刚算完"。没有告警 = 不推 (HEARTBEAT_OK 的安静保持)。推送失败返回
+    False, 任务层 agent 见 tg_pushed=False 按旧规则兜底推送。
+    """
+    alerts = data.get("alerts") or []
+    cards = data.get("fired_cards") or []
+    if not alerts and not cards:
+        return "no_alerts"          # 与"推送失败"区分 — False 才需要 agent 兜底
+    blocks = list(cards)
+    if alerts:
+        blocks.append("— alerts —\n" + "\n".join(str(x) for x in alerts))
+    return notify("\n\n".join(blocks))
 
 
 def stamp_heartbeat() -> None:
@@ -368,6 +389,10 @@ def main(argv: List[str]) -> int:
         if not r["ok"] and s.fatal:
             result["aborted"] = f"fatal_stage:{s.key}"
             break
+        # Deliver canonical alert text before reminder/group effectors. The receipt
+        # lets task wrappers avoid duplicates; read-only and --no-notify never send.
+        if s.key == "brief" and r["ok"] and send:
+            result["tg_pushed"] = push_brief_alerts(r.get("data") or {})
 
     ok = result["aborted"] is None
     result["failed"] = [k for k, v in result["stages"].items() if not v["ok"]]

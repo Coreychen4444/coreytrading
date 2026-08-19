@@ -57,6 +57,9 @@ def test_breakout_stale_days_same_in_guard_and_brief():
     from quant.decision import entry_guard as eg
     from quant.report import portfolio_brief as pb
     assert eg.STALE_CONFIRM_DAYS == pb.STALE_CONFIRM_DAYS == 2
+    # Breakdown is immediate; volatility is scaled by 2×ATR14 in both consumers.
+    assert eg.STALE_BREAKDOWN_DAYS == pb.STALE_BREAKDOWN_DAYS == 1
+    assert eg.STALE_VOL_ATR_MULT == pb.STALE_VOL_ATR_MULT == 2.0
 
 
 def test_chandelier_trail_constants_match_exit_guard():

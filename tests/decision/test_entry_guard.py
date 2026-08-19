@@ -561,21 +561,30 @@ def test_above_no_chase_now_plans_with_position_line(monkeypatch):
 
 def test_trim_position_now_plans(monkeypatch):
     card = _plan_card(no_chase=112.0, trim=(105.0, 110.0))   # trim 带在 no_chase 之下
-    r = _eval_at(monkeypatch, 107.0, card)
+    # 渐进抵达 trim: _rows_ending_at 的末根瞬移 +17.4% (2.6×ATR) 会正当触发
+    # Use a gradual arrival so this test does not independently trigger volatility staleness.
+    rows = _rows_ending_at(107.0)
+    rows[-2].update(open=105.0, high=107.5, low=104.0, close=106.0)
+    from quant.decision import entry_guard as eg
+    monkeypatch.setattr(eg, "_rows", lambda tk: rows)
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    r = eg.evaluate_ticker("TST", card, "2026-08-05", nav=22000.0)
     assert r["verdict"] == "PLAN"
     assert any("trim 区" in x for x in r["lines"])
 
 
-def test_below_zones_vetoes_because_limit_would_fill_instantly(monkeypatch):
+def test_below_z2_close_is_stale_day_one_not_just_veto(monkeypatch):
+    """The first completed close below zone 2 makes the map stale."""
     r = _eval_at(monkeypatch, 79.0)
-    assert r["verdict"] == "VETO"
-    assert any("即时成交" in x for x in r["reasons"])
+    assert r["verdict"] == "STALE"
+    assert "breakdown" in str(r), r
 
 
-def test_below_stop_vetoes_as_breakdown(monkeypatch):
+def test_below_stop_close_is_stale_day_one(monkeypatch):
+    """破 stop 收盘同理 (更深) — STALE 指向重画; 降级归收盘转移机。"""
     r = _eval_at(monkeypatch, 76.0)
-    assert r["verdict"] == "VETO"
-    assert any("破位" in x for x in r["reasons"])
+    assert r["verdict"] == "STALE"
+    assert "breakdown" in str(r), r
 
 
 def test_plan_carries_single_stop_and_trim(monkeypatch):
@@ -661,3 +670,33 @@ def test_the_position_line_keeps_its_own_content():
     from quant.decision.entry_guard import _position_line
     line = _position_line("waiting", 328.57, _ZB)
     assert "等待区" in line and "距 z1 上沿" in line and "no_chase 339" in line
+
+
+# ── breakdown and volatility staleness ──────────────────────────
+
+def test_breakdown_stale_fires_on_day_one():
+    """A day-one breakdown is stale even when the prior close was inside the map."""
+    rows = [_bar("2026-07-14", 92.0), _bar("2026-07-15", 81.0)]   # 昨在带内, 今破 84
+    hits = zone_staleness(ZB, {"last_reviewed": "2026-07-10"}, rows, "2026-07-17")
+    assert any("breakdown" in h for h in hits), hits
+    assert any("当日" in h for h in hits)
+
+
+def test_volatility_stale_uses_per_ticker_atr_ruler():
+    """|单日收收| > 2×ATR14 才 stale — 固定 10% 从未进代码且量不了两个池
+    (LITE ATR 10.6% 的 ±10% 是日常, MSFT +15.5% = 3.8N 是地震)。"""
+    calm = [_bar(f"2026-06-{i + 1:02d}", 100.0) for i in range(20)]   # ATR14 ≈ 2
+    shock = calm + [_bar("2026-06-21", 92.0)]                          # -8% ≈ 3.2×ATR
+    hits = zone_staleness(ZB, {"last_reviewed": "2026-06-15"}, shock, "2026-06-22")
+    assert any("volatility stale" in h for h in hits), hits
+    # 对照: -3% < 2×ATR14 → 沉默 (同一形状换个幅度, 杀"恒真"变体)
+    mild = calm + [_bar("2026-06-21", 97.0)]
+    hits2 = zone_staleness(ZB, {"last_reviewed": "2026-06-15"}, mild, "2026-06-22")
+    assert not any("volatility" in h for h in hits2), hits2
+
+
+def test_volatility_stale_silent_when_atr_unavailable():
+    """序列不足以算 ATR14 → 波动腿沉默 (不造固定尺假触发), 其余腿照常。"""
+    rows = [_bar("2026-07-14", 97.0), _bar("2026-07-15", 88.0)]   # -9.3%, 但仅 2 根
+    hits = zone_staleness(ZB, {"last_reviewed": "2026-07-10"}, rows, "2026-07-17")
+    assert not any("volatility" in h for h in hits), hits

@@ -32,11 +32,13 @@
 """
 from __future__ import annotations
 
-from datetime import date
-from typing import Dict, List, Optional
+from datetime import date, datetime
+from typing import Dict, Iterable, List, Optional
 
 from .num import coerce_float
+from .occ import parse_occ
 from .sizing import NOTIONAL_CAP
+from .timeutil import ET, parse_ts
 
 # gate 与 zone 的画卡日期允许的最大偏差 (日历日)。>0 是为了容忍同一轮分析里
 # 跨午夜写入; 真正的"只重画了一半"会差好几天。
@@ -495,4 +497,106 @@ def structure_lines(agent: Optional[dict], today: str,
     out.extend(f"⚠️ gate stale: {r}" for r in gs)
     out.extend(f"   {r}" for r in co)
     out.extend(f"   {r}" for r in gaps)       # 提示级, 不参与 STALE 判定
+    return out
+
+
+# A down transition can replace the breached stop before the operator has resolved
+# the exit decision. Reconcile unresolved demotions without adding mutable state:
+# require remaining stock or option exposure, a latest down transition, no later
+# exit event, and no scored override receipt. Reports share this predicate.
+
+
+def latest_demotion(agent: Optional[dict]) -> Optional[dict]:
+    """regime_history 最新一条若是 down 转移则返回之 (含 date), 否则 None。
+
+    down 条目的 `level` = 被破的那条旧 stop (转移机写入时的卡片 stop) ——
+    降级换图后它是旧 stop 唯一还能读到的地方。
+    """
+    hist = (agent or {}).get("regime_history") or []
+    last = hist[-1] if hist and isinstance(hist[-1], dict) else None
+    if not last or last.get("direction") != "down" or not last.get("date"):
+        return None
+    return last
+
+
+def trading_days_after(dates: Iterable, since: str) -> int:
+    """D+N 的 N: 序列里严格晚于 since 的去重日期数 (完成 bar 口径)。
+
+    降级当晚 (最后一根 bar == 降级日) = D+0, 次日收盘后 = D+1。"""
+    since = str(since)[:10]
+    return len({str(d)[:10] for d in dates if d and str(d)[:10] > since})
+
+
+def unresolved_demotions(doc: Optional[dict], *,
+                         events: Optional[List[dict]] = None,
+                         scores: Optional[List[dict]] = None) -> List[dict]:
+    """破 stop 降级在案、退出裁决尚无机器可见动作的持仓卡 (判据见模块注释 ①-④)。
+
+    events / scores 可注入 (测试用); None = 读真实事件流与 scores.jsonl。
+    返回 [{ticker, date, old_stop, new_stop, reason, qty, opt_tickers}], 按 ticker 排序。
+    """
+    tickers = (doc or {}).get("tickers") or {}
+    opt_held: Dict[str, List[str]] = {}
+    for t, body in tickers.items():
+        p = parse_occ(t)
+        if p and coerce_float((body.get("broker") or {}).get("qty")):
+            opt_held.setdefault(p["underlying"], []).append(t)
+
+    cands = []
+    for t, body in sorted(tickers.items()):
+        if parse_occ(t):
+            continue                      # 期权卡自身无 regime_history (轴在 underlying 上)
+        agent = body.get("agent") or {}
+        last = latest_demotion(agent)
+        if not last:
+            continue
+        qty = coerce_float((body.get("broker") or {}).get("qty")) or 0.0
+        opts = sorted(opt_held.get(t) or [])
+        if qty <= 0 and not opts:
+            continue                      # 无敞口 = 没有要执行的退出 (候选卡降级不进来)
+        cands.append((t, agent, last, qty, opts))
+    if not cands:
+        return []
+
+    if events is None:
+        from .ledger import iter_events   # noqa: PLC0415  同层 (ledger 不回 import 本模块)
+        events = list(iter_events())
+    if scores is None:
+        from .io_json import iter_jsonl   # noqa: PLC0415
+        from .paths import SCORES_PATH    # noqa: PLC0415
+        scores = list(iter_jsonl(SCORES_PATH))
+
+    def _of_card(name: str, t: str, names: set) -> bool:
+        if name in names:
+            return True
+        p = parse_occ(name)
+        return bool(p and p["underlying"] == t)
+
+    out: List[dict] = []
+    for t, agent, last, qty, opts in cands:
+        names = {t, *opts}
+        cutoff = datetime.fromisoformat(f"{last['date']}T16:00:00").replace(tzinfo=ET)
+        acted = False
+        for e in events:
+            if not _of_card(str(e.get("ticker") or ""), t, names):
+                continue
+            is_exit = (e.get("event_type") in {"close", "expire", "assign"}
+                       or (e.get("event_type") == "fill"
+                           and str(e.get("side") or "").upper() in {"SELL", "BUY_BACK"}))
+            if not is_exit:
+                continue
+            ts = parse_ts(str(e.get("timestamp") or ""))
+            if ts is not None and ts > cutoff:
+                acted = True              # 全平/减仓/被 assign 都算"有动作", 余下归人判
+                break
+        if acted:
+            continue
+        if any(_of_card(str(s.get("ticker") or ""), t, names)
+               and str(s.get("date") or "") >= str(last["date"]) for s in scores):
+            continue                      # ④ 书面 override 已落 scores.jsonl
+        z = agent.get("zones") or {}
+        out.append({"ticker": t, "date": str(last["date"]),
+                    "old_stop": coerce_float(last.get("level")),
+                    "new_stop": coerce_float(z.get("stop_level")),
+                    "reason": last.get("reason"), "qty": qty, "opt_tickers": opts})
     return out

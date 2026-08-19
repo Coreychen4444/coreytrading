@@ -47,7 +47,7 @@ ET_TZ = ZoneInfo('America/New_York')
 
 import re as _re  # noqa: E402
 from quant.sync import state_io  # noqa: E402
-from quant.core.holdings import derive_tier  # noqa: E402  tier 判别式单一真源
+from quant.core.holdings import derive_tier, stamping_cards  # noqa: E402  tier/卡片合并判别式单一真源
 from quant.core.io_json import read_json  # noqa: E402
 from quant.core.occ import parse_occ, strip_us_prefix as _strip_us_prefix  # noqa: E402
 from quant.core.paths import POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
@@ -113,17 +113,11 @@ SIDE_TO_EVENT = {
 
 
 def _cards() -> dict:
-    """positions + watchlist 的 tickers 合并 —— 盖章判据的来源, 每轮读一次。
-
-     COHR 案补洞: 此前只读 positions, 而 **watchlist 首次入场**的授权
-    住在 watchlist 卡上 (促升发生在成交之后) → 每一笔首次入场都裸落库, 再被
-    INFRA:fill_untagged 冤枉成"无授权成交"。positions 优先 (促升后它是真源)。
-    """
+    """Read both card stores and apply the canonical authorization-card merge."""
     try:
-        cards = dict((read_json(WATCHLIST_PATH) or {}).get("tickers") or {}) \
-            if WATCHLIST_PATH.exists() else {}
-        cards.update((read_json(POSITIONS_PATH) or {}).get("tickers") or {})
-        return cards
+        return stamping_cards(
+            read_json(POSITIONS_PATH) or {},
+            (read_json(WATCHLIST_PATH) or {}) if WATCHLIST_PATH.exists() else {})
     except Exception:                       # noqa: BLE001 — 读不到就不盖章, 不是崩
         return {}
 

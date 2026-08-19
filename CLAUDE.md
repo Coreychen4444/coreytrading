@@ -319,14 +319,14 @@ The dependency order is:
 8. lot reconciliation;
 9. `card_autopaint.py` detection and detached agent launch for eligible empty cards;
 10. completed K-line update for close-dependent modes;
-11. regime transition;
-12. NAV snapshot before any consumer that sizes from NAV;
-13. broker reminder reconciliation;
-14. entry-authorization group reconciliation;
-15. IV, earnings and optional premium datasets;
-16. structure-drift observation;
-17. portfolio brief after all producer stages;
-18. entry plan after current state, market data and NAV are complete.
+11. NAV snapshot before any consumer that sizes from NAV;
+12. IV, earnings and optional premium datasets;
+13. structure-drift observation;
+14. portfolio brief after all producer stages and before any regime transition that can replace an exit boundary;
+15. regime transition after exit evaluation in close-dependent modes;
+16. broker reminder reconciliation from the post-transition card and same-run exit stack;
+17. entry-authorization group reconciliation from post-transition state;
+18. entry plan after current state, market data, NAV and transitions are complete.
 
 `card_autopaint.py` must return without waiting for analysis. It excludes reference
 instruments, unmanaged positions, option contracts and cards that already have zones.
@@ -340,7 +340,7 @@ Mode semantics:
 
 - `heartbeat`: periodic broker/state reconciliation plus risk/exit reporting; no incomplete-close transitions.
 - `briefing`: full daily producer chain plus portfolio and entry plans.
-- `postclose`: completed-bar transition chain, same-day NAV/reminder/authorization refresh and post-close reporting.
+- `postclose`: refresh close inputs, evaluate and emit exits against the pre-transition card, apply completed-bar transitions, then refresh reminders and authorization state.
 
 Pipeline invariants:
 
@@ -349,8 +349,9 @@ Pipeline invariants:
 - Close reconciliation precedes watchlist re-add logic.
 - Watchlist-to-position migration precedes lot reconciliation.
 - NAV precedes reminders, reports and entry sizing.
+- Portfolio brief and exit evaluation precede regime transitions that may replace the breached stop.
 - Regime transitions precede reminders and authorization-group synchronization.
-- Portfolio brief runs after every state/data producer it consumes.
+- Portfolio brief runs after every state/data producer it consumes and before external reminder/group effectors. Its alert receipt prevents duplicate delivery by task wrappers.
 - A fatal producer failure stops dependent consumers rather than letting them read half-updated state.
 - OpenD-down and stale-heartbeat conditions are first-class infrastructure alerts.
 - Preview or `--help` must never mutate state. Mutating CLIs should default to dry-run or require explicit `--apply` where practical.

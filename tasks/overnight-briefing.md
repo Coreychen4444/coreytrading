@@ -18,3 +18,5 @@ Produce a human-reviewed operating brief before the US session.
 6. Separate current holdings from watchlist candidates and clearly mark stale or missing cards.
 7. Do not infer authorization from news, conviction or a chart narrative, and do not place orders.
 8. Optionally send the reviewed result with `quant/ops/tg_notify.py --stdin --split`.
+
+The pipeline's immediate alert channel does not replace the full briefing. Preserve the alert receipt to avoid duplicating urgent cards, then send the reviewed briefing normally when configured.

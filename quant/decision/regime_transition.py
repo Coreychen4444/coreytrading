@@ -60,7 +60,11 @@ PARAMS = {
     # 算钱口径统一 ATR20 (stop 距离 / sizing 必须同一个 N, 见 trend-exit-system §2b)
     "atr_period": 20,
     "swing_wing": 2,
+    # 上行 gate 确认缺省 ×2 日 (zone-maintenance 检查表 #3 定版口径)。
     "default_days": 2,
+    # A close-confirmed stop breach defaults to one completed bar. Upward gates
+    # retain their separate two-close default.
+    "stop_days_default": 1,
     # 观察级 zone 只锚近端结构 (~6 个月)。一年前的 pivot 在"价格下去大概到哪"
     # 这个用途上没有信息, 只会拉出一条几十个百分点宽的假区间。
     "pivot_lookback": 120,
@@ -245,7 +249,7 @@ def detect_transition(ticker: str, card: Dict, klines: Optional[List[dict]] = No
     today = today or et_today()
 
     stop = coerce_float(zones.get("stop_level"))
-    days = max(1, int(coerce_float(zones.get("stop_level_days")) or PARAMS["default_days"]))
+    days = max(1, int(coerce_float(zones.get("stop_level_days")) or PARAMS["stop_days_default"]))
     if stop is not None:
         closes = _closes(klines, days)
         if len(closes) == days and all(c < stop for c in closes):
@@ -422,8 +426,10 @@ def apply_transition(card: Dict, tr: Dict, klines: Optional[List[dict]] = None) 
             if isinstance(prior_stop, (int, float)) and round(float(prior_stop), 2) != bfloor:
                 note += f"; 覆盖画卡值 {prior_stop:g}"
             new_zones["stop_derivation"] = note
-        new_zones.setdefault("stop_level_days", cur_zones.get("stop_level_days",
-                                                              PARAMS["default_days"]))
+        # 旧卡显式写过口径才随卡带; 不再用 default_days=2 兜底盖章 —— 那会把
+        # 一张没表态的卡悄悄钉成 ×2, 与下行缺省 ×1 (stop_days_default) 相矛盾。
+        if cur_zones.get("stop_level_days"):
+            new_zones.setdefault("stop_level_days", cur_zones["stop_level_days"])
         agent["zones"] = new_zones
         # 升档同样要落 current_regime —— 否则"上一次是向下转移"留下的 cap 0
         # 会残留下来, 把一个已经修复的仓位永久锁死。

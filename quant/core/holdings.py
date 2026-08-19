@@ -123,6 +123,30 @@ def managed_tickers(doc: dict) -> set[str]:
     return {t for t in live_tickers(doc) if is_managed(tickers.get(t) or {})}
 
 
+def stamping_cards(positions_doc: dict, watchlist_doc: dict) -> dict:
+    """Merge cards used to stamp fill authorization and later annotations.
+
+    A live positions card is authoritative after promotion. A flat archived card
+    yields to a zoned watchlist candidate so a new campaign is stamped from its
+    active authorization rather than the previous campaign. A bare candidate stub
+    cannot displace an archived card. This pure function is shared by both writers.
+    """
+    def _dead_for_auth(body: dict) -> bool:
+        qty = float((body.get("broker") or {}).get("qty") or 0)
+        return qty == 0 and bool(body.get("exit_info"))
+        # 判据用 exit_info (close_reconcile 机器写) 不用 status (手工字段, 两个
+        # 方向都出过事); qty==0 无 exit_info 的 synthetic underlying 行不让位 ——
+        # 在持期权的正股卡仍归 positions 维护
+
+    out = dict((watchlist_doc or {}).get("tickers") or {})
+    for t, body in ((positions_doc or {}).get("tickers") or {}).items():
+        wl = out.get(t) or {}
+        if _dead_for_auth(body) and ((wl.get("agent") or {}).get("zones")):
+            continue                        # 死卡让位给活候选卡
+        out[t] = body
+    return out
+
+
 def derive_tier(ticker: str, cards: dict) -> tuple[str, str]:
     """成交事件的 tier —— 机械推导, → (tier, 依据)。
 

@@ -4,6 +4,7 @@
 tasks/*.md 的 prose 里, 已经漂出四处分歧 (顺序错 / 漏 order_sync / NAV 滞后 /
 --apply 漏传)。顺序一旦进代码, 就该有断言钉住它。
 """
+import json
 from pathlib import Path
 
 from quant.ops import pipeline  # noqa: E402
@@ -49,14 +50,24 @@ def test_heartbeat_is_a_subset_of_briefing():
 
 
 def test_postclose_is_lean_close_layer_only():
-    """盘后转移轮 (用户: 盘后/夜盘可交易 → 转移不等次日 18:30):
-    只跑收盘依赖链, 顺序固定。regime 转移世界 → nav 刷当日收盘账户
-    (转移后重画的 z1 备注金额分母; 此前 nav 只在盘前跑 = cap 数学落后一个
-    交易日) → reminders/today_group 把授权渲染成 App 白名单。brief 不进来 ——
-    说明渲染与重画是任务 prompt 里的 agent 工作, 不是 pipeline 步骤。"""
+    """The close-dependent chain evaluates exits before applying transitions."""
     kp = keys(pipeline.POSTCLOSE)
-    assert kp == ["klines", "regime", "nav", "reminders", "today_group"]
+    assert kp == ["positions", "klines", "nav", "brief", "regime",
+                  "reminders", "today_group"]
     assert set(kp) <= set(keys(pipeline.BRIEFING))
+
+
+def test_exit_evaluation_runs_before_regime_transition():
+    for mode in (pipeline.BRIEFING, pipeline.POSTCLOSE):
+        k = keys(mode)
+        assert k.index("brief") < k.index("regime"), mode
+
+
+def test_postclose_refreshes_positions_before_brief():
+    k = keys(pipeline.POSTCLOSE)
+    assert k.index("positions") < k.index("brief")
+    assert k.index("klines") < k.index("brief")
+    assert k.index("nav") < k.index("brief")
 
 
 def test_nav_lands_before_reminders_in_every_mode_it_runs():
@@ -67,13 +78,19 @@ def test_nav_lands_before_reminders_in_every_mode_it_runs():
         assert k.index("nav") < k.index("reminders"), mode
 
 
-def test_reminders_reconcile_after_regime_and_before_brief():
+def test_reminders_reconcile_after_regime_and_after_brief():
     """价格提醒同步的是**转移后**的卡 → briefing 里必须在 regime 之后;
-    两个模式都要跑 —— session 内重画的卡最迟 6h 被 heartbeat 接上。"""
-    kb = keys(pipeline.BRIEFING)
-    assert kb.index("reminders") > kb.index("regime")
-    assert kb.index("reminders") < kb.index("brief")
-    assert "reminders" in keys(pipeline.HEARTBEAT)
+    两个模式都要跑 —— session 内重画的卡最迟 6h 被 heartbeat 接上。
+
+    The brief emits alerts before reminder and group effectors, and reminders
+    consume the exit stack produced in the same run."""
+    for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING, pipeline.POSTCLOSE):
+        k = keys(mode)
+        assert k.index("reminders") > k.index("brief"), mode
+        assert k.index("today_group") > k.index("brief"), mode
+    for mode in (pipeline.BRIEFING, pipeline.POSTCLOSE):
+        k = keys(mode)
+        assert k.index("reminders") > k.index("regime"), mode
 
 
 def test_today_group_reconciles_after_regime_in_every_mode():
@@ -446,3 +463,83 @@ def test_watchlist_sync_runs_both_modes_after_positions():
         assert "watchlist_sync" in k, mode
         assert k.index("watchlist_sync") > k.index("positions"), mode
         assert k.index("watchlist_sync") > k.index("fills"), mode
+
+
+def test_brief_alerts_push_to_tg_before_effector_stages(monkeypatch):
+    """Canonical brief alerts are delivered before external effectors."""
+    calls = []
+
+    def fake_run(argv, **kw):
+        joined = " ".join(str(x) for x in argv)
+        calls.append(joined)
+
+        class R:
+            returncode, stderr = 0, ""
+            stdout = (json.dumps({"alerts": ["🚫 TST 破 z2 下沿"],
+                                  "fired_cards": ["TST | 状态卡原文"]})
+                      if "portfolio_brief.py" in joined else "")
+        return R()
+
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: "closed")
+    monkeypatch.setattr(pipeline, "stamp_heartbeat", lambda: None)
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+
+    pipeline.main(["--mode", "heartbeat", "--json"])
+    tg_idx = [i for i, c in enumerate(calls) if "tg_notify.py" in c]
+    rem_idx = [i for i, c in enumerate(calls) if "price_reminder_sync.py" in c]
+    assert tg_idx and rem_idx, calls
+    assert tg_idx[0] < rem_idx[0], "TG 推送必须先于画线"
+    assert "状态卡原文" in calls[tg_idx[0]] and "破 z2 下沿" in calls[tg_idx[0]], \
+        "推的必须是 fired_cards+alerts 原文"
+
+
+def test_postclose_pushes_stop_alert_before_regime_rewrites_the_card(monkeypatch):
+    """Post-close STOP delivery precedes a transition that replaces the old stop."""
+    calls = []
+
+    def fake_run(argv, **kw):
+        joined = " ".join(str(x) for x in argv)
+        calls.append(joined)
+
+        class R:
+            returncode, stderr = 0, ""
+            stdout = (json.dumps({"alerts": ["🚨 TST STOP: 收 94 < stop 95"],
+                                  "fired_cards": []})
+                      if "portfolio_brief.py" in joined else "")
+        return R()
+
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: "closed")  # ET 16:10
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+
+    pipeline.main(["--mode", "postclose", "--json"])
+    tg = [i for i, c in enumerate(calls) if "tg_notify.py" in c]
+    regime = [i for i, c in enumerate(calls) if "regime_transition.py" in c]
+    assert tg and regime, calls
+    assert tg[0] < regime[0], "STOP 告警必须先于 regime 转移出门"
+    assert "STOP" in calls[tg[0]]
+
+
+def test_brief_alerts_not_pushed_in_read_only(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kw):
+        joined = " ".join(str(x) for x in argv)
+        calls.append(joined)
+
+        class R:
+            returncode, stderr = 0, ""
+            stdout = (json.dumps({"alerts": ["x"], "fired_cards": []})
+                      if "portfolio_brief.py" in joined else "")
+        return R()
+
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: "closed")
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+
+    pipeline.main(["--mode", "heartbeat", "--read-only", "--json"])
+    assert not any("tg_notify.py" in c for c in calls), "read-only 不消耗告警通道"

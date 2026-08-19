@@ -46,10 +46,15 @@ TOP_MOVERS_COUNT = 3
 # Edge-triggered alerts: first occurrence fires; persisting condition re-confirms
 # at most every 24h (was: re-fired every 4h, contradicting heartbeat.md 边沿触发)
 REALERT_SECONDS = 24 * 60 * 60
-# zone-maintenance「连续 ≥2 交易日」breakout/breakdown-stale 确认口径 ——
-# entry_guard.STALE_CONFIRM_DAYS 的有意重复 (历史各自实现), 相等由
-# tests/test_constant_pins.py 钉死 (BACKLOG §3.5): 改口径两处同改。
+# zone-maintenance staleness 口径 —— entry_guard 同名常量的有意重复
+# (历史各自实现), 相等由 tests/test_constant_pins.py 钉死 (BACKLOG §3.5):
+# 改口径两处同改。语义:
+#   breakout (上行) 连续 ×2 确认 | breakdown (破 z2 下沿) **当日**即 stale
+#   (带内挂单语义反转, 多等一天没有意义) | 波动 stale = |单日收收| > 2×ATR14
+#   (per-ticker 尺, 固定 10% 从未进代码且"没有意义"; 校准 2,490 票日触发率 1.5%)
 STALE_CONFIRM_DAYS = 2
+STALE_BREAKDOWN_DAYS = 1
+STALE_VOL_ATR_MULT = 2.0
 
 
 def _load_state_doc(path: Path) -> Dict:
@@ -897,6 +902,7 @@ def move_trigger_type(pct: float) -> str:
 # 状态卡头衔。**这张表漏一个 type, fired_cards 就整个空掉**(heartbeat 推的
 # 就是 fired_cards), 所以 move_trigger_type 的两个方向由测试钉住必须在表内。
 HEADLINES = {"stop_breach": "🚨 STOP",
+             "exit_overdue": "🚨 STOP未执行",
              "adverse_move_up": "⚠️", "adverse_move_down": "⚠️"}
 
 # 改过名的 trigger, 老 key 留在 tmp/heartbeat-state.json 里会永远躺着 (ticker
@@ -1521,14 +1527,26 @@ def zone_staleness(ticker: str, cfg: Dict) -> List[str]:
         reasons.append(f"valid_until {vu} 已过期")
 
     closes = _cached_closes(ticker, STALE_CONFIRM_DAYS + 1)
+    trim = normalize_zone_pair(cfg.get("trim_zone"))
+    z2 = normalize_zone_pair(cfg.get("accumulation_zone_2"))
     if len(closes) >= STALE_CONFIRM_DAYS:
         last2 = closes[-STALE_CONFIRM_DAYS:]
-        trim = normalize_zone_pair(cfg.get("trim_zone"))
-        z2 = normalize_zone_pair(cfg.get("accumulation_zone_2"))
         if trim and all(c > trim[1] for _, c in last2):
             reasons.append(f"Breakout stale: 连续 {len(last2)} 日 close > trim 上沿 {trim[1]}")
-        if z2 and all(c < z2[0] for _, c in last2):
-            reasons.append(f"Breakdown stale: 连续 {len(last2)} 日 close < zone2 下沿 {z2[0]}")
+    # A completed close below zone 2 invalidates the map immediately.
+    if closes and z2 and closes[-1][1] < z2[0]:
+        reasons.append(f"Breakdown stale: 收盘 {closes[-1][1]:g} < zone2 下沿 {z2[0]:g} "
+                       "(当日口径 — 带内挂单语义已反转, 先重画再挂单)")
+    # Use the same per-instrument volatility ruler as entry_guard. Missing ATR
+    # data suppresses only this trigger and never creates a fixed fallback.
+    krows = [r for r in iter_jsonl(KLINE_CACHE_DIR / f"{ticker}.jsonl")][-(MOVE_ATR_PERIOD * 3):]
+    a14 = (atr(krows, MOVE_ATR_PERIOD) or [None])[-1] if krows else None
+    kcl = [normalize_num(r.get("close")) for r in krows[-2:]]
+    if a14 and len(kcl) == 2 and kcl[0] and kcl[1]:
+        chg, thr = abs(kcl[1] / kcl[0] - 1), STALE_VOL_ATR_MULT * a14 / kcl[0]
+        if chg > thr:
+            reasons.append(f"Volatility stale: 单日 {chg * 100:.1f}% > "
+                           f"{STALE_VOL_ATR_MULT:g}×ATR14 ({thr * 100:.1f}%)")
     return reasons
 
 
@@ -1759,6 +1777,47 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
                              "cap_usd": (ac or {}).get("cap_usd"),
                              "cap_binding": (ac or {}).get("binding")})
 
+    # Below the lower accumulation boundary, an old-zone buy can execute immediately
+    # in broken structure. Freeze BUY actions for the session without mutating the
+    # cap; sell/reduce actions remain available and completed-close logic owns redraws.
+    freeze_type = "z2_breach_buy_freeze"
+    breach_rows: List[Tuple[str, Optional[float], Optional[float], Dict]] = [
+        (x["ticker"], x.get("current_price"), x.get("change_pct"),
+         current_zones.get(x["ticker"]) or {})
+        for x in watch if not x.get("is_option")]
+    held_stock = {r[0] for r in breach_rows}  # 双桶同 ticker (促升窗): 持仓卡为真源
+    for wb in watchlist_basic:
+        wt = str(wb["ticker"]).upper()
+        if wt in held_stock or str(wb.get("status")) != "watching" \
+                or is_reference_role(wb.get("role")):
+            continue
+        breach_rows.append((wt, normalize_num(wb.get("price")),
+                            normalize_num(wb.get("change_pct")),
+                            watchlist_zones.get(wt) or {}))
+    for tk, px, chg, zcfg in breach_rows:
+        cap = normalize_num((zcfg.get("current_regime") or {}).get("cap_pct_nav"))
+        z1 = normalize_zone_pair(zcfg.get("accumulation_zone_1"))
+        z2 = normalize_zone_pair(zcfg.get("accumulation_zone_2"))
+        if not cap or px is None or not z1:
+            continue
+        lo = min(z1[0], z2[0]) if z2 else z1[0]
+        if px >= lo:
+            continue
+        active_keys.add(alert_key(tk, freeze_type))
+        all_conditions.append({"ticker": tk, "type": freeze_type, "value": px})
+        if emit_gate(tk, freeze_type):
+            stop = normalize_num(zcfg.get("stop_level"))
+            day = f", 当日 {fmt_pct(chg)}" if chg is not None else ""
+            alerts.append(
+                f"🚫 {tk} 破 z2 下沿: {fmt_price(px)} < {lo:g} "
+                f"({(px / lo - 1) * 100:+.1f}%{day})"
+                + (f" | stop {stop:g}" if stop is not None else "")
+                + " → 当日 BUY 冻结: 带内清单价挂上去 = 立即成交在破位区; "
+                  "等收盘裁定 (收回带内 → 明日照新清单 / 确认破位 → 重画换图); "
+                  "卖出/减仓不受影响, cap 不在盘中动 — 授权改动归收盘机器")
+            triggers.append({"ticker": tk, "type": freeze_type, "value": px,
+                             "z2_lo": lo, "stop": stop})
+
     # Zone staleness (代码化触发: valid_until / breakout / breakdown via kline 缓存)
     stale_zones: List[Dict] = []
     for zticker, cfg in current_zones.items():
@@ -1847,6 +1906,38 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             alerts.append(detail)
             triggers.append({"ticker": tk, "type": "at_risk_breach",
                              "value": ar["at_risk_usd"], "cap_usd": ar["cap_usd"]})
+
+    # A stop-triggered demotion replaces the old stop on the card. Continue to
+    # surface the unresolved exit decision until a sell, recovery transition or
+    # explicit scored override provides a durable resolution receipt.
+    for overdue in structure.unresolved_demotions(_load_state_doc(STATE_POSITIONS_PATH)):
+        tk = overdue["ticker"]
+        days_open = structure.trading_days_after(
+            (day for day, _ in _cached_closes(tk, 30)), overdue["date"])
+        active_keys.add(alert_key(tk, "exit_overdue"))
+        all_conditions.append(
+            {"ticker": tk, "type": "exit_overdue", "value": overdue["date"]})
+        old_stop = (f"{overdue['old_stop']:g}"
+                    if overdue.get("old_stop") is not None else "?")
+        new_stop = (f"{overdue['new_stop']:g}"
+                    if overdue.get("new_stop") is not None else "?")
+        exposure = (f"仍持 {overdue['qty']:g} 股" if overdue["qty"] > 0 else "正股已平")
+        if overdue.get("opt_tickers"):
+            exposure += f" + 期权 {', '.join(overdue['opt_tickers'])}"
+        detail = (f"{tk} 🚨 破 stop 降级 D+{days_open} 未执行/未 override: "
+                  f"{overdue['date']} "
+                  f"{overdue.get('reason') or f'收盘破 stop {old_stop}'} → 已降级 cap 0, "
+                  f"卡上 stop 已换 {old_stop}→{new_stop}, {exposure}。"
+                  "执行平仓，或通过 journal 与 annotate_event --score 记录 override；"
+                  "卖出、收复转移或落库注解后自动解除")
+        zone_signals.append(detail)
+        if emit_gate(tk, "exit_overdue"):
+            alerts.append(detail)
+            triggers.append({"ticker": tk, "type": "exit_overdue",
+                             "value": overdue["date"],
+                             "old_stop": overdue.get("old_stop"),
+                             "new_stop": overdue.get("new_stop"),
+                             "days_open": days_open})
 
     # 预算超顶 (补): `cap_multiple` 早就算出来了, 但只是卡上一个
     # 括号里的数字 —— 没有任何告警通道。整股约束下 1.0-1.25× 是正常溢出 (买不起

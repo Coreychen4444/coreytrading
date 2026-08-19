@@ -47,6 +47,8 @@ from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (# noqa: E402
     KLINE_CACHE_DIR, KLINE_DEEP_DIR, MARKET_DIR, POSITIONS_PATH, WATCHLIST_PATH)
 from quant.core.sizing import constraint_lines, read_constraints  # noqa: E402  🔒 canonical, 不另造
+from quant.core.structure import (  # noqa: E402
+    trading_days_after, unresolved_demotions)
 from quant.decision.entry_guard import _gate_streak  # noqa: E402  同一 streak 口径, 不另造
 from quant.decision.regime_transition import PARAMS as RT_PARAMS  # noqa: E402
 from quant.decision.regime_transition import volume_leg  # noqa: E402  量腿 canonical (rel 口径), 不另造
@@ -331,7 +333,8 @@ def fastlane_lines(fl: Optional[dict], g: dict, need: int, streak: List[str],
 
 def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
                   deep: Optional[List[dict]] = None,
-                  deep_note: Optional[str] = None) -> List[str]:
+                  deep_note: Optional[str] = None,
+                  overdue: Optional[dict] = None) -> List[str]:
     if len(bars) < 2:
         return [f"{tk}: 无缓存 K 线 — 先跑 kline_cache"]
     close = coerce_float(bars[-1].get("close"))
@@ -340,6 +343,18 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
     vr = vol_ratio_last(bars)
     vr_s = f"{vr:.2f}×{'⚡' if vr >= VOL_GATE else ''}" if vr is not None else "?"
     L = [f"{tk} ${close:g} ({chg:+.1f}%) 量比 {vr_s}"]
+    # A demotion replaces the old stop, so show unresolved exit decisions beside
+    # the post-transition ladder until a sell, recovery or recorded override resolves them.
+    if overdue:
+        n = trading_days_after((str(b.get("time", ""))[:10] for b in bars),
+                               overdue["date"])
+        old_stop = (f"{overdue['old_stop']:g}"
+                    if overdue.get("old_stop") is not None else "?")
+        new_stop = (f"{overdue['new_stop']:g}"
+                    if overdue.get("new_stop") is not None else "?")
+        L.append(f"  ⬇ {overdue['date']} 收盘破 stop 已降级 (旧 {old_stop} → 新 {new_stop}, "
+                 f"cap 0) D+{n} 未执行/未 override — 下表已是降级后的新图, "
+                 f"退出裁决仍悬 (执行平仓 / annotate --score 落 override)")
     # 线名 = gate 的**结构身份**四分类 (换掉旧的 trend/lsh 两档启发式)。
     # 修复路径仍用 止跌/收复/修复 三词; 非修复路径分 突破线/箱体顶/新高线。
     st = technical.swing_structure(bars)
@@ -465,6 +480,7 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
     # 持仓侧 (用户: 持仓卡同样带 gate 阶梯, 只报 watchlist 是覆盖缺口)。
     # 判据 = holdings.live_tickers (broker.qty 单一真源); 结构豁免层无 gate 不渲染。
     held: dict = {}
+    overdue: dict = {}
     try:
         pos = json.loads(Path(pos_path).read_text())
         tickers = pos.get("tickers") or {}
@@ -473,6 +489,12 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
             if not is_managed(card):
                 continue
             held[tk] = card
+        # 退出裁决悬置标记 (⬇): 判别式与 brief 同一份。读事件流/scores 失败不炸表 —
+        # 断层标记缺席时 brief 的 exit_overdue 仍在点名, 这里只是镜像。
+        try:
+            overdue = {r["ticker"]: r for r in unresolved_demotions(pos)}
+        except Exception:                                       # noqa: BLE001
+            overdue = {}
     except (OSError, ValueError):
         pass  # positions 读不到只缺持仓 section, watchlist 半仍照发
     dates = set()
@@ -486,7 +508,8 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
                 dates.add(str(bars[-1].get("time", ""))[:10])
             dbars, dnote = deep_bars(tk, kdir)
             block = render_ticker(tk, agent, bars, held=held_flag,
-                                  deep=dbars, deep_note=dnote)
+                                  deep=dbars, deep_note=dnote,
+                                  overdue=overdue.get(tk) if held_flag else None)
             if tk == "SKHY":
                 pl = skhy_premium_line(market_dir)
                 if pl:

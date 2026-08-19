@@ -74,6 +74,26 @@ def test_down_transition_fires_on_the_confirming_close():
     assert tr["direction"] == "down" and tr["level"] == 800.0
 
 
+def test_down_transition_defaults_to_one_close_when_days_unset():
+    """A close-confirmed stop defaults to one bar when the card omits the window."""
+    card = _card(stop=800.0)
+    del card["agent"]["zones"]["stop_level_days"]
+    tr = rt.detect_transition("MU", card, _bars([850.0, 795.0]))
+
+    assert tr is not None and tr["direction"] == "down" and tr["days"] == 1
+
+
+def test_up_gate_confirm_still_defaults_to_two_closes():
+    """上行 gate 确认缺省仍 ×2 (zone-maintenance 检查表 #3) — 两个缺省有意分开,
+    下行的 ×1 不辖上行。"""
+    nr = {**NEXT, "entry_gate": {"level": 1008.0, "unlocks": "confirmed"}}
+    card = _card(stop=800.0, next_regime=nr)
+
+    assert rt.detect_transition("MU", card, _bars([850.0, 1010.0])) is None
+    tr = rt.detect_transition("MU", card, _bars([1010.0, 1011.0]))
+    assert tr is not None and tr["direction"] == "up" and tr["days"] == 2
+
+
 def test_intraday_wick_below_the_stop_is_not_a_transition():
     """卡片写的是收盘口径 — 插针不算 (bar low 远低于 stop, close 在上)。"""
     bars = _bars([810.0, 805.0])

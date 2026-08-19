@@ -108,10 +108,15 @@ PARAMS = {
     "atr_period": 20,
 }
 
-# zone-maintenance「连续 ≥2 交易日」breakout/breakdown-stale 确认口径。
+# zone-maintenance breakout-stale (上行) 确认口径「连续 ≥2 交易日」。
 # portfolio_brief.zone_staleness 手搓同一份 (历史各自实现的有意重复, 保留),
 # 相等由 tests/test_constant_pins.py 钉死 (BACKLOG §3.5) —— 改口径两处同改。
 STALE_CONFIRM_DAYS = 2
+# Breakdown staleness is immediate because an old-zone buy can execute inside
+# broken structure. Upward breakouts retain confirmation to limit redraw churn.
+# Volatility staleness uses a calibrated per-instrument 2×ATR14 ruler.
+STALE_BREAKDOWN_DAYS = 1
+STALE_VOL_ATR_MULT = 2.0
 
 
 # ── 纯计算层 (tests/decision/test_entry_guard.py 覆盖) ───────────
@@ -346,8 +351,19 @@ def zone_staleness(zb: dict, thesis: dict, rows: List[dict], today: str) -> List
         trim = zb.get("trim")
         if isinstance(trim, list) and len(trim) == 2 and all(c > trim[1] for _, c in last):
             out.append(f"连续 {STALE_CONFIRM_DAYS} 日收盘 > trim 上沿 (breakout stale)")
-        if all(c < zb["z2"][0] for _, c in last):
-            out.append(f"连续 {STALE_CONFIRM_DAYS} 日收盘 < zone2 下沿 (breakdown stale)")
+    # A close below zone 2 invalidates the map immediately.
+    z2 = zb.get("z2")
+    if closes and isinstance(z2, list) and len(z2) == 2 and closes[-1][1] < z2[0]:
+        out.append(f"收盘 {closes[-1][1]:g} < zone2 下沿 {z2[0]:g} "
+                   "(breakdown stale, 当日口径 — 带内挂单语义已反转)")
+    # Volatility uses a per-instrument ruler; insufficient ATR data suppresses only this leg.
+    a14 = (technical.atr(rows, 14) or [None])[-1]
+    cl2 = [coerce_float(r.get("close")) for r in rows[-2:]]
+    if a14 and len(cl2) == 2 and cl2[0] and cl2[1]:
+        chg, thr = abs(cl2[1] / cl2[0] - 1), STALE_VOL_ATR_MULT * a14 / cl2[0]
+        if chg > thr:
+            out.append(f"单日 {chg * 100:.1f}% > {STALE_VOL_ATR_MULT:g}×ATR14 "
+                       f"({thr * 100:.1f}%) (volatility stale)")
     return out
 
 

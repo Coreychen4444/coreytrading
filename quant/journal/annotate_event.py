@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 import argparse
 import json
 
-from quant.core.holdings import derive_tier  # noqa: E402  tier 判别式单一真源
+from quant.core.holdings import derive_tier, stamping_cards  # noqa: E402  tier/卡片合并判别式单一真源
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json, state_lock  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
@@ -56,13 +56,11 @@ SCORE_SET = {"A", "A-", "B", "C", "D"}
 # 想起来跑注解 —— 又一个"手工步骤 = 这一步实际上不存在"。
 
 def _cards() -> dict:
-    """positions + watchlist 合并 (positions 优先) —— 与 trade_history_sync._cards
-    同规则: watchlist 首次入场的授权住 watchlist 卡 (2026-08-13 COHR 案补洞)。"""
+    """Read both stores and use the canonical authorization-card merge."""
     try:
-        cards = dict((read_json(WATCHLIST_PATH) or {}).get("tickers") or {}) \
-            if WATCHLIST_PATH.exists() else {}
-        cards.update((read_json(POSITIONS_PATH) or {}).get("tickers") or {})
-        return cards
+        return stamping_cards(
+            read_json(POSITIONS_PATH) or {},
+            (read_json(WATCHLIST_PATH) or {}) if WATCHLIST_PATH.exists() else {})
     except Exception:                       # noqa: BLE001 — 读不到就不推导, 不是崩
         return {}
 

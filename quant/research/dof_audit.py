@@ -116,6 +116,7 @@ CLASSIFY: dict[str, str] = {
     "core/sizing:OPTION_ATRISK_LOSS_FRAC": "ruled",  # 0.25 锚 |S1|, pins 钉相等
     "decision/regime_transition:REL_FLOOR": "ruled",   # 0.4 relative_volume R
     "decision/regime_transition:fastlane_k": "ruled",  # 0.5 ladder_entry 采纳
+    "decision/regime_transition:stop_days_default": "ruled",  # close-confirmed stop uses one completed bar
     "decision/exit_guard:atr_multiple": "convention",  # 3×ATR trend-exit canonical
     "decision/exit_guard:parabolic_trail_pct": "convention",
     "decision/exit_guard:opt_s1_stop": "ruled",        # −25% options_exit_overlay
@@ -164,6 +165,10 @@ CLASSIFY: dict[str, str] = {
     "decision/entry_guard:repair_reclaim_days": "ruled",   # 10 日 ladder_entry
     "decision/entry_guard:STALE_CONFIRM_DAYS": "convention",   # 2 日 zone-maintenance, pin
     "report/portfolio_brief:STALE_CONFIRM_DAYS": "convention",
+    # Breakdown uses the first completed close; volatility uses a calibrated
+    # per-instrument 2×ATR14 ruler. Pin tests keep both live consumers aligned.
+    "decision/entry_guard:STALE_BREAKDOWN_DAYS": "ruled",
+    "decision/entry_guard:STALE_VOL_ATR_MULT": "ruled",
     "decision/entry_guard:zone_stale_days_reviewed": "convention",  # 14 日 zone-maintenance
     "decision/entry_guard:FLOOR_GAP_ATR": "ruled",         # 0.25N round-2b
     "report/gate_audit:FLOOR_GAP_ATR": "ruled",

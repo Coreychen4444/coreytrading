@@ -441,3 +441,29 @@ def test_medium_series_still_falls_back_because_the_window_would_be_partial():
     assert atr is not None, "fixture 要长到 ATR 算得出, 否则这条又测不到 MIN_BARS"
     assert len(bars) < glr.MIN_BARS
     assert glr.gate_path_of(200.0, bars, "up", atr) is None
+
+
+# ── unresolved demotion marker ───────────────────────────────────
+
+OVERDUE = {"ticker": "TST", "date": "2026-08-19", "old_stop": 95.0,
+           "new_stop": 88.0, "reason": "synthetic close 94 < stop 95",
+           "qty": 20.0, "opt_tickers": []}
+
+
+def test_overdue_demotion_renders_the_fault_line():
+    bars = _bars([100.0] * 18 + [97.0, 94.0]) + [
+        {"time": "2026-08-20 00:00:00", "open": 94, "high": 96, "low": 93,
+         "close": 95.0, "volume": 1000}]
+    agent = {"zones": {"accumulation_zone_1": [89.0, 93.0], "stop_level": 88.0}}
+    out = "\n".join(glr.render_ticker("TST", agent, bars, held=True, overdue=OVERDUE))
+    assert "⬇" in out
+    assert "95" in out and "88" in out, "断层两半 (旧→新 stop) 都要说出口"
+    assert "D+1" in out                       # fixture 里 8/20 bar 已收
+    assert "override" in out
+
+
+def test_no_overdue_no_fault_line():
+    bars = _bars([130.0] * 20 + [131.0])
+    agent = {"zones": {"accumulation_zone_1": [89.0, 93.0], "stop_level": 88.0}}
+    out = "\n".join(glr.render_ticker("TST", agent, bars, held=True))
+    assert "⬇" not in out

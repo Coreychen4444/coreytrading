@@ -289,9 +289,9 @@ def build_zones_block(args: argparse.Namespace, *, ticker: str = "") -> Dict[str
         zones["stop_level"] = stop
         if is_option_ticker(ticker) or args.instrument_type == "option":
             zones["stop_level_basis"] = args.stop_level_basis
-        # Only persist a non-default confirmation window; 1 is the implicit
-        # default everywhere that reads it.
-        if args.stop_level_days and int(args.stop_level_days) > 1:
+        # Persist every explicit confirmation window. Consumers have different
+        # defaults, so silently dropping an explicit one-day value changes behavior.
+        if args.stop_level_days and int(args.stop_level_days) >= 1:
             zones["stop_level_days"] = int(args.stop_level_days)
     if args.valid_until:
         zones["valid_until"] = args.valid_until
@@ -332,7 +332,8 @@ LEVEL_KEYS = {"accumulation_zone_1", "accumulation_zone_2", "trim_zone",
 
 def apply_zones_block(agent: Dict[str, Any], zones_block: Dict[str, Any]) -> None:
     """zones 写入语义: **不含任何价位的调用并入现有 zones**; 传了价位 = 重画 = 整块
-    替换 (保留现有 reclaim_gates, 除非本次显式传了 --reclaim-gates)。
+    替换。未显式覆盖时保留 reclaim_gates；若 stop 数值未变，也保留其确认天数与
+    derivation，使元数据与其描述的 stop 本体保持一致。
 
      加价位判别: 此前判据是 `set(zones_block) <= {"reclaim_gates"}`, 于是
     只传 --valid-until / --reasoning-summary / --update-trigger / --anchored-on 这类
@@ -346,6 +347,15 @@ def apply_zones_block(agent: Dict[str, Any], zones_block: Dict[str, Any]) -> Non
     elif zones_block:
         if "reclaim_gates" not in zones_block and prev and prev.get("reclaim_gates"):
             zones_block["reclaim_gates"] = prev["reclaim_gates"]
+        # Confirmation and derivation metadata travel with the stop itself. Preserve
+        # them when a redraw keeps the same stop; discard them when the stop changes.
+        prev_stop = prev.get("stop_level") if prev else None
+        new_stop = zones_block.get("stop_level")
+        if (isinstance(prev_stop, (int, float)) and isinstance(new_stop, (int, float))
+                and round(float(prev_stop), 2) == round(float(new_stop), 2)):
+            for k in ("stop_level_days", "stop_derivation"):
+                if k not in zones_block and prev.get(k):
+                    zones_block[k] = prev[k]
         agent["zones"] = zones_block
     elif "zones" not in agent:
         agent["zones"] = None

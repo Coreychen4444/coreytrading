@@ -2,10 +2,14 @@
 """nav_snapshot.py — 每日账户 NAV 快照 → events/nav_history.jsonl
 
 为什么存在: 没有 NAV 历史就永远回答不了 "组合 vs QQQ 跑赢多少" (analytics gap G6/G8)。
-get_portfolio 每天都在拉这份数据, 只是从来没人存。每日一行, overnight-briefing 调用。
+get_portfolio 每天都在拉这份数据, 只是从来没人存。每日一行, briefing 与 postclose 调用。
 
 记录: total_assets / cash / market_val / power / risk_status (USD 口径)
     + QQQ / SPY 收盘 (基准列, OpenD snapshot)。
+
+Same-day reruns refresh the existing row instead of skipping or appending. This
+keeps one row per ET date while letting the close-dependent run replace an earlier
+pre-session fallback. Benchmark values are sampled in the same refresh.
 
 CLI:
     .venv/moomoo/bin/python3 quant/data/nav_snapshot.py [--json]
@@ -89,20 +93,30 @@ def main() -> int:
     # 同一个 ET 交易日被写两行。IV 序列不可重拉 (CLAUDE.md), 污染是永久的。
     # 口径见 lib/timeutil.et_today() docstring。
     today = et_today()
-    if any(r.get("date") == today for r in iter_jsonl(NAV_HISTORY_PATH)):
-        msg = {"skipped": True, "reason": f"already snapshotted {today}"}
-        print(json.dumps(msg) if a.json else f"[nav] already snapshotted {today}")
-        return 0
+    rows = list(iter_jsonl(NAV_HISTORY_PATH))
+    refreshing = any(r.get("date") == today for r in rows)
 
     acct = fetch_account_usd()
     if acct is None:
         return 1
     row = {"date": today, "logged_at": now_utc_iso(), **acct, **fetch_benchmarks()}
+    if refreshing:
+        row["refreshed"] = True          # 同日重写留痕: 这一行不是当日首笔读数
     NAV_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with NAV_HISTORY_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if refreshing:
+        # Same-day refresh replaces the row; the latest scheduled observation wins.
+        rows = [row if r.get("date") == today else r for r in rows]
+        tmp = NAV_HISTORY_PATH.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, NAV_HISTORY_PATH)
+    else:
+        with NAV_HISTORY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(json.dumps(row, ensure_ascii=False, indent=2) if a.json
-          else f"[nav] {today}: total ${row['total_assets']:,.0f} cash ${row['cash']:,.0f} "
+          else f"[nav] {today}{' (refreshed)' if refreshing else ''}: "
+               f"total ${row['total_assets']:,.0f} cash ${row['cash']:,.0f} "
                f"power ${row['power']:,.0f} | QQQ {row.get('qqq_close')} SPY {row.get('spy_close')}")
     return 0
 
