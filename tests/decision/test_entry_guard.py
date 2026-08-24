@@ -328,9 +328,14 @@ def test_gate_sits_above_the_current_regime_no_chase():
             # 骨架不许卡死的守卫在别处 (pending_repaint / NEEDS_CARD)。
             if not nr.get("zones"):
                 continue
-            assert nr["zones"]["no_chase_above"] > gate, ctx
-            # 入场侧棘轮 (round-2b 修订 , 用户 批): 下一档地板 = gate − 0.5×ATR20,
-            # **带缓冲低于 gate**—— 旧断言 (地板 ≥ 上一档 no_chase ≈ 贴 gate) 正是 bfloor
+            # 降级保留图的 no_chase 低于收复 gate 时被机器摘除待重画；
+            # 原样搬进「收复后世界」会形成刚确认突破却不许追的矛盾。缺席 = 占位
+            # 待重画, 无可查之线, 跳过; 在场则必须自洽。
+            nc_next = nr["zones"].get("no_chase_above")
+            if nc_next is not None:
+                assert nc_next > gate, ctx
+            # 入场侧棘轮：下一档地板 = gate − 0.5×ATR20,
+            # **带缓冲低于 gate** —— 旧断言 (地板 ≥ 上一档 no_chase ≈ 贴 gate) 正是 bfloor
             # whipsaw 语义, 已被 gate_backtest2b 裁决废除。量级守卫: 缓冲不为零、也不脱锚。
             floor = nr["zones"]["stop_level"]
             assert floor < gate, ctx               # 有缓冲, 不贴 gate
@@ -700,3 +705,52 @@ def test_volatility_stale_silent_when_atr_unavailable():
     rows = [_bar("2026-07-14", 97.0), _bar("2026-07-15", 88.0)]   # -9.3%, 但仅 2 根
     hits = zone_staleness(ZB, {"last_reviewed": "2026-07-10"}, rows, "2026-07-17")
     assert not any("volatility" in h for h in hits), hits
+
+
+# ══════════════════════════════════════════════════════════════
+# 短期道氏结构位 = 清单第一排序键
+# ══════════════════════════════════════════════════════════════
+
+def _plan(ticker, tier, wrank=0, close=100.0):
+    from quant.core import dow
+    return {"ticker": ticker, "close": close, "verdict": "PLAN", "mode": "normal",
+            "lines": [], "reasons": [], "ladder": None, "caps": {"gate_no": 1},
+            "dow": {"tier": tier, "short": dow.PRIORITY_CN[tier], "cn": f"{dow.PRIORITY_CN[tier]}·x",
+                    "sort_key": (tier, wrank), "weekly_cn": None, "stage_cn": "s"}}
+
+
+def test_plan_blocks_are_ordered_by_structure_tier_then_weekly():
+    """同为 PLAN：优先 → 次位 → 末位；同档周线级打平局。VETO 仍排在所有 PLAN 之后。"""
+    from quant.decision import entry_guard as eg
+    res = [_plan("C", 3), _plan("B", 2), _plan("A", 1, wrank=1), _plan("A0", 1, wrank=0),
+           {"ticker": "V", "close": 50.0, "verdict": "VETO", "lines": [], "reasons": ["x"],
+            "dow": {"tier": 1, "short": "优先", "cn": "优先·x", "sort_key": (1, 0)}}]
+    txt = eg.render(res, nav=22000.0, today="2026-08-22")
+    heads = [ln for ln in txt.splitlines() if ln.startswith(("✅", "⛔", "🟢", "🔴", "🚫", "⚠️", "🟡"))]
+    order = [h.split()[1] for h in heads if h.split()[1] in ("A0", "A", "B", "C", "V")]
+    assert order[:4] == ["A0", "A", "B", "C"] and order[-1] == "V"
+    assert "PLAN(gate1)·优先" in txt and "PLAN(gate1)·次位" in txt and "PLAN(gate1)·末位" in txt
+
+
+def test_structure_line_names_the_tier_and_both_levels():
+    """块内「结构位」行 = 排序的依据，缺了它排序就不可解释。"""
+    from quant.decision import entry_guard as eg
+    pr = {"tier": 2, "short": "次位", "cn": "次位·终止观察②", "sort_key": (2, 0),
+          "weekly_cn": "上涨·推进中", "stage_cn": "上涨·终止观察②（lsl 已成形，看反弹 vs lsh）"}
+    ln = eg.dow_line(pr)
+    assert ln.startswith("结构位 次位·终止观察②") and "周线级 上涨·推进中" in ln
+    assert "周线级" not in eg.dow_line({**pr, "weekly_cn": None})
+
+
+def test_structure_tier_never_changes_the_verdict_or_the_numbers(monkeypatch):
+    """只排序不授权：评估结果里 dow 是附加键，verdict / ladder / caps 与没有它时逐字相同。"""
+    from quant.decision import entry_guard as eg
+    monkeypatch.setattr(eg, "_rows", lambda tk: _vehicle_rows())
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    r = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
+    assert r["dow"]["tier"] in (1, 2, 3) and any(x.startswith("结构位 ") for x in r["lines"])
+    monkeypatch.setattr(eg, "dow_priority", lambda rows: {"tier": 3, "short": "末位", "cn": "末位·x",
+                                                          "sort_key": (3, 3), "weekly_cn": None,
+                                                          "stage_cn": "s"})
+    r2 = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
+    assert (r2["verdict"], r2["ladder"], r2["caps"]) == (r["verdict"], r["ladder"], r["caps"])

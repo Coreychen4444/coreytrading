@@ -564,3 +564,102 @@ def test_qty_desync_catches_what_lot_drift_structurally_cannot(tmp_path, monkeyp
     # 对齐之后自动闭嘴 (对账式, 不需要人去清标记)
     pos.write_text(pos.read_text().replace('"qty": 1.0', '"qty": 0.0'), encoding="utf-8")
     assert pb.qty_desync() == []
+
+
+# ── 1b. 持仓加仓阶梯 ──────
+#
+# Synthetic zones keep the ladder arithmetic auditable.
+SYN_CFG = {"current_regime": {"name": "R_SYN", "cap_pct_nav": NOTIONAL_CAP},
+           "accumulation_zone_1": [90.0, 100.0], "accumulation_zone_2": [70.0, 80.0],
+           "trim_zone": [120.0, 130.0], "no_chase_above": 110.0, "stop_level": 60.0}
+
+
+def _write_bars(ticker, close, n=40):
+    """平走的 K 线 (含 high/low, ATR 可算; 无单日 +10% → momentum_mode = normal)。"""
+    rows = [{"time": f"2026-06-{(i % 28) + 1:02d}", "open": close, "high": close * 1.01,
+             "low": close * 0.99, "close": close} for i in range(n)]
+    (pb.KLINE_CACHE_DIR / f"{ticker}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+
+def _budget(remaining, exhausted=False):
+    return {"gate_no": 2, "regime_cap_frac": NOTIONAL_CAP, "regime_name": "R_SYN",
+            "portfolio_binding": None, "event_shrink": None, "earnings_reaction_day": None,
+            "class_cap_usd": 9000.0, "exposure_usd": 3000.0, "cap_usd": remaining,
+            "deployed_usd": 4056.0, "remaining_usd": remaining, "cap_multiple": 0.45,
+            "addable_shares": int(remaining // 100.0), "exhausted": exhausted}
+
+
+def test_position_ladder_uses_entry_guard_prices_and_whole_share_split(env):
+    """Synthetic $1,000 cap at a $100 first rung splits 5/3/2 whole shares."""
+    env()
+    _write_bars("SYN", 115.0)
+    lad = pb.position_ladder("SYN", SYN_CFG, _budget(1000.0), {"agent": {}},
+                             today="2030-01-21")
+    assert lad["mode"] == "normal"
+    assert [t["price"] for t in lad["tiers"]] == [100.0, 90.0, 75.0]
+    assert [t["shares"] for t in lad["tiers"]] == [5, 3, 2]
+    assert lad["n_tiers"] == 3 and lad["degraded"] is False and lad["exception"] is False
+
+
+def test_position_ladder_degrades_to_two_rungs_under_whole_share_constraint(env):
+    """$250 at a $100 first rung degrades to two one-share tiers."""
+    env()
+    _write_bars("SYN", 115.0)
+    lad = pb.position_ladder("SYN", SYN_CFG, _budget(250.0), {"agent": {}},
+                             today="2030-01-21")
+    assert [t["shares"] for t in lad["tiers"]] == [1, 1]
+    assert lad["n_tiers"] == 2 and lad["degraded"] is True
+    assert "2 档" in lad["note"]
+
+
+def test_position_ladder_silent_when_nothing_to_add_or_not_a_stock(env):
+    env()
+    _write_bars("SYN", 115.0)
+    assert pb.position_ladder("SYN", SYN_CFG, _budget(0.0, exhausted=True), {}) is None
+    assert pb.position_ladder("SYN", SYN_CFG, None, {}) is None
+    # 期权合约: 正股阶梯对它没有意义 (合约参数走 option_plan)
+    assert pb.position_ladder("SYN300118C00100000", SYN_CFG, _budget(1000.0), {}) is None
+    # 无 zone → 无阶梯 (不发明价位)
+    assert pb.position_ladder("SYN", {"current_regime": SYN_CFG["current_regime"]},
+                              _budget(1000.0), {}) is None
+
+
+def test_position_card_renders_ladder_line_in_entry_guard_format(env):
+    """卡片「阶梯」行与 entry_guard「阶梯挂单」同格式 —— 清单层照抄, 不发明数字。"""
+    env()
+    _write_bars("SYN", 115.0)
+    b = _budget(1000.0)
+    b["ladder"] = pb.position_ladder("SYN", SYN_CFG, b, {"agent": {}}, today="2030-01-21")
+    item = {"ticker": "SYN", "qty": 10.0, "current_price": 95.0, "avg_cost": 85.0,
+            "is_option": False, "synthetic": False, "zone_hints": []}
+    card = pb.build_position_card(item, SYN_CFG, b, None)
+    assert "阶梯 [normal] 3档: $100×5股($500) / $90×3股($270) / $75×2股($150)" in card
+    assert "⛔" not in card
+
+
+def test_position_card_has_no_ladder_line_when_budget_exhausted(env):
+    env()
+    _write_bars("SYN", 115.0)
+    b = _budget(0.0, exhausted=True)
+    b["ladder"] = pb.position_ladder("SYN", SYN_CFG, b, {"agent": {}})
+    item = {"ticker": "SYN", "qty": 10.0, "current_price": 95.0, "avg_cost": 85.0,
+            "is_option": False, "synthetic": False, "zone_hints": []}
+    assert "阶梯 [" not in pb.build_position_card(item, SYN_CFG, b, None)
+
+
+def test_position_ladder_carries_the_structure_tier_and_card_prints_it(env):
+    """持仓加仓票与 watchlist 票同一把排序尺：阶梯下一行显示结构位。
+    只排序 —— 阶梯里的价位/股数与没有它时逐字相同。"""
+    env()
+    _write_bars("SYN", 115.0)
+    b = _budget(1000.0)
+    b["ladder"] = pb.position_ladder("SYN", SYN_CFG, b, {"agent": {}}, today="2030-01-21")
+    assert b["ladder"]["dow"]["tier"] in (1, 2, 3) and "·" in b["ladder"]["dow"]["cn"]
+    assert [t["price"] for t in b["ladder"]["tiers"]] == [100.0, 90.0, 75.0]
+    item = {"ticker": "SYN", "qty": 10.0, "current_price": 95.0, "avg_cost": 85.0,
+            "is_option": False, "synthetic": False, "zone_hints": []}
+    card = pb.build_position_card(item, SYN_CFG, b, None)
+    lines = card.splitlines() if isinstance(card, str) else list(card)
+    i = next(k for k, ln in enumerate(lines) if "阶梯 [normal]" in ln)
+    assert lines[i + 1].startswith("结构位 ") or any("结构位 " in ln for ln in lines[i + 1:i + 3])

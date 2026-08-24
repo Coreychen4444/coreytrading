@@ -53,8 +53,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
-from quant.core import book, earnings  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓)
-from quant.core.holdings import is_traded  # noqa: E402
+from quant.core import book, dow, earnings  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓 + 短期道氏排序键)
+from quant.core.holdings import is_traded  # noqa: E402  (参考票判据单一真源)
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (# noqa: E402
@@ -373,27 +373,29 @@ def reclaimed_gate_of(agent: dict, today: str,
 
     返回 {"gate", "anchor_close", "anchor_atr", "since"} — build_ladder 用冻结锚。
 
-    判据三条 (都必须成立; ③ = 用户  收窄「仅针对单日强势突破 gate 后
-    的参与权, 其他情况照常按照 zone」):
+    判据四条，全部必须成立：
       ① `current_regime.since` 在 repair_reclaim_days 个**交易日**内 (挂单有效期,
          ladder_entry 采纳参数; ledger V3 : 交易日口径, 数 kline bars)。
       ② `last_regime.repair_gate.level` 存在 —— 刚被清掉的那道线。
       ③ **repair_gate.fastlane 标记**—— 转移机自己判的「单日强势突破」(首日+幅度
          +量腿+①域四条, `regime_transition._fastlane`), apply_transition 落卡。
          ×2 慢磨转移落 False; 标记缺失 (fastlane 前的历史转移) = 不给。
-         同日纠偏第二版 (用户「fastlane 落地时就该同步」): 首版拿 closes 重推
-         "单日过线"是弱化版签名 (不含幅度/量腿/域, days=1 gate 的普通转移会误判)
-         —— 判别式必须与转移机同一份, 不自带第二实现。
+         消费侧不得从 closes 重推弱化版签名；判别式必须与转移机同一份。
+      ④ **图没有在转移之后重画过** (`zones.anchored_on.date` ≤ since) —— 冻结锚
+         与地板都是转移那天的结构产物; 全图重画 = 结构被重新评估, 入场带归新
+         z1/z2 (照常 zone ladder)。否则旧冻结锚可能高于重画后的 no-chase，
+         让限价单在错误的结构图上立即成交。
 
-    锚**冻结在 close@since / ATR20@since**: 回测 ANCHOR 构造 = 破位日入场, 此前
-    live 每日拿最新 close 重算 = 回测没测过的追价 —— NVDA 转移 8 日后首档仍锚
-    当日 close 223.96 (高出自家 no_chase 216.5), LITE 890 vs 800 同病。
-    参与权是突破那一天的价格, 不随后续上涨漂移。
+    锚**冻结在 close@since / ATR20@since**：参与权是突破当日的价格，
+    不随后续上涨漂移。
     """
     cur = (agent or {}).get("current_regime") or {}
     since = str(cur.get("since") or "")[:10]
     if not since or not rows or str(today)[:10] < since:
         return None
+    z_anchor = str(((agent.get("zones") or {}).get("anchored_on") or {}).get("date") or "")[:10]
+    if z_anchor and z_anchor > since:
+        return None       # ④ 转移后全图重画过 → 新图接管, 照常 zone ladder
     rg = ((agent.get("last_regime") or {}).get("repair_gate") or {})
     gate = coerce_float(rg.get("level"))
     if gate is None or not rg.get("fastlane"):
@@ -585,6 +587,22 @@ def _skhy_premium_line() -> Optional[str]:
         if pm is not None else None
 
 
+def dow_priority(rows: List[dict]) -> dict:
+    """短期道氏排序键 (core/dow.priority_of_bars): 日线级 + 周线级 (走完的周)。"""
+    if not rows:
+        return {"tier": 3, "short": "末位", "cn": "末位·方向未定", "sort_key": (3, 3),
+                "weekly_cn": None, "stage_cn": dow.STAGE_CN[(None, 0)]}
+    return dow.priority_of_bars(rows, technical.resample_weekly(rows))
+
+
+def dow_line(pr: dict) -> str:
+    """「结构位」行 —— 清单排序的依据要印在票的块里, 排序才可解释。"""
+    stage = str(pr.get("stage_cn") or "")
+    detail = stage.split("（", 1)[1].rstrip("）") if "（" in stage else stage
+    return (f"结构位 {pr['cn']}" + (f" ｜ {detail}" if detail else "")
+            + (f" ｜ 周线级 {pr['weekly_cn']}" if pr.get("weekly_cn") else ""))
+
+
 def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
                     event_day: bool = False, reentry_ref: Optional[float] = None,
                     usage: Optional[dict] = None,
@@ -615,8 +633,11 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
         "constraints": read_constraints(agent),
         "reentry_ref": reentry_ref,
     }
-    # 卡片约束**无条件播报**—— 此前只在 verdict==WAIT 时打印 card_gates,
-    # GO 时整段消失, 恰好是最需要看到卡片约束的时刻 (LITE)。
+    # 卡片约束无条件播报；短期道氏结构位是盘前清单的第一排序键，
+    # 只排序，不改 verdict /
+    # cap / 股数 (退出侧回测裁定不接退出栈, design §5.1; 它在本仓的位置是「谁先挂」)。
+    out["dow"] = dow_priority(rows)
+    out["lines"].append(dow_line(out["dow"]))
     out["lines"].extend(constraint_lines(out["constraints"], today))
     out["regime_gate"] = regime_gate(agent)
     out["lines"].extend(regime_lines(agent))
@@ -825,6 +846,8 @@ def _summary_line(r: dict) -> str:
         # 档位不再由域决定 (二次定版): 一张连过两道 gate 却没买过的
         # 候选卡就是 gate2 —— 旧的写死 "(R1)" 会在一览上把 4% 的计划标成 2.5% 的。
         seg += f"(gate{(r.get('caps') or {}).get('gate_no') or 1})"
+        if r.get("dow"):
+            seg += f"·{r['dow']['short']}"          # 结构位 = 清单第一排序键
     tail = None
     if r["verdict"] == "PLAN" and r.get("ladder"):
         parts = []
@@ -868,7 +891,10 @@ def render(results: List[dict], nav: Optional[float], today: str,
            reentry_only: Optional[Dict[str, float]] = None) -> str:
     order = {"PLAN": 0, "STALE": 1, "NEEDS_CARD": 2, "VETO": 3}
     icon = _ICON
-    ordered = sorted(results, key=lambda x: order.get(x["verdict"], 9))
+    # verdict 之内按短期道氏结构位排：优先 = 上涨推进中/反转向上，
+    # 次位 = 观察期, 末位 = 下跌推进中; 同档周线级打平局)。只排序, 不改任何块内数字。
+    ordered = sorted(results, key=lambda x: (order.get(x["verdict"], 9),
+                                             tuple((x.get("dow") or {}).get("sort_key") or (9, 9))))
     lines = [f"📥 入场执行计划 {today} (entry_guard)"
              + (f" | NAV ${nav:,.0f}" if nav else "")]
     lines.extend(usage_txt or [])
@@ -883,6 +909,8 @@ def render(results: List[dict], nav: Optional[float], today: str,
         head += f" — {r['verdict']}"
         if r["verdict"] == "PLAN":
             head += f"(gate{(r.get('caps') or {}).get('gate_no') or 1})"
+            if r.get("dow"):
+                head += f"·{r['dow']['short']}"
         if r.get("moomoo_listed") is False:
             head += " [moomoo 已移出]"
         lines.append(head)

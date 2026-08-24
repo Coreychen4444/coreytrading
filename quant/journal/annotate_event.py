@@ -197,6 +197,12 @@ def main() -> int:
     ap.add_argument("--no-derive", action="store_true",
                     help="关掉自动推导 (只写显式传入的字段)")
     ap.add_argument("--zone-at-fill", choices=sorted(ZONE_AT_FILL))
+    ap.add_argument("--auth-cap", type=float, default=None,
+                    help="人工裁定章: 成交时授权 cap 占 NAV (如 0.4), 须与 --auth-gate 成对。"
+                         "机械推导读的是卡片**当前**状态, 给历史成交补章会发生时点错位；"
+                         "该参数是人工核对成交时授权事实后的显式写回通道")
+    ap.add_argument("--auth-gate", type=int, default=None,
+                    help="人工裁定章: 成交时档位 gate_no (与 --auth-cap 成对)")
     ap.add_argument("--notes-add", default="")
     ap.add_argument("--score", choices=sorted(SCORE_SET))
     ap.add_argument("--phase", choices=["entry", "exit", "episode"], default="episode")
@@ -222,16 +228,39 @@ def main() -> int:
     # 问题给出不同答案 = 又一次"副本会分叉"; 规则必须在两处同形。
     is_entry = (target.get("event_type") == "fill"
                 and str(target.get("side", "")).upper() == "BUY")
+
+    # 人工裁定章 (--auth-cap/--auth-gate): 「推不出来 = 留空归人判」判完之后的
+    # 写回通道：人工核对完成后若 auth 仍为空，fill_untagged 会持续点名。
+    # 裁定值 = 人核对**成交时点**的授权事实后显式给出, 不走机械推导 (它读卡片
+    # 当前状态, 对多天前的成交是错误时点 —— docstring ⚠️ 说的就是这个)。
+    manual_auth = None
+    if a.auth_cap is not None or a.auth_gate is not None:
+        if a.auth_cap is None or a.auth_gate is None:
+            raise SystemExit("[annotate] --auth-cap 与 --auth-gate 必须成对给出")
+        if not is_entry:
+            raise SystemExit("[annotate] auth 只对 BUY fill 有语义 (入场授权快照)")
+        if target.get("auth"):
+            raise SystemExit(f"[annotate] 事件已有 auth 章 {target.get('auth')} — "
+                             "不覆写 (重跑注解不该改历史判断)")
+        manual_auth = {"cap_pct_nav": a.auth_cap, "gate_no": a.auth_gate,
+                       "stamped_at": et_today()}
+
     if not a.no_derive:
         cards = _cards()
         if not tier and not target.get("tier"):
             tier, why = derive_tier(tkr, cards)
             print(f"[annotate] tier 推导 → {tier} ({why})")
-        if is_entry and not target.get("auth") and not target.get("classification"):
+        if (is_entry and manual_auth is None
+                and not target.get("auth") and not target.get("classification")):
             auth, why = derive_auth(tkr, cards, et_today())
             print(f"[annotate] auth 推导 → {auth or '(留空)'} ({why})")
 
-    if auth and is_entry:
+    if manual_auth:
+        auth = manual_auth
+        print(f"[annotate] auth 人工裁定章 → {auth} — 跳过 worksheet 对账 "
+              "(机械章声明「规则内一轮 ladder」才要 worksheet; 裁定章的对账义务在 "
+              "scores.jsonl 评分 + notes 判定记录, 缺了会被复盘看见)")
+    elif auth and is_entry:
         ok, msg = check_decision(target, a.decision_ref or None)
         if not ok:
             raise SystemExit(msg)

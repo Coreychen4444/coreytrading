@@ -186,8 +186,13 @@ def test_digest_of_the_real_book_fits_one_message_and_a_big_book_still_ships(rep
     所以第二半钉的是 —— 超限时 `tg_notify.split_message` 必须能在**票的边界**
     上拆开，且每条都合规。
     """
-    assert len(CR.digest([report] * 11)) < TG_LIMIT
-    parts = tg.split_message(CR.digest([report] * 20))
+    # 第五行「结构」进来后全书一度不是一条装得下；只剩结构行时又装得下 ——
+    # 保证不跟着行宽走：**单只票的块**远小于上限（拆条永远有边界可拆），且把票数堆到必然
+    # 越界时，拆出来的每条合规、整块不裂。票数由块长算出，不写死。
+    one = CR.digest([report])
+    assert tg._tg_len(one) < TG_LIMIT // 4
+    n = TG_LIMIT // tg._tg_len("\n".join(CR.digest_block(report))) + 2
+    parts = tg.split_message(CR.digest([report] * n))
     assert len(parts) > 1 and all(tg._tg_len(p) <= TG_LIMIT for p in parts)
     assert all("━━" in p for p in parts), "拆出来的每条都该带完整的票块，不是半只票"
 
@@ -197,62 +202,70 @@ def test_digest_of_the_real_book_fits_one_message_and_a_big_book_still_ships(rep
 BANISHED = ("收盘", "涨跌", "zone", "cap", "no_chase", "授权")
 
 
-def test_digest_carries_only_the_four_things_asked_for(report):
-    """力果 / 形态(含阶段) / 后续倾向 / 潜在机会(只说假设) —— 别的都不要。"""
-    body = "\n".join(ln for ln in CR.digest([report]).splitlines()
-                     if not ln.startswith(("[FYI]", "形态阶段", "倾向三栏", "机会 = ")))
-    leaked = [w for w in BANISHED if w in body and w != "收盘"]   # "收盘价"没了但"收盘站上颈线"是确认条件
+def test_digest_carries_only_the_structure_line(report):
+    """扫描表 = 每票「票头 + 一行短期道氏结构」，别的都不要。
+
+    力果 / 形态 / 倾向 / 机会留在详情页；结构行也不许带 zone / cap / 授权。
+    """
+    out = CR.digest([report])
+    body = "\n".join(ln for ln in out.splitlines()
+                     if not ln.startswith(("[FYI]", "结构 = ", "顺序 = ")))
+    leaked = [w for w in BANISHED if w in body and w != "收盘"]
     assert not leaked, f"扫描表里漏进了不该有的东西: {leaked}"
-    assert "力果" in body and "形态" in body and "倾向" in body
+    for gone in ("力果", "形态", "倾向", "机会"):
+        assert gone not in body, f"「{gone}」退回详情页了，不该回流到推送: {body}"
+    block = CR.digest_block(report)
+    assert len(block) == 2 and block[0].startswith("━━ TEST ━━")
+    assert block[1] == CR.dow_digest_line(report["structure"]["dow"], label=False)
+    assert not block[1].startswith("结构 "), "票头下面只有这一行，标签就是重复"
 
 
-def test_digest_says_what_the_continuation_continues(report):
-    """用户：「延续的话是延续上涨还是延续下跌还是延续震荡」——
-    光写「延续 3」等于让读的人自己回去翻结构。"""
+def test_detail_says_what_the_continuation_continues(report):
+    """延续标签必须说明延续上涨、下跌还是震荡。"""
     for trend, cn in (("up", "延续上涨"), ("down", "延续下跌"), ("transition", "延续震荡")):
         r = dict(report)
         r["structure"] = {**report["structure"], "daily": {**report["structure"]["daily"],
                                                            "trend": trend}}
-        assert cn in "\n".join(CR.digest_block(r))
+        assert cn in CR.render(r)
 
 
-def test_digest_hypotheses_come_from_the_same_builder_as_the_detail(report):
+def test_detail_hypotheses_come_from_the_same_builder(report):
     """机会段 = `pattern_hypotheses` 的输出，一字不改 —— 抄第二遍的那天，
-    扫描表说的确认线和详情说的就会开始各说各话。"""
+    两处说的确认线就会开始各说各话。（推送里已没有机会段，详情页是唯一消费者。）"""
     atr = report["structure"].get("atr20")
-    hyps = CR.pattern_hypotheses(report["patterns"], atr)
-    block = "\n".join(CR.digest_block(report))
-    for h in hyps:
-        assert h in block
-        assert h in CR.opportunity(report["structure"], report["patterns"])["items"]
+    items = CR.opportunity(report["structure"], report["patterns"])["items"]
+    for h in CR.pattern_hypotheses(report["patterns"], atr):
+        assert h in items
 
 
-def test_digest_sorts_by_distance(report):
-    """导航的排序 = 先看谁已经破线、再看谁快到线。字母序对导航毫无意义。"""
-    def mk(tk, state, confirm, chg):
+def test_digest_sorts_by_dow_priority(report):
+    """导航的顺序 = 与盘前挂单清单同一把尺（`dow.priority`）：上涨推进中 → 观察期 → 下跌，
+    同档周线级上涨先于下跌。字母序对导航毫无意义；形态距离那套随四件退役。"""
+    def mk(tk, trend, phase, weekly=None):
         r = dict(report, ticker=tk)
-        r["price_action"] = {**report["price_action"], "chg_pct": chg, "close": 100.0}
-        r["structure"] = {**report["structure"], "atr20": 10.0}
-        r["patterns"] = [{"name": "DBOT", "cn": "双底", "direction": "bullish",
-                          "state": state, "confirm_if": "c", "invalidate_if": "i",
-                          "evidence": "e", "window": 120, "lo_calibrated": False,
-                          "confirm_level": confirm, "key_level": confirm}]
+        r["structure"] = {**report["structure"], "dow": _dv(trend, phase, weekly=weekly)}
         return r
-    out = CR.digest([mk("FAR", "shaped", 130.0, 0.1),      # 差 3N
-                     mk("NEAR", "shaped", 105.0, 0.1),     # 差 0.5N
-                     mk("BROKE", "triggered", 100.0, 0.1)])
-    assert out.index("BROKE") < out.index("NEAR") < out.index("FAR")
+    wk_up = {"trend": "up", "phase": 0, "stage_cn": "上涨·推进中"}
+    wk_dn = {"trend": "down", "phase": 0, "stage_cn": "下跌·推进中"}
+    out = CR.digest([mk("DOWN", "down", 0),
+                     mk("OBS", "up", 2),
+                     mk("RUN_WKDN", "up", 0, wk_dn),
+                     mk("RUN_WKUP", "up", 0, wk_up)])
+    assert (out.index("RUN_WKUP") < out.index("RUN_WKDN")
+            < out.index("OBS") < out.index("DOWN"))
 
 
 def test_digest_never_silently_drops_a_ticker(report):
-    """形态状态是会长的（Lo 族还有一半没实现）。一个没见过的 state 不能让整张表
-    崩掉（那天一条 TG 都不会到），也不能让那只票静默消失。"""
+    """形态状态是会长的（Lo 族还有一半没实现），道氏视图也可能缺（K 线不足）。
+    哪种都不能让整张表崩掉（那天一条 TG 都不会到），也不能让那只票静默消失。"""
     r = dict(report, ticker="NEWSTATE")
     r["patterns"] = [{"name": "X", "cn": "新形态", "state": "brand_new",
                       "direction": "bullish", "confirm_if": "c", "invalidate_if": "i",
                       "evidence": "e", "window": 120, "lo_calibrated": False}]
-    out = CR.digest([r])
-    assert "NEWSTATE" in out and "新形态" in out
+    nodow = dict(report, ticker="NODOW")
+    nodow["structure"] = {**report["structure"], "dow": None}
+    out = CR.digest([r, nodow])
+    assert "NEWSTATE" in out and "NODOW" in out and "方向未定（K 线不足）" in out
 
 
 def _pat(cn, name="DBOT", **kw):
@@ -287,38 +300,6 @@ def test_merge_happens_before_truncation():
         [_pat("收敛三角底", "TBOT"), _pat("双底"),
          _pat("扩散底", "BBOT", confirm_level=260.0)], 8.61)
     assert len(out) == 2 and "扩散底" in out[1]
-
-
-def test_digest_shows_distance_only_when_not_triggered(report):
-    """`●已破线(5.1N)` 会被读成「还差 5.1N」—— 同一个括号两种含义 = 每天误读一次。"""
-    base = dict(report)
-    p = {"name": "DBOT", "cn": "双底", "direction": "bullish", "state": "triggered",
-         "confirm_if": "c", "invalidate_if": "i", "evidence": "e", "window": 120,
-         "lo_calibrated": False, "confirm_level": 50.0, "key_level": 50.0}
-    base["patterns"] = [p]
-    assert "距确认" not in "\n".join(CR.digest_block(base))
-    base["patterns"] = [{**p, "state": "shaped"}]
-    assert "距确认" in "\n".join(CR.digest_block(base))
-
-
-def test_digest_shows_the_pattern_stage_in_words():
-    """形态阶段要写成字（"已破确认线"），不能只留一个 ● —— 记号是给扫的，
-    字是给读的；2026-08-13 起扫描表是唯一那条推送，读的人没有第二处可查。"""
-    base = dict(report_stage_fixture())
-    txt = "\n".join(CR.digest_block(base))
-    assert "○双顶" in txt and "形状已成立" in txt
-    assert "●" not in txt.split("形态", 1)[1].split("\n")[0].split("（")[1]   # 记号不重复出现
-
-
-def report_stage_fixture():
-    return {"ticker": "X", "volume": {"effort": "高力", "result": "大果"},
-            "structure": {"daily": {"trend": "down"}, "atr20": 10.0},
-            "price_action": {"close": 100.0, "chg_pct": -1.0},
-            "posture": {"continuation": [], "range": [], "reversal": []},
-            "patterns": [{"name": "DTOP", "cn": "双顶", "direction": "bearish",
-                          "state": "shaped", "confirm_if": "c", "invalidate_if": "i",
-                          "evidence": "e", "window": 120, "lo_calibrated": False,
-                          "confirm_level": 95.0, "key_level": 95.0}]}
 
 
 def test_container_patterns_never_assert_a_side():
@@ -541,3 +522,200 @@ def test_stale_judge_failure_does_not_break_the_read(monkeypatch, tmp_path):
     monkeypatch.setattr(CR, "EARNINGS_CALENDAR_PATH", tmp_path / "nope.json")
     CR._STALE_CACHE.clear()
     assert CR.earnings_stale_cards("2026-08-12") == {}
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. 短期道氏
+# ══════════════════════════════════════════════════════════════
+
+def _dv(trend="up", phase=0, **over):
+    """一张短期道氏视图（dow_block 的产物）—— 直接造字典，测的是渲染与归栏。"""
+    from quant.core.dow import STAGE_CN
+    up = trend == "up"
+    base = {"trend": trend, "phase": phase, "labels": "HH+HL" if up else "LH+LL",
+            "stage_cn": STAGE_CN[(trend, phase)],
+            "bars_in_phase": 2, "candidate": None, "leg_volume": None, "obs_start": None,
+            "last_resolution": None, "recent_resolution": None, "effort": {},
+            "retrace": None, "swings": [],
+            "lines": ({"imp_level": {"level": 120.0, "pct": 14.0, "n": 2.8},
+                       "trigger_ref": {"level": 104.0, "pct": -1.0, "n": 0.2},
+                       "prev_ret": {"level": 100.0, "pct": -5.0, "n": 1.0}} if phase == 0 else
+                      {"resume_level": {"level": 120.0, "pct": 14.0, "n": 2.8},
+                       "obs_level": {"level": 96.0, "pct": -8.6, "n": 1.7},
+                       "terminate_level": ({"level": 96.0, "pct": -8.6, "n": 1.7}
+                                           if phase >= 2 else None),
+                       "cnt_level": ({"level": 112.0, "pct": 6.7, "n": 1.3} if phase >= 2 else None),
+                       "prev_ret": {"level": 100.0, "pct": -5.0, "n": 1.0}})}
+    base.update(over)
+    return base
+
+
+def test_structure_block_carries_the_short_term_dow_view(report):
+    dv = report["structure"]["dow"]
+    for k in ("trend", "phase", "stage_cn", "labels", "lines", "recent_resolution"):
+        assert k in dv, k
+    assert "短期道氏" in CR.render(report)
+
+
+def test_dow_digest_line_says_phase_and_the_line_to_watch():
+    """一行要答三件事：第几步 / 要看哪条线 / 离多远。"""
+    l0 = CR.dow_digest_line(_dv("up", 0))
+    assert "推进中 HH+HL" in l0 and "lsh 120" in l0 and "阴线收破104=观察①" in l0
+    ln1 = CR.dow_digest_line(_dv("up", 1, obs_start={"date": "2026-08-18", "close": 99, "broke": 100},
+                                 candidate={"role": "lsl", "price": 95.0, "date": "2026-08-20",
+                                            "confirm_if": "一根阳线收上 101"}))
+    assert "终止观察①" in ln1 and "08-18阴线破坏" in ln1 and "候选lsl95(一根阳线收上 101即成形)" in ln1
+    ln2 = CR.dow_digest_line(_dv("up", 2))
+    assert "终止观察②" in ln2 and "lsl 96 已成形" in ln2 and "看lsh 120" in ln2 and "跌破96=终止确认" in ln2
+    ln3 = CR.dow_digest_line(_dv("up", 3))
+    assert "终止观察③" in ln3 and "LH 112 已定格" in ln3 and "跌破96" in ln3 and "终止确认" in ln3
+    dn = CR.dow_digest_line(_dv("down", 3))
+    assert "止跌观察③" in dn and "HL 112 已定格" in dn and "站上96" in dn and "反转确认" in dn
+    for ln in (l0, ln1, ln2, ln3, dn):
+        assert not any(w in ln for w in BANISHED)
+
+
+def test_dow_digest_line_spells_out_which_way_the_prior_pivot_broke():
+    """上涨里是回调跌破前 HL，下跌里是反弹站上前 LH；动词须带方向。"""
+    up = CR.dow_digest_line(_dv("up", 2, retrace={"pct": 1.3, "broke_prev_ret": True}))
+    assert "回调已跌破前HL 100(整段吐回)" in up and "已破前HL" not in up
+    dn = CR.dow_digest_line(_dv("down", 2, retrace={"pct": 1.3, "broke_prev_ret": True}))
+    assert "反弹已站上前LH 100(整段收复)" in dn and "跌破前LH" not in dn
+
+
+def test_recent_termination_is_a_discretion_point_never_an_order():
+    """终止确认是裁量复核点；stop 仍是硬线，判读层不下裁决。"""
+    struct = {"daily": {"trend": "down"}, "weekly": None, "regime": {"cap_pct_nav": 0.4},
+              "next_gate": None, "zone_position": None, "walls": {},
+              "dow": _dv("down", 0, recent_resolution={"type": "terminate", "date": "2026-08-20",
+                                                         "bars_ago": 1, "from_phase": 3,
+                                                         "cn": "趋势终止确认（LH+LL）→ 转下跌"})}
+    txt = " ".join(CR.opportunity(struct, [])["items"])
+    assert "🔻" in txt and "裁量" in txt and "stop" in txt and "不替它下裁决" in txt
+    assert not re.search(r"\d+\s*股", txt) and "$" not in txt
+    # 下跌终止（见底确认）= 修复早信号，不改变 cap
+    struct["dow"] = _dv("up", 0, recent_resolution={"type": "terminate", "date": "2026-08-14",
+                                                      "bars_ago": 5, "from_phase": 3,
+                                                      "cn": "下跌终止确认（HL+HH）→ 转上涨"})
+    txt = " ".join(CR.opportunity(struct, [])["items"])
+    assert "🔺" in txt and "不改变 cap" in txt
+
+
+def test_old_termination_is_history_not_opportunity():
+    """超过一周（RECENT_BARS）的终止不再进机会段 —— 那是历史，不是现在的裁量点。"""
+    struct = {"daily": {"trend": "down"}, "weekly": None, "regime": {"cap_pct_nav": 0.4},
+              "next_gate": None, "zone_position": None, "walls": {},
+              "dow": _dv("down", 0, last_resolution={"type": "terminate", "bars_ago": 20},
+                         recent_resolution=None)}
+    assert not any("短期道氏" in x for x in CR.opportunity(struct, [])["items"])
+
+
+def test_observation_phase_lists_both_lines_in_opportunity():
+    struct = {"daily": {"trend": "up"}, "weekly": None, "regime": {"cap_pct_nav": 0.4},
+              "next_gate": None, "zone_position": None, "walls": {}, "dow": _dv("up", 2)}
+    txt = " ".join(CR.opportunity(struct, [])["items"])
+    assert "观察期②" in txt and "恢复线 120" in txt and "终止确认线 96" in txt
+
+
+def test_dow_votes_land_in_the_right_posture_column():
+    """推进中且与快照同向 → 延续；观察期 → 反转栏；②③夹在两线之间 → 震荡栏；
+    推进中但与快照反向 → 反转栏（序列与快照打架本身是信息）。"""
+    base = {"daily": {"trend": "up"}, "weekly": None, "walls": {}, "zone_position": None}
+    ind = {"above_ma": [], "range_contraction": None, "divergence": None}
+    ps = CR.posture({**base, "dow": _dv("up", 0)}, {}, {}, ind, [])
+    assert any("短期道氏推进中" in x for x in ps["continuation"])
+    ps = CR.posture({**base, "dow": _dv("up", 2)}, {}, {}, ind, [])
+    assert any("终止观察②" in x for x in ps["reversal"])
+    assert any("夹在 96 与 120 之间" in x for x in ps["range"])
+    ps = CR.posture({**base, "dow": _dv("down", 0)}, {}, {}, ind, [])
+    assert any("与 5 根分形快照 up 相反" in x for x in ps["reversal"])
+    assert not any("短期道氏推进中" in x for x in ps["continuation"])
+
+
+def test_retrace_depth_is_spelled_out():
+    """回撤深度要说人话，**动词带方向**：上涨 = 回调跌破前 HL（整段吐回），下跌 = 反弹站上前 LH
+    （整段收复）；过 2/3 = Rhea 次级折返上界。旧版两个方向都写「跌破」，下跌镜像是错的。"""
+    deep = "\n".join(CR.dow_lines(_dv("up", 2, retrace={"pct": 1.2, "broke_prev_ret": True})))
+    assert "回调已跌破前 HL 100" in deep and "上一段涨幅整段吐回" in deep
+    dn_lines = CR.dow_lines(_dv("down", 2, retrace={"pct": 1.2, "broke_prev_ret": True}))
+    note = next(x for x in dn_lines if "前 LH" in x)        # 只看回撤那一行（别的行本来就有「跌破=延续」）
+    assert "反弹已站上前 LH 100" in note and "上一段跌幅整段收复" in note and "跌破" not in note
+    two_thirds = "\n".join(CR.dow_lines(_dv("up", 2, retrace={"pct": 0.8, "broke_prev_ret": False})))
+    assert "Rhea" in two_thirds and "回调已达最后一段涨幅的 80%" in two_thirds
+    shallow = "\n".join(CR.dow_lines(_dv("up", 2, retrace={"pct": 0.3, "broke_prev_ret": False})))
+    assert "回调 = 最后一段涨幅的 30%" in shallow
+
+
+def test_dow_block_on_synthetic_example_reports_phase_and_effort(monkeypatch):
+    """端到端合成例走到观察②，破坏日带 RelVR 标签（量只做限定词）。"""
+    from tests.core.test_dow import RISE, PULLBACK, BOUNCE, _bars as _dbars
+    bars = _dbars(RISE + PULLBACK + BOUNCE)
+    monkeypatch.setattr(CR, "rel_volume", lambda b, t=None: (1.5, "n", False))
+    dv = CR.dow_block("TEST", bars, 2.0)
+    assert dv["phase"] == 2 and dv["effort"]["obs1"]["label"] == "高力"
+    assert dv["lines"]["terminate_level"]["level"] == 180 and dv["lines"]["resume_level"]["level"] == 200
+    assert dv["candidate"]["role"] == "LH" and dv["candidate"]["price"] == 190
+
+
+# ══════════════════════════════════════════════════════════════
+# 6. 嵌套周线级 / Rhea 回撤带 / 道氏线 × 墙
+# ══════════════════════════════════════════════════════════════
+
+def _wk(trend="up", phase=0):
+    from quant.core.dow import STAGE_CN
+    return {"trend": trend, "phase": phase, "stage_cn": STAGE_CN[(trend, phase)],
+            "labels": "HH+HL", "watch": {}, "last_resolution": None}
+
+
+def test_dow_block_runs_the_same_machine_on_completed_weeks(report):
+    """第二级 = 同一台机器跑走完的周 K：视图里必须有 weekly + nested。"""
+    dv = report["structure"]["dow"]
+    assert dv.get("weekly") and dv["weekly"]["trend"] in ("up", "down")
+    assert "stage_cn" in dv["weekly"]
+
+
+def test_nested_reading_turns_weekly_state_into_a_prior():
+    """周线级推进中 → 洗盘先验；周线级观察②③ → 两级共振；周线级下跌 → 大级别延续。
+    日线级没在观察期时只报周线级状态，不编先验。"""
+    base = _dv("up", 2)
+    assert CR.nested_reading({**base, "weekly": _wk("up", 0)})["key"] == "pullback_prior"
+    assert CR.nested_reading({**base, "weekly": _wk("up", 3)})["key"] == "both_obs"
+    dn = CR.nested_reading({**base, "weekly": _wk("down", 2)})
+    assert dn["key"] == "higher_down" and "大级别" in dn["cn"] and "趋势延续" in dn["cn"]
+    quiet = CR.nested_reading({**_dv("up", 0), "weekly": _wk("up", 0)})
+    assert quiet["key"] == "quiet" and "先验" not in quiet["cn"]
+    # 下跌侧镜像同样只给结构先验，不带未经公开验证的频率。
+    mirror = CR.nested_reading({**_dv("down", 2), "weekly": _wk("down", 0)})
+    assert mirror["key"] == "bounce_prior" and "%" not in mirror["cn"]
+
+
+def test_retrace_band_line_is_descriptive_only():
+    dv = _dv("up", 2, retrace_at_form={"pct": 0.27, "band": "<1/3",
+                                       "band_cn": "轻微回调·不到次级折返"})
+    txt = "\n".join(CR.dow_lines(dv))
+    assert "回撤带 <1/3" in txt and "lsl 成形时回撤 27%" in txt
+    assert "终止率" not in txt and "n=" not in txt
+    assert "回撤带" in CR.dow_digest_line(dv)
+
+
+def test_dow_lines_are_crossed_with_walls_within_a_quarter_atr():
+    """lsl 落在 ×3 pivot 上 ≠ 落在真空里：0.25N 邻域（cluster_pivots 同口径）内的墙要对上。"""
+    dv = _dv("up", 2, obs={"price": 96.0}, imp={"price": 120.0}, cnt={"price": 112.0},
+             ret={"price": 100.0})
+    walls = [{"level": 96.3, "kind": "pivot", "detail": "×3 [high+low]"},
+             {"level": 110.0, "kind": "HVN", "detail": "20% 成交堆积"}]
+    sup = CR.dow_line_support(dv, walls, 2.0)
+    assert "lsl" in sup and sup["lsl"]["wall"] == 96.3 and sup["lsl"]["gap_n"] == 0.15
+    assert "LH" not in sup                                  # 112 与 110 差 1N，不算挨着
+    txt = "\n".join(CR.dow_lines({**dv, "line_support": sup}))
+    assert "线上有货" in txt and "lsl 96 ← pivot 96.3" in txt
+    bare = "\n".join(CR.dow_lines({**dv, "line_support": {}}))
+    assert "真空里的线" in bare
+
+
+def test_digest_carries_the_weekly_level_token():
+    dv = _dv("up", 2, weekly=_wk("up", 0))
+    dv["nested"] = CR.nested_reading(dv)
+    ln = CR.dow_digest_line(dv)
+    assert "周线级上涨·推进中(洗盘先验)" in ln
+    assert not any(w in ln for w in BANISHED)

@@ -79,7 +79,26 @@ def test_notes_are_owned_vocabulary():
         assert prs._owned_note(owned), owned               # 裸 stop = 旧词, 认旧不写旧
     for manual in ("", "手动", "z1手动", "我的线", "nan", "stopX"):
         assert not prs._owned_note(manual), manual
-    assert len("stop:trail") <= 10 and len("stop:lock") <= 10  # moomoo note 上限 10 字符
+    for w in ("stop:trail", "stop:lock", "nochase"):
+        assert prs._note_width(w) <= prs.NOTE_WIDTH_MAX
+
+
+def test_owned_note_recognizes_merged_labels_segment_wise():
+    """并入形态 "a/b" 的每段都必须是系统词：
+    否则下轮对账把并入线当手动放过 (孤儿) 或把手动线误删 (越界), 两个方向都要钉。"""
+    for owned in ("trim/nochase", "z1:11%:2k/nochase", "stop:card/gate:cur",
+                  "gate:next/nochase"):
+        assert prs._owned_note(owned), owned
+    for manual in ("trim/我的备注", "nochase/买回提醒", "trim/", "/nochase"):
+        assert not prs._owned_note(manual), manual
+
+
+def test_note_width_counts_cjk_as_two():
+    """服务端限「20 个中文字符」= 40 半宽单位 (US.KO 实测: ascii×40 OK/×41 拒,
+    中×20 OK, 中×19+3A 拒) — 宽度函数按 2:1 折算。"""
+    assert prs._note_width("A" * 40) == 40 == prs.NOTE_WIDTH_MAX
+    assert prs._note_width("中" * 20) == 40
+    assert prs._note_width("中" * 19 + "AAA") == 41 > prs.NOTE_WIDTH_MAX
 
 
 def test_z1_note_carries_budget_for_today_members():
@@ -95,27 +114,27 @@ def test_z1_note_carries_budget_for_today_members():
     assert {d["note"] for d in lines2 if d["kind"] == "z1"} == {"z1"}
 
 
-def test_budget_format_stays_within_moomoo_note_limit():
-    """moomoo note 上限 10 字符; "z1:" 占 3 → 预算段 ≤7。比例+数值,
-    金额 round $50 防 NAV churn, ≥$1000 转 k。"""
+def test_budget_format_stays_within_note_budget_cap():
+    """预算段不超过 BUDGET_NOTE_MAX；金额 round $50，千元以上转 k。"""
     assert prs._fmt_budget(0.02, 22405) == "2%:450"
-    assert prs._fmt_budget(0.05, 22500) == "5%:1.1k"       # ≥$1000 转 k (用户)
-    assert prs._fmt_budget(0.05, 300000) == "5%:15k"       # ≥$10k 整 k
+    assert prs._fmt_budget(0.05, 22500) == "5%:1.1k"       # ≥$1000 转 k
+    assert prs._fmt_budget(0.05, 300000) == "5%:15k"       # 整千无小数位可显 (:g 去 .0)
     assert prs._fmt_budget(0.02, 1000) == "2%:50"          # 金额地板 $50
     for frac, nav in ((0.02, 22405), (0.05, 22500), (0.05, 300000),
                       (0.10, 22500), (0.15, 66000), (0.349, 21237), (0.40, 21237)):
-        assert len("z1:" + prs._fmt_budget(frac, nav)) <= 10, (frac, nav)
+        assert len("z1:" + prs._fmt_budget(frac, nav)) <= 3 + prs.BUDGET_NOTE_MAX, (frac, nav)
 
 
-def test_budget_format_degrades_precision_before_dropping_the_money():
-    """超 7 字符时先降 k 的精度, **最后**才丢金额 ()。
-
-    响铃那一刻能用的是钱, 比例只是它的来历。旧写法一超限就退成纯比例,
-    恰好在金额位数变大 (= 额度变大) 时把唯一可执行的那个数扔掉。
-    """
-    assert prs._fmt_budget(0.10, 22500) == "10%:2k"        # "10%:2.2k"(8) → 降精度
-    assert prs._fmt_budget(0.15, 66000) == "15%:10k"       # "15%:9.9k"(8) → 10k
-    assert prs._fmt_budget(0.349, 21237) == "35%:7k"       # gross binding 的实际 cap
+def test_budget_format_keeps_full_precision_after_relax():
+    """一位小数 k 保留，不降成整 k 或丢金额：
+    旧 7 字符 cap 下这三个都会被降级 ("10%:2k" / "15%:10k" / "35%:7k")。
+    降级阶梯保留为超 BUDGET_NOTE_MAX 的保险丝, 现实格式永不触发。"""
+    assert prs._fmt_budget(0.10, 22500) == "10%:2.2k"
+    assert prs._fmt_budget(0.15, 66000) == "15%:9.9k"
+    assert prs._fmt_budget(0.349, 21237) == "35%:7.4k"     # gross binding 的实际 cap
+    # 保险丝路径仍在: 荒谬宽的输入才会走到降级
+    fuse = prs._fmt_budget(0.35, 300_000_000_000)
+    assert len(fuse) <= prs.BUDGET_NOTE_MAX
 
 
 def test_budget_format_zero_room_is_not_papered_over_with_a_floor():
@@ -218,11 +237,11 @@ def test_z1_budget_is_the_actual_cap_not_the_card_percentage():
                   "zones": {"valid_until": "2026-08-18"}}}}}
     full = prs.z1_budgets({"tickers": {}}, wl, TODAY, nav=21237.0, quote_of=QUOTE,
                           veto_of=UP)
-    assert full == {"MSFT": "40%:8k"}                      # 空书 → 名义 = 实际 ($8,500)
+    assert full == {"MSFT": "40%:8.5k"}                    # 空书 → 名义 = 实际 ($8,500)
     squeezed = prs.z1_budgets({"tickers": {}}, wl, TODAY, nav=21237.0,
                               usage={"used_budget": 0.06, "used_gross": 0.75},
                               quote_of=QUOTE, veto_of=UP)
-    assert squeezed == {"MSFT": "35%:7k"}                  # gross 余额 binding
+    assert squeezed == {"MSFT": "35%:7.5k"}                # gross 余额 binding ($7,450 → 一位小数显 7.5k)
 
 
 def test_per_ticker_cap_keeps_priority_kinds():
@@ -306,7 +325,7 @@ def test_both_gates_are_drawn_in_both_buckets():
     assert all(d["pin"] for d in lines if d["note"].startswith("gate:"))
     # 备注必须能被认领, 否则对账把它当手动线 → 永不删 + 每轮重复添加
     assert all(prs._owned_note(d["note"]) for d in lines)
-    assert all(len(d["note"]) <= 10 for d in lines)      # moomoo note 上限
+    assert all(prs._note_width(d["note"]) <= prs.NOTE_WIDTH_MAX for d in lines)  # 服务端宽限
 
 
 def test_card_source_regime_has_no_current_gate():
@@ -395,24 +414,50 @@ def test_pinned_gate_wins_dedup_against_same_priced_reclaim_rung():
     assert [(d["note"], d.get("pin")) for d in lines] == [("gate:cur", True)]
 
 
-def test_collapse_same_price_keeps_the_higher_priority_kind_and_says_so():
-    """翻向后 gate:cur 可能与卡 stop 撞价同向 (NBIS 实况 175.1)。此前 plan_ops 的
-    dict 是后者覆盖 → 低优先级的 gate 反把 stop 顶掉且一声不响。"""
+def test_collapse_same_price_merges_labels_and_says_so():
+    """翻向后 gate:cur 可能与卡 stop 撞价同向；高优先级 kind 当 head，
+    被让位方标签并入，丢线不丢标签。"""
     desired = [
-        {"code": "US.NBIS", "ticker": "NBIS", "kind": "stop", "type": "PRICE_DOWN",
-         "value": 175.1, "note": "stop:card"},
-        {"code": "US.NBIS", "ticker": "NBIS", "kind": "gate", "type": "PRICE_DOWN",
-         "value": 175.1, "note": "gate:cur", "pin": True},
-        {"code": "US.NBIS", "ticker": "NBIS", "kind": "gate", "type": "PRICE_UP",
-         "value": 231.0, "note": "gate:next", "pin": True},     # 不同方向 → 不撞
+        {"code": "US.TST", "ticker": "TST", "kind": "stop", "type": "PRICE_DOWN",
+         "value": 100.0, "note": "stop:card"},
+        {"code": "US.TST", "ticker": "TST", "kind": "gate", "type": "PRICE_DOWN",
+         "value": 100.0, "note": "gate:cur", "pin": True},
+        {"code": "US.TST", "ticker": "TST", "kind": "gate", "type": "PRICE_UP",
+         "value": 130.0, "note": "gate:next", "pin": True},     # 不同方向 → 不撞
     ]
     kept, notes = prs.collapse_same_price(desired)
-    assert [d["note"] for d in kept] == ["stop:card", "gate:next"]
-    assert any("同价同向" in n and "该价位仍有线" in n for n in notes)
+    assert [d["note"] for d in kept] == ["stop:card/gate:cur", "gate:next"]
+    assert kept[0]["kind"] == "stop"                        # head = 高优先级 kind
+    assert prs._owned_note(kept[0]["note"])                 # 并入后仍可认领
+    assert any("同价同向" in n and "标签并入" in n for n in notes)
 
     # 顺序颠倒结果相同 (不是"谁在前谁赢")
     kept2, _ = prs.collapse_same_price([desired[1], desired[0]])
-    assert [d["note"] for d in kept2] == ["stop:card"]
+    assert [d["note"] for d in kept2] == ["stop:card/gate:cur"]
+
+
+def test_collapse_falls_back_to_yield_when_merge_impossible():
+    """并不进去的两种回退让位, 照旧播报「该价位仍有线」: ①同 kind 真重复
+    (reclaim 梯撞 gate:cur — 并入无新信息) ②宽度超 40 半宽单位。"""
+    dup = [
+        {"code": "US.X", "ticker": "X", "kind": "gate", "type": "PRICE_UP",
+         "value": 100.0, "note": "gate:cur", "pin": True},
+        {"code": "US.X", "ticker": "X", "kind": "gate", "type": "PRICE_UP",
+         "value": 100.0, "note": "gate"},
+    ]
+    kept, notes = prs.collapse_same_price(dup)
+    assert [d["note"] for d in kept] == ["gate:cur"]
+    assert any("该价位仍有线" in n for n in notes)
+
+    wide = [
+        {"code": "US.X", "ticker": "X", "kind": "z1", "type": "PRICE_UP",
+         "value": 100.0, "note": "z1:" + "9" * 33},          # 36 宽 + "/nochase" = 44 > 40
+        {"code": "US.X", "ticker": "X", "kind": "nochase", "type": "PRICE_UP",
+         "value": 100.0, "note": "nochase"},
+    ]
+    kept2, notes2 = prs.collapse_same_price(wide)
+    assert [d["kind"] for d in kept2] == ["z1"] and "/" not in kept2[0]["note"]
+    assert any("该价位仍有线" in n for n in notes2)
 
 
 def test_plan_ops_tolerates_stringly_typed_api_values():
@@ -574,7 +619,7 @@ def test_no_chase_line_is_drawn_in_both_buckets():
     assert nc["AMZN"]["value"] == 273.5
     assert all(prs._owned_note(d["note"]) for d in nc.values())
     assert {d["note"] for d in nc.values()} == {"nochase"}
-    assert len("nochase") <= 10, "moomoo note 上限 10 字符"
+    assert prs._note_width("nochase") <= prs.NOTE_WIDTH_MAX  # 全称不缩写
 
 
 def test_no_chase_is_not_pinned_but_does_not_disappear():
@@ -588,27 +633,48 @@ def test_no_chase_is_not_pinned_but_does_not_disappear():
     assert any("翻向" in note for note in notes)
 
 
-def test_no_chase_equal_to_trim_low_collapses_to_trim_and_says_so():
-    """单调律允许 no_chase == trim 下沿 —— 同价同向时留高优先级的 trim,
-    但那个价位仍然有线, 且必须播报 (只在持仓桶可能撞: watchlist 不画 trim)。"""
+def test_z1_budget_and_nochase_merge_after_orient():
+    """Synthetic collision: no_chase equals the z1 upper bound,
+    初始异侧 (z1 DOWN / nochase UP) 不撞, 现价在其下 → 翻向后同价同向 →
+    collapse 并入 "z1:11%:2k/nochase" — 预算 head 保留, 标签不丢。"""
+    desired = [
+        {"code": "US.TST", "ticker": "TST", "kind": "z1", "type": "PRICE_DOWN",
+         "value": 110.0, "note": "z1:11%:2k"},
+        {"code": "US.TST", "ticker": "TST", "kind": "nochase", "type": "PRICE_UP",
+         "value": 110.0, "note": "nochase"},
+    ]
+    oriented, _ = prs.orient_sides(desired, {"US.TST": 105.0})
+    assert {d["type"] for d in oriented} == {"PRICE_UP"}     # 都翻到现价上方侧
+    kept, notes = prs.collapse_same_price(oriented)
+    assert len(kept) == 1 and kept[0]["note"] == "z1:11%:2k/nochase"
+    assert kept[0]["kind"] == "z1" and prs._owned_note(kept[0]["note"])
+    assert any("标签并入" in n for n in notes)
+
+
+def test_no_chase_equal_to_trim_low_merges_into_trim_label():
+    """单调律允许 no_chase == trim 下沿 —— 同价同向时 trim 当 head, nochase
+    标签并入 "trim/nochase"（全称不缩写），且必须播报
+    (只在持仓桶可能撞: watchlist 不画 trim)。"""
     pos = {"tickers": {"XX": {"broker": {"qty": 3}, "agent": {"zones": {
         "stop_level": 500.0, "no_chase_above": 593.6,
         "trim_zone": [593.6, 601.0]}}}}}
     lines, notes = prs.desired_lines(pos, {"tickers": {}}, TODAY)
     at = [d for d in lines if d["value"] == 593.6]
     assert len(at) == 1 and at[0]["kind"] == "trim"
-    assert any("同价同向" in n and "nochase" in n for n in notes), "让位必须播报, 不静默"
+    assert at[0]["note"] == "trim/nochase" and prs._owned_note(at[0]["note"])
+    assert any("同价同向" in n and "nochase" in n for n in notes), "并入必须播报, 不静默"
 
 
-def test_no_chase_equal_to_gate_collapses_to_gate():
+def test_no_chase_equal_to_gate_merges_into_gate_label():
     """`gate == no_chase` 是正常设计 (core.structure: 「在追价上限处确认突破」) ——
-    撞价时留 gate (它是 pin 的状态转移轴), nochase 让位, 价位仍有线。"""
+    撞价时 gate 当 head (pin 的状态转移轴), nochase 标签并入 "gate:next/nochase"。"""
     wl = {"tickers": {"NVDA": {"moomoo_listed": True, "agent": {
         "zones": {"valid_until": "2099-01-01", "no_chase_above": 214.0},
         "next_regime": {"entry_gate": {"level": 214.0}}}}}}
     lines, notes = prs.desired_lines({"tickers": {}}, wl, TODAY)
     at = [d for d in lines if d["value"] == 214.0]
     assert len(at) == 1 and at[0]["kind"] == "gate" and at[0].get("pin")
+    assert at[0]["note"] == "gate:next/nochase" and prs._owned_note(at[0]["note"])
     assert any("同价同向" in n and "nochase" in n for n in notes)
 
 

@@ -348,14 +348,12 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
     if overdue:
         n = trading_days_after((str(b.get("time", ""))[:10] for b in bars),
                                overdue["date"])
-        old_stop = (f"{overdue['old_stop']:g}"
-                    if overdue.get("old_stop") is not None else "?")
-        new_stop = (f"{overdue['new_stop']:g}"
-                    if overdue.get("new_stop") is not None else "?")
-        L.append(f"  ⬇ {overdue['date']} 收盘破 stop 已降级 (旧 {old_stop} → 新 {new_stop}, "
-                 f"cap 0) D+{n} 未执行/未 override — 下表已是降级后的新图, "
-                 f"退出裁决仍悬 (执行平仓 / annotate --score 落 override)")
-    # 线名 = gate 的**结构身份**四分类 (换掉旧的 trend/lsh 两档启发式)。
+        olds = f"{overdue['old_stop']:g}" if overdue.get("old_stop") is not None else "?"
+        news = f"{overdue['new_stop']:g}" if overdue.get("new_stop") is not None else "?"
+        L.append(f"  ⬇ {overdue['date']} 收盘破 stop 已降级 (旧 {olds} → 新 {news}, "
+                 f"cap 0) D+{n} 未执行 — 下表已是降级后的新图, "
+                 f"退出裁决仍悬 (清仓, 无 override 路径; 未执行 = 规则外评 C 起步)")
+    # 线名 = gate 的**结构身份**四分类，替代旧的 trend/lsh 两档启发式。
     # 修复路径仍用 止跌/收复/修复 三词; 非修复路径分 突破线/箱体顶/新高线。
     st = technical.swing_structure(bars)
     # 🧭 结构 + 动态 lsh (v3 ⑤): 修复线权威读数与结构标签同行, 每票都渲染

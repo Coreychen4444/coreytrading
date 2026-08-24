@@ -31,6 +31,7 @@
                paths · env · io_json · timeutil · num · occ · schema · ledger
                sizing · structure · drift · technical · holdings
                episodes · book · earnings · sectors · patterns（形态判别式，Lo 2000 工序）
+               dow（短期道氏四步状态机，提供趋势终止观察与结构排序）
 
   research     验证层（可复用机械件/合成脚手架）—— 旁路，不参与实时决策
 ```

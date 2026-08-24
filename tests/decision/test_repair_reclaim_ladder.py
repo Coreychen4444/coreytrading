@@ -191,6 +191,19 @@ def test_reclaimed_gate_requires_rows_and_since_bar():
     assert eg.reclaimed_gate_of({}, "2026-08-06", rows) is None
 
 
+def test_reclaimed_gate_yields_after_post_transition_repaint():
+    """转移后的重画接管冻结锚；同日或更早的图仍允许 repair ladder。"""
+    rows = _rows_with_since()
+    repainted = {**AG, "zones": {"anchored_on": {"date": "2026-08-06"}}}
+    assert eg.reclaimed_gate_of(repainted, "2026-08-06", rows) is None
+    same_day = {**AG, "zones": {"anchored_on": {"date": "2026-08-05"}}}   # 转移当日补画 provisional
+    assert eg.reclaimed_gate_of(same_day, "2026-08-06", rows) is not None
+    pre_transition = {**AG, "zones": {"anchored_on": {"date": "2026-08-01"}}}
+    assert eg.reclaimed_gate_of(pre_transition, "2026-08-06", rows) is not None
+    no_anchor = {**AG, "zones": {}}                                       # legacy card without anchor
+    assert eg.reclaimed_gate_of(no_anchor, "2026-08-06", rows) is not None
+
+
 def test_reclaim_window_counts_trading_days_not_calendar_days():
     """钉**单位**不只钉数字 (ledger V3): repair_reclaim_days=10 数的是 kline bars。
     构造自然日 14 天 / 交易日恰 10 根的窗口 —— 自然日口径判超窗, 交易日口径在窗内,

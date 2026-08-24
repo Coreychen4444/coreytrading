@@ -285,7 +285,7 @@ def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
             "text": (f"🚨 {ticker} premium 硬 stop: mark {_fmt(mark)} ≤ 成本 {_fmt(avg_cost)} "
                      f"× {1 + p['opt_s1_stop']:.0%} = {_fmt(s1_level)}。"
                      f"行动【今日内】: 清仓 {qty:g} 张 — 这是资金管理线, 不看 underlying 在哪。"
-                     f"不执行必须写 override 进 journal。(期权退出栈 S1, 2026-08-10)")})
+                     f"无 override 路径；不执行 = 规则外评 C 起步。(期权退出栈 S1)")})
 
     # S2 时间 stop (锚 = 入场日 underlying close + 1×ATR20@入场)
     seed, armed = g.get("seed_close"), g.get("armed_date")
@@ -626,8 +626,8 @@ def evaluate(doc: Dict, guards: Dict, today: str,
                     "text": (f"🎯 {ticker} {hit['tier']} lot ({hit['qty']:g}张@{hit['cost']}) 过 G-01 "
                              f"{hit['level']} (mark {_fmt(mark)} ≥ {hit['threshold']}): "
                              f"行动【今日内】trim {hit['trim_pct']}% ≈ {hit['trim_qty']} 张。"
-                             f"let-winner-run 只减不清。不执行必须写 override 进 journal。(G-01)")})
-            # 亏损侧 overlay S1/S2/S4 + S3 advisory (终裁; 棘轮武装前的裸窗口)
+                             f"let-winner-run 只减不清。无 override 路径；不执行 = 规则外评 C 起步。(G-01)")})
+            # 亏损侧 overlay S1/S2/S4 + S3 advisory（终裁；棘轮武装前的裸窗口）
             ov_shots, ov_lines = option_loss_overlay(
                 ticker, g, mark, avg_cost, qty, dte, underlying, klines, p)
             one_shot.extend(ov_shots)
@@ -659,7 +659,7 @@ def evaluate(doc: Dict, guards: Dict, today: str,
                              f"剩余地板抬至保本 {_fmt(avg_cost)}"
                              + (f", 现价卖出仍锁 ≈ ${locked_gain:,.0f}" if locked_gain else "")
                              + f"。no-add lock ON (解除: {underlying} close > {_fmt(g['lock_ref_high'])})。"
-                             f"宏观大跌不豁免 — 想赌修复走重进协议。不执行必须写 override 进 journal。"
+                             f"宏观大跌不豁免 — 想赌修复走重进协议。无 override 路径；不执行 = 规则外评 C 起步。"
                              f"(trend-exit-system 棘轮)")})
             elif not r.get("fired_stage1") and mark < floor and stage == "breakeven":
                 # +50% 档破保本地板: 一段式直接清 (赢单不许变亏单)

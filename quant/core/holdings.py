@@ -132,11 +132,11 @@ def stamping_cards(positions_doc: dict, watchlist_doc: dict) -> dict:
     cannot displace an archived card. This pure function is shared by both writers.
     """
     def _dead_for_auth(body: dict) -> bool:
-        qty = float((body.get("broker") or {}).get("qty") or 0)
-        return qty == 0 and bool(body.get("exit_info"))
-        # 判据用 exit_info (close_reconcile 机器写) 不用 status (手工字段, 两个
-        # 方向都出过事); qty==0 无 exit_info 的 synthetic underlying 行不让位 ——
-        # 在持期权的正股卡仍归 positions 维护
+        return bool(body.get("exit_info"))
+        # ``exit_info`` is lifecycle-owned and survives a broker quantity refresh.
+        # Quantity cannot distinguish an archived card refreshed after re-entry
+        # from a promoted live card. A synthetic underlying row has no exit_info
+        # and therefore remains owned by positions.
 
     out = dict((watchlist_doc or {}).get("tickers") or {})
     for t, body in ((positions_doc or {}).get("tickers") or {}).items():

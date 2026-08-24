@@ -78,7 +78,7 @@ NOT_DOF_ARGNAMES = ("r", "timeout", "retries", "digits", "nd", "d", "delay",
 NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统可调选择
     "data/x_search:HOURS_CAP", "data/x_search:MAX_RESULTS_CAP",
     "data/x_search:MAX_RESULTS_FLOOR",           # API 与计费上限
-    "sync/price_reminder_sync:BUDGET_NOTE_MAX",  # moomoo note 10 字符硬限
+    "sync/price_reminder_sync:NOTE_WIDTH_MAX",   # moomoo note 服务端半宽单位硬限
     "sync/price_reminder_sync:MAX_PER_TICKER",
     "decision/level_map:PROFILE_SESSIONS_PER_DAY",  # 一天几根 60m bar = 事实
     "report/portfolio_brief:TOP_MOVERS_COUNT",   # 显示条数
@@ -115,6 +115,7 @@ CLASSIFY: dict[str, str] = {
     "core/sizing:GATE_RISK_CAPS": "fiat",          # 累计 gate 风险预算
     "core/sizing:OPTION_ATRISK_LOSS_FRAC": "ruled",  # 0.25 锚 |S1|, pins 钉相等
     "decision/regime_transition:REL_FLOOR": "ruled",   # 0.4 relative_volume R
+    "decision/regime_transition:RECLAIM_VOL_RATIO_MIN": "convention",  # RelVR 证据标准 canonical
     "decision/regime_transition:fastlane_k": "ruled",  # 0.5 ladder_entry 采纳
     "decision/regime_transition:stop_days_default": "ruled",  # close-confirmed stop uses one completed bar
     "decision/exit_guard:atr_multiple": "convention",  # 3×ATR trend-exit canonical
@@ -131,6 +132,7 @@ CLASSIFY: dict[str, str] = {
     "core/episodes:DELTA_ATR": "ruled",            # 0.5 决策点 A 锁定
     "report/portfolio_brief:MOVE_ATR_MULT": "ruled",   # 1×ATR14 scale
     "report/portfolio_brief:MOVE_ATR_PERIOD": "convention",
+    "sync/price_reminder_sync:BUDGET_NOTE_MAX": "convention",  # 预算段的稳定显示上限
     # ── 定义 / 口径约定（不是选择） ──
     "core/technical:VALUE_AREA_FRAC": "definition",    # 70% 拍卖理论
     "core/technical:EDGE_WEIGHT": "unbacked",          # 0.05 三角权重下限, 无出处

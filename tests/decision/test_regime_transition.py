@@ -236,6 +236,65 @@ def test_a_new_observation_layer_is_derived_below():
     assert card["agent"]["last_regime"]["source"] == "auto"
 
 
+def test_down_transition_buffers_the_preserved_stop_below_the_reclaim_gate():
+    """A preserved stop touching the reclaim gate receives a 0.5 ATR buffer."""
+    from quant.core import technical
+    card = _card()                                   # stop 800 = 将破的线 = reclaim gate
+    bars = _bars([850.0] * 24 + [790.0, 780.0])      # 2 收 < 800 → down @800, ATR 可算
+    tr = rt.detect_transition("TST", card, bars)
+    rt.apply_transition(card, tr, bars)
+    nz = card["agent"]["next_regime"]["zones"]
+
+    atr20 = technical.atr(bars, rt.PARAMS["atr_period"])[-1]
+    assert nz["stop_level"] == pytest.approx(round(800.0 - 0.5 * atr20, 2))
+    assert nz["stop_level"] < 800.0                  # 有缓冲, 不贴 gate
+    assert nz["stop_level"] > 800.0 * 0.85           # 缓冲有界 (entry_guard 同款量级守卫)
+    assert nz["stop_level_days"] == 1
+    assert "bfloor_buf" in nz["stop_derivation"]
+
+
+def test_down_transition_fills_the_volume_leg_default_on_the_reclaim_gate():
+    """机器写的 reclaim gate 没有 volume_ratio_min 时, volume_leg(None) = 整条跳过
+    ⇒ 一根收盘上 gate 就可能绕过量能确认。缺省补 1.2，显式值不覆盖。"""
+    card = _card()
+    bars = _bars([850.0] * 24 + [790.0, 780.0])
+    rt.apply_transition(card, rt.detect_transition("TST", card, bars), bars)
+    eg = card["agent"]["next_regime"]["entry_gate"]
+    assert eg["volume_ratio_min"] == rt.RECLAIM_VOL_RATIO_MIN == 1.2
+
+    explicit = _card(last_regime={"zones": {}, "repair_gate": {
+        "level": 800.0, "days": 2, "volume_ratio_min": 1.5}})
+    rt.apply_transition(explicit, rt.detect_transition(
+        "TST", explicit, bars), bars)
+    assert explicit["agent"]["next_regime"]["entry_gate"]["volume_ratio_min"] == 1.5
+
+
+def test_down_transition_drops_a_no_chase_below_the_reclaim_gate():
+    """A no-chase below the reclaim gate is removed without inventing a replacement."""
+    card = _card(last_regime={"zones": {}, "repair_gate": {"level": 900.0, "days": 2}})
+    card["agent"]["zones"]["no_chase_above"] = 890.0        # < repair gate 900
+    bars = _bars([850.0] * 24 + [790.0, 780.0])             # 破 800 (tr level ≠ gate 900)
+    rt.apply_transition(card, rt.detect_transition("TST", card, bars), bars)
+    nz = card["agent"]["next_regime"]["zones"]
+
+    assert "no_chase_above" not in nz
+    assert "no_chase_derivation" in nz                      # 摘除留痕, 不静默
+    assert nz["stop_level"] == 800.0                        # 距 gate 900 足够远 → 原样保留
+    assert "stop_derivation" not in nz
+
+
+def test_down_transition_without_atr_preserves_zones_verbatim():
+    """序列不足算不出 ATR → 不编数, 旧行为: stop 原样保留 (与上行分支同款守卫);
+    no_chase 摘除判据不依赖 ATR, 照常生效。"""
+    card = _card()
+    bars = _bars([790.0, 780.0])                     # 2 根, ATR20 = None
+    rt.apply_transition(card, rt.detect_transition("TST", card, bars), bars)
+    nz = card["agent"]["next_regime"]["zones"]
+
+    assert nz["stop_level"] == 800.0
+    assert "stop_derivation" not in nz
+
+
 # ── 3. pending repaint ────────────────────────────────────────
 
 def test_up_transition_marks_provisional_slots_for_repaint():

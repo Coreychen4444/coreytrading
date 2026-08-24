@@ -26,10 +26,18 @@ def test_dead_archived_card_yields_to_live_candidate():
 
 
 def test_live_position_card_always_wins():
-    """促升后 positions 是真源 (qty≠0) —— 即便 watchlist 还留着旧候选卡。"""
+    """促升后 positions 是真源 (无 exit_info) —— 即便 watchlist 还留着旧候选卡。"""
     live = _pos(qty=5.0, exit_info=False, zones={"accumulation_zone_1": [1, 2]})
     out = stamping_cards({"tickers": {"TST": live}}, {"tickers": {"TST": _wl()}})
     assert out["TST"] is live
+
+
+def test_dead_card_yields_even_after_broker_qty_refresh():
+    """A refreshed quantity does not revive an archived authorization card."""
+    refreshed_dead = _pos(qty=5.0, exit_info=True)
+    out = stamping_cards({"tickers": {"SYN": refreshed_dead}},
+                         {"tickers": {"SYN": _wl()}})
+    assert out["SYN"]["agent"]["current_regime"]["cap_pct_nav"] == 0.4
 
 
 def test_synthetic_underlying_row_does_not_yield():

@@ -193,6 +193,7 @@ Actual entry capacity is the minimum of:
 - Fast-lane eligibility applies only to the validated repair path. Unclassifiable or non-repair paths retain the slower confirmation rule.
 - `quant/core/drift.py` measures structure drift. Its outputs are advisory until thresholds are explicitly validated and wired.
 - `quant/core/technical.py` owns shared indicator, ATR, volume-profile, swing and pattern math.
+- `quant/core/dow.py` owns the short-horizon Dow phase machine and its descriptive priority key. It is read-only context and does not grant entry or exit authorization.
 - `quant/core/holdings.py` owns every “is this held?” predicate.
 
 The three holding sets are intentionally different:
@@ -255,6 +256,8 @@ Data ingestion records source and freshness. A failed fetch must be visible and 
 - `VETO` means no entry plan: examples include cap zero, structural breakdown, unresolved repair, invalid gate, missing/stale map or hard risk constraint.
 - Structure-repair VETO is binary; do not reintroduce a hidden intermediate classification discount.
 - The gate number comes from `sizing.gate_count(card)` on both entry and add sides.
+- Plans within the same verdict may be ordered by the short-horizon Dow priority. This ordering cannot change verdict, cap, ladder prices or whole-unit size.
+- A repair-reclaim ladder yields to the ordinary zone ladder after a later full-map redraw; the old frozen transition anchor cannot override the newer map.
 - Option eligibility starts only at the configured minimum gate and remains subject to IV, liquidity, premium and risk limits.
 - A changed plan may append a decision worksheet; an unchanged render must not spam the ledger.
 
@@ -269,11 +272,12 @@ Data ingestion records source and freshness. A failed fetch must be visible and 
 - margin/buying-power infrastructure warnings;
 - re-arm rules after a valid recovery or new high-water mark.
 
-Exit mechanics do not accept a narrative or macro exception. An operator may record an explicit override, but the system still reports the mechanical breach.
+Exit mechanics do not accept a narrative or macro exception. A process score may record delayed or rule-external behavior, but it is not an override and does not authorize continued holding after a mechanical breach.
 
 ### Other decision modules
 
 - `regime_transition.py`: applies completed-bar gate transitions and preserves auditable history.
+- A down transition must keep its reclaim placeholder self-consistent: stop below the reclaim gate, no-chase not below the gate, and a default volume-evidence leg when the card omitted one.
 - `regime_score.py`: informational regime context used by configured execution rules.
 - `structure_drift.py`: logs advisory drift observations.
 - `catalyst_check.py`: checks time binding, tape contradiction, benchmark residual and “unknown catalyst” as a valid result.
@@ -291,17 +295,17 @@ Exit mechanics do not accept a narrative or macro exception. An operator may rec
 ## Journal and report layers
 
 - `quant/journal/decision_log.py` appends structured EV/probability worksheets.
-- `quant/journal/annotate_event.py` adds review fields to rule-external events and can append process scores.
+- `quant/journal/annotate_event.py` adds review fields to rule-external events, can append process scores, and provides a paired manual cap/gate stamp for historical BUY fills only after the operator verifies the authorization that existed at fill time.
 - Planned, mechanically authorized fills do not need duplicate narrative classification.
 - Rule-external events do require review: examples include cap-zero entries, missing authorization-group membership, no-chase violations, trim-area adds, no-add-lock violations, unplanned limit changes or ignored exit alerts.
 - Tier and authorization fields are mechanically derived where possible; the human supplies reasoning and checklist status.
 - Lots are accounting, not annotation. Every fill must reconcile even when no narrative review is required.
-- `quant/report/portfolio_brief.py` assembles position cards, alerts, budgets, exits and operational warnings.
+- `quant/report/portfolio_brief.py` assembles position cards, alerts, budgets, exits and operational warnings. Held-stock add capacity includes the same price ladder, whole-share split and structural ordering used by entry plans.
 - Use `--read-only` for session inspection; the default alerting mode may consume cooldown state.
 - Reports must preserve binding constraints and original warnings from their deterministic sources. Do not paraphrase away severity.
 - `perf_report.py` provides tier/gate performance and process-versus-outcome review.
 - `gate_ladder_report.py`, `gate_audit.py`, `anchor_receipts.py` and `chart_read.py` expose specific audits without creating authorization.
-- Chart reading reports current structure, confirmation line, invalidation line, distance and evidence quality. It does not write state, size positions or unlock cap zero.
+- Chart reading reports current structure, short-horizon Dow phase, confirmation line, invalidation line, distance and evidence quality. A Dow termination is a discretionary review point, not an exit instruction. Chart reading does not write state, size positions or unlock cap zero.
 
 ## Ops pipeline and stage order
 

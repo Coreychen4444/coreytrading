@@ -20,10 +20,11 @@
     zones.no_chase_above  → PRICE_UP    note "nochase" (仅正股, **两桶都画**)
       = 当前 regime 的追价上限 (用户)。上穿 = 从这儿往上不追市价
       (Rule #11), 挂着的 zone 限价单照旧。**非 pin**: 它是本 regime 内的参与边界,
-      与 trim/z1 同类, 不是状态转移轴。它仍会随现价翻向而持续保留。撞价两种
-      (都由 collapse_same_price 让位并播报, 价位仍有线):
-      `gate == no_chase` 是正常设计(「在追价上限处确认突破」); 单调律允许
-      `no_chase == trim 下沿`; trim 线只画在持仓桶, 所以后一种碰撞只会出现在持仓卡。
+      与 trim/z1 同类, 不是状态转移轴 —— 挤每票上限时照常占名额 (线本身不会
+      因价格穿越消失, 见下方 orient_sides)。撞价 (gate == no_chase 正常设计 /
+      no_chase == trim 下沿 / no_chase == z1 上沿 — 单调律两端都允许相等) →
+      **标签并入** "z1:11%:2k/nochase"（备注上限为 40 半宽单位；
+      并不进去才回退让位), 两处 dedup 同规则, 都播报。
     zones.trim_zone[0]    → PRICE_UP    note "trim"  (仅正股)
     期权合约 G-01 下一档   → PRICE_UP    note "g01"  (lot cost×2/3/4 中高于现 mark
       的最低档; 全 lot 取 min = 下一个会响的档)
@@ -59,11 +60,13 @@
 reminders < brief 被测试钉死(brief 必须最后) → 画线用上一轮 guards (≤6h)。地板
 只升不降 ⇒ 陈旧 = 偏低 = 报警偏晚, 权威触发仍是 exit_guard 每轮 heartbeat 真线。
 
-所有权边界(关键): 判别 = 词表本身 (用户: 10 字符空间给信息不给标记,
-旧 "cc:" 前缀废) — note 恰为 stop/trim/gate/z1/g01 或 "stop:"/"z1:"/"cc:"(legacy,
-认旧不写旧) 开头 = 系统的, 可增删; 其他备注(空/自定义文字) = 用户 手动, 永不触碰;
-手动提醒与期望值完全相同(code+type+价位)时也不重复添加。裸 "stop" 是
-前的旧词, 认旧不写旧 — 一轮换血迁成 stop:type。
+所有权边界(关键): 判别 = 词表本身（备注空间给信息不给标记，
+旧 "cc:" 前缀只认不写；上限 40 半宽单位，见 NOTE_WIDTH_MAX）
+— note 恰为 stop/trim/gate/z1/g01 或 "stop:"/"z1:"/"cc:"(legacy, 认旧不写旧) 开头
+= 系统的, 可增删; 并入形态 "a/b" **每段**都须是系统词 (_owned_note);
+其他备注(空/自定义文字) = 用户手动，永不触碰；
+手动提醒与期望值完全相同(code+type+价位)时也不重复添加。裸 "stop" 是旧词，
+认旧不写旧，一轮换血迁成 stop:type。
 对账式: 期望集 vs 服务端现状 diff → ADD 缺的 / DEL 不再期望的系统条目;
 价位同而 note 不同(授权变了/行使出组/legacy 迁移) → DEL+ADD 换血, note 也是对账对象。
 get 失败 → **整轮放弃**(盲写会产生重复), 不做半份同步。
@@ -107,35 +110,67 @@ from quant.sync.today_group_sync import (# noqa: E402  (同层复用: Today 白�
 LEGACY_PREFIX = "cc:"                       #  前的所有权前缀 — 认旧不写旧, 一轮换血迁移
 KINDS = ("stop", "trim", "gate", "z1", "nochase", "g01", "oz1")   # oz1 = 期权选约首档限价 ()
 MAX_PER_TICKER = 6
-# nochase 排在 z1 之后: z1 是带预算的可执行线, nochase 是同 regime 的参与上界 ——
-# 同价 collapse 时让 trim/gate/z1 先留 (单调律保证 nochase 只可能撞 trim 或 gate)。
+# nochase 排在 z1 之后: z1 是带预算的可执行线, nochase 是同 regime 的参与上界。
+# 同价同向撞线时标签并入不丢弃；服务端
+# 同 (code,type,value) 只能一条, 丢线不可避免但标签都留); 并不进去 (同 kind 真重复 /
+# 超宽) 才回退让位。优先级决定谁当 head (head 段 = 排序与所有权前缀的锚)。已知撞点:
+# gate == no_chase / no_chase == trim 下沿 / no_chase == z1 上沿 / stop == gate。
 PRIORITY = {"stop": 0, "trim": 1, "gate": 2, "z1": 3, "nochase": 4, "g01": 5, "oz1": 6}
 STOP_SRC_PRI = {"card": 0, "lock": 1, "trail": 2}   # 同价并列时的稳定序: 静态源优先
 G01_GAINS = (1.0, 2.0, 3.0)                 # 镜像 exit_guard PARAMS["g01_levels"] 的增益列
 GUARDS_STALE_DAYS = 3                       # exit_guards as_of 超此天数 → 报出来 (仍用值: 只升不降 ⇒ 陈旧=偏低)
 
+# note 宽度硬限 = 40 半宽单位（非 ASCII 计 2）：
+# ascii ×40 OK / ×41 拒; "中"×20 OK / "中"×19+3A (41 单位) 拒; 服务端报错原文
+# 「Enter no more than 20 Chinese characters」; round-trip 全部无截断。
+# 旧「10 字符」限制并不准确；预算段仍另设显示宽度保险丝。
+NOTE_WIDTH_MAX = 40
+
+
+def _note_width(s: str) -> int:
+    """moomoo 备注宽度：非 ASCII 计 2，服务端上限为 40 半宽单位。"""
+    return sum(2 if ord(c) > 127 else 1 for c in s)
+
 
 def _owned_note(note: str) -> bool:
     """所有权判别 = 词表本身: note 恰为 kind 或 "stop:"(binding 来源)/"z1:"(带预算)/
     "gate:"(cur|next 常驻线)/"cc:"(legacy) 开头 = 系统的;
-    其他(空/自定义文字) = 用户 手动, 永不触碰。"""
-    return (note in KINDS or note.startswith("stop:") or note.startswith("z1:")
-            or note.startswith("gate:") or note.startswith("oz1:")
-            or note.startswith(LEGACY_PREFIX))
+    其他(空/自定义文字) = 用户手动, 永不触碰。
+    并入形态 "a/b" 的每一段都须是系统词；"trim/nochase" 是，
+    "trim/我的备注" 不是。边界只向「系统词的并入」扩, 手动线的误伤面不变。"""
+    def seg_owned(s: str) -> bool:
+        return (s in KINDS or s.startswith("stop:") or s.startswith("z1:")
+                or s.startswith("gate:") or s.startswith("oz1:")
+                or s.startswith(LEGACY_PREFIX))
+    return bool(note) and all(seg_owned(s) for s in note.split("/"))
 
 
-BUDGET_NOTE_MAX = 7        # moomoo note 上限 10 字符, "z1:" 占 3
+def _merged_note(win: Dict, lose: Dict) -> Optional[str]:
+    """同价同向线的标签并入：
+    服务端同价同向只能一条 ⇒ 丢线不可避免, 但标签可以都留 — "z1:11%:2k/nochase"。
+    返回并入后 note; 并不进去 → None (回退让位): **同 kind 真重复** (reclaim 梯撞
+    gate:cur 之类, 并入无新信息) 或 **宽度超 40**。"""
+    win_kinds = {s.split(":", 1)[0] for s in str(win["note"]).split("/")}
+    if lose["kind"] in win_kinds:
+        return None
+    cand = f"{win['note']}/{lose['note']}"
+    return cand if _note_width(cand) <= NOTE_WIDTH_MAX else None
+
+
+BUDGET_NOTE_MAX = 12       # 预算段显示宽度上限；见 NOTE_WIDTH_MAX 注，
+                           # 12 覆盖全部现实格式 "40%:44.2k"=9, 一位小数 k 恒保留,
+                           # 降级阶梯退化为纯保险丝)。"z1:"+12=15, 并入 "/nochase" 后
+                           # 最宽 23 仍 < 40。
 
 
 def _fmt_budget(frac: float, nav: float) -> str:
-    """起步预算段 "2%:450" / "5%:1.1k" = 比例+数值 (用户  定版)。
+    """起步预算段 "2%:450" / "5%:1.1k" / "35%:6.8k" = 比例+数值。
 
-    ⚠️ `frac` 从  起是**实际**cap 分数 (已过冲击预算与 gross 余额),
+    `frac` 是实际 cap 分数（已过冲击预算与 gross 余额），
     不是卡片上那个名义 2%/40% —— 见 `z1_budgets`。
 
-    金额 round $50 防 NAV 日波动 churn。**降级顺序 = 先降精度再丢金额**:
-    "10%:2.2k"(8) → "10%:2k"(6) 而不是直接退成 "10%"。响铃那一刻能用的是**钱**,
-    比例只是它的来历; 旧写法一超 7 字符就把唯一可执行的那个数扔掉了。
+    金额 round $50 防 NAV 日波动 churn。降级阶梯 (先降精度再丢金额) 保留为
+    超 BUDGET_NOTE_MAX 的保险丝 — 现实格式全部 ≤9 字符, 正常永不触发。
     """
     pct = int(round(frac * 100))
     if nav * frac < 1:                    # 组合层余额用尽 = 真的 $0, 别用地板粉饰
@@ -426,25 +461,36 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
     # pin 排前有两个作用: ①与 reclaim 梯同价时留下带 gate:cur/next 备注的那条
     # ②不占 MAX_PER_TICKER 名额 —— 上限只裁可裁的线。pin 至多 2 条/票 ⇒ 实际
     # 天花板 6+2=8 < moomoo 的 10 条/票, 仍给手动线留余量。
-    seen = set()
+    seen: Dict[Tuple, Dict] = {}
     per: Dict[str, List[Dict]] = {}
     capped: Dict[str, int] = {}
     for d in sorted(lines, key=lambda d: (d["ticker"], PRIORITY.get(d["kind"], 9),
                                           0 if d.get("pin") else 1, d["value"])):
         key = (d["code"], d["type"], d["value"])
-        if key in seen:
-            # 同价同向 → 排序保证留下的是高优先级那条, 但**必须报出来**
-            # (与 collapse_same_price 同一条纪律: 价位仍有线, 丢的只是 10 字符
-            # 的标签; 静默丢字段是本仓的惯犯形状)。live 会撞的两处:
-            # gate == no_chase (正常设计) / no_chase == trim 下沿 (单调律允许)。
-            notes.append(f"{d['ticker']}: {d['note']} {d['value']:g} 与已有同价同向线重复"
-                         " — 让位给高优先级那条, 该价位仍有线")
+        win = seen.get(key)
+        if win is not None:
+            # 同价同向 → 排序保证 head 是高优先级那条; **标签并入不丢弃**
+            # 能并入就保留两个标签，并不进去才回退
+            # 让位并报出来 — 与 collapse_same_price 同一条纪律。
+            if win.get("_capped"):
+                notes.append(f"{d['ticker']}: {d['note']} {d['value']:g}"
+                             f" 同价先行线已被每票上限裁掉 — 本条一并丢弃")
+                continue
+            merged = _merged_note(win, d)
+            if merged:
+                win["note"] = merged
+                notes.append(f"{d['ticker']}: {d['note']} {d['value']:g} 与同价同向线并轨"
+                             f" — 标签并入 → {merged}")
+            else:
+                notes.append(f"{d['ticker']}: {d['note']} {d['value']:g} 与已有同价同向线重复"
+                             " — 让位给高优先级那条, 该价位仍有线 (并入放弃: 同 kind 或超宽)")
             continue
-        seen.add(key)
+        seen[key] = d
         bucket = per.setdefault(d["ticker"], [])
         if not d.get("pin"):
             if capped.get(d["ticker"], 0) >= MAX_PER_TICKER:
                 notes.append(f"{d['ticker']}: 超每票上限 {MAX_PER_TICKER}, 丢弃 {d['kind']} {d['value']}")
+                d["_capped"] = True       # 后续同价线别再声称"该价位仍有线"
                 continue
             capped[d["ticker"]] = capped.get(d["ticker"], 0) + 1
         bucket.append(d)
@@ -473,15 +519,17 @@ def orient_sides(desired: List[Dict], prices: Dict[str, float]) -> Tuple[List[Di
 
 
 def collapse_same_price(desired: List[Dict]) -> Tuple[List[Dict], List[str]]:
-    """同 (code, type, 价位) 只能有一条服务端提醒 → 按 kind 优先级留一条(纯函数)。
+    """同 (code, type, 价位) 只能有一条服务端提醒 → 按 kind 优先级留一条,
+    被让位方的标签并入留下那条（纯函数）。
 
     必须在 `orient_sides` **之后**跑: 定向前 gate:cur 是 PRICE_UP、卡 stop 是
-    PRICE_DOWN(不同 key), 翻向后才可能撞上。
+    PRICE_DOWN(不同 key)，翻向后才可能撞上；z1 与 nochase 同理。
 
     此前撞了没人管: `plan_ops` 的 `want = {key: d for d in desired}` 是**后者覆盖**,
     而 desired 按优先级排序 ⇒ 低优先级的 gate 反而覆盖掉 stop, 且一声不响
-    (又一例"字段在转换中被丢")。留 stop 不留 gate 不违反"gate 线常驻":
-    **那个价位仍然有线**, 丢的只是 10 字符的标签 —— 但必须报出来。
+    (又一例"字段在转换中被丢")。40 半宽单位内标签可合并为
+    "stop:card/gate:cur"。并不进去
+    (同 kind 真重复 / 超宽) 仍回退让位, 照旧播报。
     """
     best: Dict[Tuple[str, str, float], Dict] = {}
     notes: List[str] = []
@@ -493,9 +541,16 @@ def collapse_same_price(desired: List[Dict]) -> Tuple[List[Dict], List[str]]:
             continue
         win, lose = ((cur, d) if PRIORITY.get(cur["kind"], 9) <= PRIORITY.get(d["kind"], 9)
                      else (d, cur))
+        head = win["note"]
+        merged = _merged_note(win, lose)
+        if merged:
+            win = {**win, "note": merged}
+            notes.append(f"{d['ticker']}: {lose['note']} {d['value']:g} 与 {head} 同价同向"
+                         f" — 标签并入 → {merged}")
+        else:
+            notes.append(f"{d['ticker']}: {lose['note']} {d['value']:g} 与 {head} 同价同向"
+                         f" — 留 {head}(优先级高), 该价位仍有线 (并入放弃: 同 kind 或超宽)")
         best[key] = win
-        notes.append(f"{d['ticker']}: {lose['note']} {d['value']:g} 与 {win['note']} 同价同向"
-                     f" — 留 {win['note']}(优先级高), 该价位仍有线")
     return list(best.values()), notes
 
 

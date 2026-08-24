@@ -6,5 +6,6 @@
 - A cap of zero is a veto. Do not create an undocumented exception.
 - Options use delta/notional and premium-risk constraints where applicable; contract price alone is not the exposure.
 - Lots and broker quantity must reconcile independently of whether a trade needs a narrative annotation.
+- When a held stock has add capacity, render its add ladder through the same `entry_guard.build_ladder` and `sizing.share_ladder` functions used for candidates; do not reduce the plan to one unstructured share count.
 
 The executable formulas live in `quant/core/sizing.py` and `quant/core/book.py`; update tests when they change.

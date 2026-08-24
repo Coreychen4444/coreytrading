@@ -36,8 +36,12 @@ from quant.core.paths import (
     KLINE_CACHE_DIR, NAV_HISTORY_PATH,
 )
 from quant.core.sizing import regime_lines
-from quant.core.technical import atr
+from quant.core.technical import atr, resample_weekly
 from quant.core.timeutil import et_today, parse_ts
+# 持仓加仓阶梯：价位与模式判定直接复用 entry_guard，watchlist 与持仓票
+# 必须是同一套 build_ladder / share_ladder, 不在本模块另存一份 (report 5 → decision 4, 向下)。
+from quant.decision import entry_guard as _eg  # noqa: E402
+from quant.core import dow as _dow  # noqa: E402  (短期道氏结构位 = 清单排序键)
 
 STATE_PATH = HEARTBEAT_STATE_PATH
 STATE_POSITIONS_PATH = HOLDING_ROOT / "state/positions.json"
@@ -1101,7 +1105,52 @@ def position_budget(ticker: str, item: Dict, nav: Optional[float],
     }
 
 
-# ── 财报缩仓的减仓半边 (ledger A2,) ──────────────────────
+def position_ladder(ticker: str, cfg: Optional[Dict], budget: Optional[Dict],
+                    card: Optional[Dict], today: Optional[str] = None) -> Optional[Dict]:
+    """持仓加仓的三档阶梯 —— 与 entry_guard 同一套价位 (`build_ladder`) 与整股降级
+    (`sizing.share_ladder`), 钱 = 预算行已算出的 `remaining_usd`。
+
+    持仓卡渲染明确阶梯，使后续清单可以照抄而不是发明分批数字。
+    模式判定逐字同 entry_guard.evaluate_ticker: 刚收复的快车道 gate →
+    冻结锚 (repair_reclaim), 否则 momentum_mode (parabolic / normal)。
+
+    None = 不出这一行: 无预算 / 预算耗尽 / 期权 (走 option_plan) / 无 zone / 无 K 线。
+    """
+    if not budget or budget.get("exhausted") or not (budget.get("remaining_usd") or 0) > 0:
+        return None
+    if parse_occ(ticker):
+        return None
+    zb = _eg.zone_bands(cfg or {})
+    if not zb:
+        return None
+    rows = [r for r in iter_jsonl(KLINE_CACHE_DIR / f"{ticker}.jsonl")
+            if normalize_num(r.get("close")) is not None]
+    if not rows:
+        return None
+    close = normalize_num(rows[-1].get("close"))
+    if not close:
+        return None
+    full = [r for r in rows if r.get("high") is not None and r.get("low") is not None]
+    series = atr(full, period=_eg.PARAMS["atr_period"]) if len(full) > _eg.PARAMS["atr_period"] else []
+    atr_v = series[-1] if series else None
+    agent = (card or {}).get("agent") or {}
+    reclaimed = _eg.reclaimed_gate_of(agent, today or et_today(), rows)
+    mode = "repair_reclaim" if reclaimed else _eg.momentum_mode(rows)
+    prices = _eg.build_ladder(mode, close, rows, zb, atr=atr_v, reclaim=reclaimed)
+    if not prices:
+        return None
+    sl = sizing.share_ladder(budget["remaining_usd"], prices, _eg.PARAMS["ladder_weights"])
+    if not sl:
+        return None
+    # 持仓加仓票与 watchlist 票使用同一把结构排序尺。
+    # 只排序, 不改预算/阶梯里的任何数字。
+    pr = _dow.priority_of_bars(full, resample_weekly(full)) if len(full) >= 3 else None
+    return {"mode": mode, "prices": prices, "tiers": sl["tiers"], "n_tiers": sl["n_tiers"],
+            "n_shares": sl["n_shares"], "degraded": sl["degraded"],
+            "exception": sl["exception"], "note": sl["note"], "dow": pr}
+
+
+# ── 财报缩仓的减仓半边 (ledger A2) ──────────────────────
 #
 # earnings_window 裁决原话「必须在反应日的**前一交易日收盘前减完**」此前只有
 # 入场半边 (available_cap 的 event_shrink 只压新买), T-1 日已有敞口超过缩仓后
@@ -1476,6 +1525,16 @@ def build_position_card(item: Dict, cfg: Optional[Dict], budget: Optional[Dict],
                      f" {sizing.gate_risk_cap_frac(budget['gate_no']) * 100:g}%风险]: "
                      f"已投 ${budget['deployed_usd']:,.0f} / "
                      f"cap ${budget['cap_usd']:,.0f}{mult} → 余 ${budget['remaining_usd']:,.0f}, {tail}")
+        # 与 entry_guard 的阶梯挂单同格式，清单照抄。
+        lad = budget.get("ladder")
+        if lad:
+            seg = [f"${t['price']:g}×{t['shares']}股(${t['usd']:,.0f})" for t in lad["tiers"]]
+            extra = f" — {lad['note']}" if lad.get("note") else ""
+            lines.append(f"阶梯 [{lad['mode']}] {lad['n_tiers']}档: " + " / ".join(seg) + extra)
+            if lad.get("exception"):
+                lines.append("⛔ 未落 decisions.jsonl 书面例外前, 这不是可执行计划")
+            if lad.get("dow"):
+                lines.append(_eg.dow_line(lad["dow"]))
 
     st = stop_status(ticker, item, cfg, guard, und_spot=und_spot)
     if st:
@@ -1602,6 +1661,12 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
         exposure=exp_map.get(str(x.get("underlying") or x["ticker"]).upper()),
         card=_pos_cards.get(x["ticker"]), power_room=current_power_room)
         for x in items}
+    # 持仓加仓阶梯挂在预算 dict 上: JSON `budgets` 与持仓卡同一份, 清单层照抄不另算。
+    for x in items:
+        _b = budgets.get(x["ticker"])
+        if _b:
+            _b["ladder"] = position_ladder(x["ticker"], current_zones.get(x["ticker"]), _b,
+                                           _pos_cards.get(x["ticker"]))
     items = [enrich_with_zone_context(x, current_zones, all_items=items,
                                       budget=budgets.get(x["ticker"]))
              for x in items]
@@ -1669,7 +1734,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             span = f" 连续 {breach['days']} 日" if breach["days"] > 1 else ""
             detail = (f"{ticker} 🚨 STOP 破位{ref_note}: {breach['date']} 收 "
                       f"{fmt_price(breach['close'])} < stop {fmt_price(breach['stop'])}{span}")
-            zone_signals.append(f"{detail} → 卡片失效线, 当日执行或书面 override 进 journal")
+            zone_signals.append(f"{detail} → 卡片失效线, 当日清仓 (含盘后), 无 override 路径")
             if emit_gate(ticker, trigger_type):
                 tail = f" | invalid_if: {breach['invalid_if']}" if breach["invalid_if"] else ""
                 alerts.append(detail + tail)
@@ -1915,21 +1980,17 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
         days_open = structure.trading_days_after(
             (day for day, _ in _cached_closes(tk, 30)), overdue["date"])
         active_keys.add(alert_key(tk, "exit_overdue"))
-        all_conditions.append(
-            {"ticker": tk, "type": "exit_overdue", "value": overdue["date"]})
-        old_stop = (f"{overdue['old_stop']:g}"
-                    if overdue.get("old_stop") is not None else "?")
-        new_stop = (f"{overdue['new_stop']:g}"
-                    if overdue.get("new_stop") is not None else "?")
-        exposure = (f"仍持 {overdue['qty']:g} 股" if overdue["qty"] > 0 else "正股已平")
-        if overdue.get("opt_tickers"):
-            exposure += f" + 期权 {', '.join(overdue['opt_tickers'])}"
-        detail = (f"{tk} 🚨 破 stop 降级 D+{days_open} 未执行/未 override: "
-                  f"{overdue['date']} "
-                  f"{overdue.get('reason') or f'收盘破 stop {old_stop}'} → 已降级 cap 0, "
-                  f"卡上 stop 已换 {old_stop}→{new_stop}, {exposure}。"
-                  "执行平仓，或通过 journal 与 annotate_event --score 记录 override；"
-                  "卖出、收复转移或落库注解后自动解除")
+        all_conditions.append({"ticker": tk, "type": "exit_overdue", "value": overdue["date"]})
+        old_s = f"{overdue['old_stop']:g}" if overdue.get("old_stop") is not None else "?"
+        new_s = f"{overdue['new_stop']:g}" if overdue.get("new_stop") is not None else "?"
+        expo = (f"仍持 {overdue['qty']:g} 股" if overdue["qty"] > 0 else "正股已平") \
+            + (f" + 期权 {', '.join(overdue['opt_tickers'])}"
+               if overdue.get("opt_tickers") else "")
+        detail = (f"{tk} 🚨 破 stop 降级 D+{days_open} 未执行: {overdue['date']} "
+                  f"{overdue.get('reason') or f'收盘破 stop {old_s}'} → 已降级 cap 0, "
+                  f"卡上 stop 已换 {old_s}→{new_s}, {expo}。裁决在案 (trend-exit-system): "
+                  f"清仓, 无 override 路径; 未执行 = 规则外评 C 起步, "
+                  f"annotate_event --score 落 scores.jsonl 即消音; 卖出/收复转移亦自动解除")
         zone_signals.append(detail)
         if emit_gate(tk, "exit_overdue"):
             alerts.append(detail)

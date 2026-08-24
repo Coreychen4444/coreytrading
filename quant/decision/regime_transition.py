@@ -102,7 +102,10 @@ def _atr(klines: List[dict]) -> Optional[float]:
     return s[-1] if s and s[-1] else None
 
 
-REL_FLOOR = 0.4     # RelVR 分母地板 — relative_volume_gate_design v1 () 锁定值
+REL_FLOOR = 0.4     # RelVR denominator floor
+RECLAIM_VOL_RATIO_MIN = 1.2   # 机器写 reclaim gate 的量腿缺省 = 证据标准 canonical
+                              # (RelVR ≥1.2); without it volume_leg(None) skips
+                              # the evidence leg entirely.
 
 _BENCH_RATIOS: Dict[str, Dict[str, float]] = {}
 
@@ -486,15 +489,47 @@ def apply_transition(card: Dict, tr: Dict, klines: Optional[List[dict]] = None) 
                          "保留是为了不丢 tier 结构 (还有 confirmed/rebase 这两档), "
                          "不是为了继续用这些数字"),
             }
+        # 旧图原样搬进 next_regime.zones 有三个构造性退化。这里只修占位显示；
+        # 真正生效的值由上行分支在收复触发日重算或复核：
+        # ① stop 贴 gate — 破 stop 型降级的 reclaim gate 就是刚破的那条 stop
+        #   会把 whipsaw 语义挂在卡面/报表上。gate 参照 = repair gate；
+        #   已有足够缓冲的 stop 保持不变。
+        # ② no_chase 低于收复 gate — 旧图 no_chase ≤ 自己的 next gate 是正常设计,
+        #   但作为「收复后世界」会形成刚确认突破却低于入口禁追的矛盾
+        #   → 摘除待重画, 不编一个更高的数。
+        # ③ (entry_gate 的量腿缺省见下方 setdefault。)
+        # ATR 算不出 → ①保持旧行为不编数; ②仍摘 (判据不依赖 ATR)。
+        nr_zones = dict(cur_zones)
+        _gate_ref = coerce_float(repair.get("level")) or float(tr["level"])
+        _prior_stop = nr_zones.get("stop_level")
+        _atr20_dn = _atr(klines)
+        if (_atr20_dn and isinstance(_prior_stop, (int, float))
+                and round(float(_prior_stop), 2) >= round(_gate_ref - 0.25 * _atr20_dn, 2)):
+            _bfloor = round(_gate_ref - 0.5 * _atr20_dn, 2)
+            nr_zones["stop_level"] = _bfloor
+            nr_zones["stop_level_days"] = 1
+            nr_zones["stop_derivation"] = (
+                f"bfloor_buf 占位: 收复线 {_gate_ref:g} − 0.5×ATR20@{tr['date']} "
+                f"({_atr20_dn:.2f}) = {_bfloor:g} (原图 stop {_prior_stop:g} 贴 gate "
+                f"≤0.25N, 不可原样保留); 收复触发日由转移机按当日 ATR 重算")
+        _prior_nc = coerce_float(nr_zones.get("no_chase_above"))
+        if _prior_nc is not None and _prior_nc < _gate_ref:
+            nr_zones.pop("no_chase_above", None)
+            nr_zones["no_chase_derivation"] = (
+                f"原图 no_chase {_prior_nc:g} < 收复 gate {_gate_ref:g} — 收复后世界的"
+                f"追价上限不可低于其入口 (刚确认突破却不许追 = 自相矛盾), 降级时摘除"
+                f"待重画; 不编一个更高的数")
+        _eg = {k: v for k, v in repair.items() if k != "unlocks"}
+        # 量腿缺省补齐: repair dict 无 volume_ratio_min 时, volume_leg 对 None 的
+        # 行为是**整条跳过** (min_ratio 缺省 = 卡片没设量腿 → True) ⇒ 机器写的
+        # reclaim gate 只看价格就发 cap。缺省补标准值，显式写了的不动。
+        _eg.setdefault("volume_ratio_min", RECLAIM_VOL_RATIO_MIN)
         agent["next_regime"] = {
             "name": f"reclaim_{tr['level']:g}",
-            "entry_gate": {k: v for k, v in repair.items() if k != "unlocks"},
-            # 满额落地 (用户 「第一次给 cap 就允许以 R1 入场 ……
-            # 不再有 2% 的限制」, classification_removal_design.md D3): gate 收复
-            # 转移后的 regime 与常规候选同权, 实际 size 由 gate 预算主导。
-            # [历史]  前这里写 CAP_FRACS["probe"] = 0.02。
+            "entry_gate": _eg,
+            # Gate 收复后的 regime 与常规候选同权；实际 size 由 gate 预算主导。
             "cap_pct_nav": NOTIONAL_CAP,
-            "zones": cur_zones,
+            "zones": nr_zones,
             "provisional": [],
             # 缺口 2: reclaim_* 此前不带 next_gate_preview, 于是收复之后
             # `agent["next_regime"] = None` —— 爬回原位却头顶一个 gate 都没有。
