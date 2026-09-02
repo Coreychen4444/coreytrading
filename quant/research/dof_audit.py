@@ -76,9 +76,7 @@ NOT_DOF_ARGNAMES = ("r", "timeout", "retries", "digits", "nd", "d", "delay",
                     "num", "limit", "max_results", "hours", "top_n",
                     "max_expiries")              # 管道：利率入参 / 网络 / 分页 / 格式
 NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统可调选择
-    "data/x_search:HOURS_CAP", "data/x_search:MAX_RESULTS_CAP",
-    "data/x_search:MAX_RESULTS_FLOOR",           # API 与计费上限
-    "sync/price_reminder_sync:NOTE_WIDTH_MAX",   # moomoo note 服务端半宽单位硬限
+    "sync/price_reminder_sync:NOTE_WIDTH_MAX",   # 券商 note 服务端硬限 40 半宽单位 (实测定界)
     "sync/price_reminder_sync:MAX_PER_TICKER",
     "decision/level_map:PROFILE_SESSIONS_PER_DAY",  # 一天几根 60m bar = 事实
     "report/portfolio_brief:TOP_MOVERS_COUNT",   # 显示条数
@@ -161,8 +159,11 @@ CLASSIFY: dict[str, str] = {
     # ── canonical 文档契约（不是回测，但有公开明文出处） ──
     "decision/exit_guard:ratchet_arm_gain": "fiat",        # +50% 保本 trend-exit §2
     "decision/exit_guard:ratchet_lock_gain": "fiat",       # +100% 回吐上限 1/3
-    "decision/entry_guard:iv_hard_no_single_leg": "fiat",  # IV 闸门表 canonical §六
-    "decision/entry_guard:iv_soft_half_size": "fiat",
+    # IV 硬门槛 (配置裁决): entry_guard 旧两条播报带 (80/60) 退役,
+    # 判别式下沉 core/sizing, 两个数 = 裁决 (percentile <40 / 绝对 ATM IV <50% 兜底)
+    "core/sizing:LONG_CALL_IV_PCT_MAX": "fiat",
+    "core/sizing:LONG_CALL_IV_ABS_MAX": "fiat",
+    "decision/exit_guard:opt_gate_stop_days": "fiat",    # S5g ×1 日收盘确认
     "decision/entry_guard:parabolic_anchors": "ruled",     # entry_ladder 回测
     "decision/entry_guard:repair_reclaim_days": "ruled",   # 10 日 ladder_entry
     "decision/entry_guard:STALE_CONFIRM_DAYS": "convention",   # 2 日 zone-maintenance, pin
@@ -171,6 +172,14 @@ CLASSIFY: dict[str, str] = {
     # per-instrument 2×ATR14 ruler. Pin tests keep both live consumers aligned.
     "decision/entry_guard:STALE_BREAKDOWN_DAYS": "ruled",
     "decision/entry_guard:STALE_VOL_ATR_MULT": "ruled",
+    # 判别式下沉 core.structure.zone_mech_stale (MU 一张卡四个数案,
+    # today_group/z1 画线接同判别式) —— 字面量搬家不是新旋钮, 出处同上四行:
+    # 2/1/2.0 = 配置裁决 + 2,490 票日校准, 14 = zone-maintenance
+    # 时间触发。eg/pb 侧现为 re-export, 三方恒等由 pin 测试钉。
+    "core/structure:STALE_CONFIRM_DAYS": "convention",
+    "core/structure:STALE_BREAKDOWN_DAYS": "ruled",
+    "core/structure:STALE_VOL_ATR_MULT": "ruled",
+    "core/structure:STALE_DAYS_REVIEWED": "convention",
     "decision/entry_guard:zone_stale_days_reviewed": "convention",  # 14 日 zone-maintenance
     "decision/entry_guard:FLOOR_GAP_ATR": "ruled",         # 0.25N round-2b
     "report/gate_audit:FLOOR_GAP_ATR": "ruled",
@@ -184,7 +193,7 @@ CLASSIFY: dict[str, str] = {
     # confirmed/probe/early_risky 随轮预算 dict→tuple 消失, 净 DoF −2
     # gate 语义：累计上限由 production contract 固定。
     # ROUND_RISK_FRACS(增量) → GATE_RISK_CAPS(累计) 是**同一个旋钮换表达**,
-    # 不是新自由度 —— 三个数来自已锁定的 T × 50/30/20 分配。
+    # 不是新自由度 —— 三个数的出处仍是已锁定的 T × 50/30/20 (测试钉 provenance)。
     "core/sizing:GATE_RISK_CAPS": "ruled",
     "core/sizing:OPTION_MIN_GATE": "fiat",                 # production contract
     # gate_no 由 `sizing.gate_count` 数出来 (判据 = 卡上给 cap 的 up 转移数),

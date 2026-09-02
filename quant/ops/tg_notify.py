@@ -19,34 +19,39 @@ import time
 import urllib.request
 import urllib.error
 
-# Load optional legacy channel config, then fall back to environment variables.
-CHANNEL_ENV = os.path.expanduser("~/.claude/channels/telegram/.env")
+# Optional credential files, tried in order, then environment variables.  The
+# first entry is agent-neutral: any runner (scheduled task, cron, another
+# assistant) can own it.  The second is the legacy per-channel location kept for
+# compatibility.  Credentials never live in the repository.
+TOKEN_ENV_PATHS = (
+    os.path.expanduser("~/.config/coreytrading/telegram.env"),
+    os.path.expanduser("~/.claude/channels/telegram/.env"),
+)
+
+
+def _read_env_value(key: str) -> str:
+    for env_path in TOKEN_ENV_PATHS:
+        if not os.path.exists(env_path):
+            continue
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{key}="):
+                    return line.split("=", 1)[1].strip()
+    return ""
 
 
 def load_chat_id() -> str:
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not chat_id and os.path.exists(CHANNEL_ENV):
-        with open(CHANNEL_ENV) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("TELEGRAM_CHAT_ID="):
-                    chat_id = line.split("=", 1)[1].strip()
-                    break
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or _read_env_value("TELEGRAM_CHAT_ID")
     if not chat_id:
-        raise RuntimeError("TELEGRAM_CHAT_ID not found in channel .env or environment")
+        raise RuntimeError("TELEGRAM_CHAT_ID not found in a credential file or the environment")
     return chat_id
 
 
 def load_bot_token() -> str:
-    if os.path.exists(CHANNEL_ENV):
-        with open(CHANNEL_ENV) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("TELEGRAM_BOT_TOKEN="):
-                    return line.split("=", 1)[1].strip()
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    token = _read_env_value("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN not found in channel .env or environment")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not found in a credential file or the environment")
     return token
 
 

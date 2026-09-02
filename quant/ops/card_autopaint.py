@@ -108,7 +108,10 @@ Read these canonical instructions before acting:
 Requirements:
 1. Use only completed daily bars. Refresh the local cache if necessary.
 2. Run `quant/decision/level_map.py` and `quant/decision/tape_check.py` for {ticker}.
-3. Treat catalysts and macro context as information, never structural authorization.
+3. Do not fetch news, social posts or macro data in this session. Read the local
+   earnings calendar through `quant/data/earnings_calendar.py`; leave the field
+   empty when it has nothing. Catalysts and macro context are information and
+   never structural authorization.
 4. Define z1, z2, trim, no-chase and stop. Provide a defensible multi-source gate
    and a prepared `next_regime.entry_gate`; never invent a level to fill a field.
 5. Write through the controlled helper only:

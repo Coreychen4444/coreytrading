@@ -8,6 +8,19 @@ from quant.options import premium_proj as pp
 ARGS = dict(mark=20.48, spot=355.60, strike=390.0, dte_days=523, iv_pct=34.1)
 
 
+def test_option_gate_base_projects_and_stock_ignores_it():
+    """S5g (): gate_level 只在期权分支投影成保费基参与 max; 正股传了也不读
+    (正股 stop 仍是 bfloor_buf)。"""
+    st = pp.binding_stop(is_option=True, card_stop=340.0, gate_level=380.0,
+                         s1_floor=28.0, **ARGS)
+    assert st["source"] == "gate" and "正股 gate 380" in st["note"]
+    st2 = pp.binding_stop(is_option=True, card_stop=340.0, gate_level=380.0,
+                         gate_days=2, s1_floor=28.0, **ARGS)
+    assert "×2日" in st2["note"]
+    st3 = pp.binding_stop(is_option=False, card_stop=340.0, gate_level=380.0)
+    assert (st3["source"], st3["value"]) == ("card", 340.0)
+
+
 def test_bs_projection_is_monotonic_in_level():
     lo = pp.project_call_premium(340.0, **ARGS)
     mid = pp.project_call_premium(355.60, **ARGS)

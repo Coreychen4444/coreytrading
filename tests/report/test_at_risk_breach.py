@@ -2,9 +2,9 @@
 
 规则: 止损打掉后的损失 ≤ AT_RISK_CAP_FRAC (5%) × NAV。
 正股按 binding stop (max(卡 stop, trail), 与 stop_status 同口径);
-期权 long 按 保费 mark × OPTION_ATRISK_LOSS_FRAC (0.25 — S1 premium stop 接线后的
-loss/unit, 用户  裁决放宽自保费全额; 系数与 exit_guard 的 opt_s1_stop
-相等由 tests/decision/test_exit_guard.py 钉)。
+期权 long 按 保费 mark × OPTION_ATRISK_LOSS_FRAC (= |S1|: 放宽自保费全额时
+0.25, S1 收到 −20 后 0.20; 系数与 exit_guard 的 opt_s1_stop 相等由
+tests/decision/test_exit_guard.py 钉)。
 """
 import pytest
 
@@ -51,14 +51,15 @@ def test_under_cap_no_stop_synthetic_and_breached_stop_are_silent():
 
 
 def test_option_premium_times_s1_fraction_googl_shape():
-    """GOOGL270115C390000 实卡数字 @ 0.25 口径: $2,047.5 × 0.25 = $511.9 = 2.4% NAV
-    → **不再超标**— 这正是放宽的效果 (旧保费全额口径下它超 ~1.9×)。"""
+    """GOOGL270115C390000 实卡数字 @ |S1| 口径 (0.20 自): $2,047.5 × 0.20 =
+    $409.5 = 1.9% NAV → **不超标** — 放宽的效果 (旧保费全额口径下它超 ~1.9×)。"""
+    from quant.core.sizing import OPTION_ATRISK_LOSS_FRAC as F
     opt = {"ticker": "GOOGL270115C390000", "qty": 1, "current_price": 20.475}
     assert pb.at_risk_breach_signal(opt, {"stop_level": 358.5}, None, 21_200.0) is None
-    # 超标形状: 5 张 → at-risk 5×$511.9=$2,559 > cap $1,060; keep=int(1060/511.9)=2 → 减 3
+    # 超标形状: 5 张 → at-risk 5×$409.5=$2,047.5 > cap $1,060; keep=int(1060/409.5)=2 → 减 3
     sig = pb.at_risk_breach_signal({**opt, "qty": 5}, {"stop_level": 358.5}, None, 21_200.0)
     assert sig is not None and sig["kind"] == "option_premium"
-    assert sig["at_risk_usd"] == pytest.approx(5 * 2047.5 * 0.25, abs=0.01)
+    assert sig["at_risk_usd"] == pytest.approx(5 * 2047.5 * F, abs=0.01)
     assert sig["trim_units"] == 3
     assert "S1 premium stop" in sig["stop_basis"]
     # 标的 stop 不给期权折扣 — 用保费不用 (标的价−stop)

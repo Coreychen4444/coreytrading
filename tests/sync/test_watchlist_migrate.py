@@ -274,8 +274,10 @@ def _held_option(qty=1.0):
 
 
 def test_stub_may_not_erase_a_card_that_has_zones(repo):
-    """ 回归: 持有 GOOGL LEAPS + watchlist 有 GOOGL stub → 促升必须被拦,
-    正股卡的 zones 一个字不许动。"""
+    """ 回归: 持有 GOOGL LEAPS + watchlist 有 GOOGL stub → 正股卡的
+    zones 一个字不许动。 起保护机制升级: active+有图 = `_already_live`
+    整票跳过促升 (skipped_live), 不再走 blocked——blocked 的补救话术「补全候选卡」
+    在这形状下恰好通向另一半破坏 (画了图的覆盖会抹机器 regime + regime_history)。"""
     pos, wl = repo(
         {"GOOGL": _synthetic_underlying(json.loads(json.dumps(GOOGL_REAL_AGENT))),
          "GOOGL270115C390000": _held_option()},
@@ -289,13 +291,60 @@ def test_stub_may_not_erase_a_card_that_has_zones(repo):
     assert agent["zones"]["anchored_on"]["date"] == "2026-08-05"
     assert agent["thesis"]["status"] == "needs_reverification"
     assert "prior_campaigns" not in agent                     # 没被归档 = 没被覆盖
-    assert result["promote_blocked"] == ["GOOGL"]
+    assert result["promote_skipped_live"] == ["GOOGL"]
+    assert result["promote_blocked"] == []                    # live-skip 优先于 blocked
     assert result["promoted"] == []
 
 
+def test_live_card_survives_even_a_painted_candidate(repo):
+    """ META 案回归: 候选卡**有图**也不许覆盖 active 卡 —— 旧守卫只挡
+    空卡, 画了图的候选会把机器授的 regime cap 与 regime_history (gate 档位) 整块
+    顶掉 (candidate 带 card 源 regime → derive(positions) → cap 0)。判据第二腿。"""
+    live_agent = json.loads(json.dumps(GOOGL_REAL_AGENT))
+    live_agent["current_regime"] = {"name": "reclaim_553", "cap_pct_nav": 0.4,
+                                    "participation": "zone_eligible",
+                                    "since": "2026-08-26", "source": "auto"}
+    live_agent["regime_history"] = [{"direction": "up", "to": "reclaim_553",
+                                     "cap_pct_nav": 0.4, "on": "2026-08-26"}]
+    painted_candidate = json.loads(json.dumps(NEW_MU_CARD))   # 有 zones 的候选
+    pos, wl = repo(
+        {"GOOGL": _synthetic_underlying(live_agent),
+         "GOOGL270115C390000": _held_option()},
+        {"GOOGL": painted_candidate},
+    )
+
+    result = wm.run_migration(apply=True)
+
+    agent = _read(pos)["GOOGL"]["agent"]
+    assert agent["current_regime"]["cap_pct_nav"] == 0.4      # 机器授权原样
+    assert agent["current_regime"]["source"] == "auto"
+    assert agent["regime_history"][0]["to"] == "reclaim_553"  # gate 档位记录原样
+    assert result["promote_skipped_live"] == ["GOOGL"]
+    assert result["promoted"] == []
+    assert list(_read(wl)) == ["GOOGL"]                       # 候选留在 watchlist
+
+
+def test_closed_card_with_zones_still_blocks_an_empty_stub(repo):
+    """blocked 路径的存留域 = 重进 (closed 卡带图 + 候选还是 stub): 不是 live 管理
+    中的卡 (_already_live 不命中), 但空卡覆盖仍要拦 + 告警催人补卡。"""
+    closed_agent = json.loads(json.dumps(GOOGL_REAL_AGENT))
+    closed = _synthetic_underlying(closed_agent)
+    closed["status"] = "closed"
+    closed["broker"]["synthetic"] = False
+    pos, wl = repo(
+        {"GOOGL": closed, "GOOGL270115C390000": _held_option()},
+        {"GOOGL": GOOGL_STUB},
+    )
+
+    result = wm.run_migration(apply=True)
+
+    assert result["promote_blocked"] == ["GOOGL"]
+    assert result["promote_skipped_live"] == []
+    assert _read(pos)["GOOGL"]["agent"]["zones"]["stop_level"] == 335.5
+
+
 def test_blocked_candidate_stays_in_the_watchlist(repo):
-    """拦下之后候选**不 pop**—— 条件因此每轮都算得出来 (对账不是事件),
-    portfolio_brief 才能把它当 INFRA:promote_blocked 报出去。"""
+    """拦/跳之后候选**不 pop** —— 条件因此每轮都算得出来 (对账不是事件)。"""
     pos, wl = repo(
         {"GOOGL": _synthetic_underlying(json.loads(json.dumps(GOOGL_REAL_AGENT))),
          "GOOGL270115C390000": _held_option()},
@@ -305,13 +354,13 @@ def test_blocked_candidate_stays_in_the_watchlist(repo):
     wm.run_migration(apply=True)
     assert list(_read(wl)) == ["GOOGL"]
 
-    again = wm.run_migration(apply=True)          # 幂等: 下轮照样拦, 照样报
-    assert again["promote_blocked"] == ["GOOGL"]
+    again = wm.run_migration(apply=True)          # 幂等: 下轮照样跳, 照样报
+    assert again["promote_skipped_live"] == ["GOOGL"]
     assert _read(pos)["GOOGL"]["agent"]["zones"]["stop_level"] == 335.5
 
 
-def test_a_real_card_still_promotes_alongside_a_blocked_one(repo):
-    """守卫只挡空卡。同一轮里有图的候选照常促升 —— 别把整条路堵死。"""
+def test_a_real_card_still_promotes_alongside_a_skipped_one(repo):
+    """live-skip 只跳自己那票。同一轮里真正的重进候选照常促升 —— 别把整条路堵死。"""
     pos, wl = repo(
         {"GOOGL": _synthetic_underlying(json.loads(json.dumps(GOOGL_REAL_AGENT))),
          "GOOGL270115C390000": _held_option(),
@@ -322,7 +371,7 @@ def test_a_real_card_still_promotes_alongside_a_blocked_one(repo):
     result = wm.run_migration(apply=True)
 
     assert result["promoted"] == ["MU"]
-    assert result["promote_blocked"] == ["GOOGL"]
+    assert result["promote_skipped_live"] == ["GOOGL"]
     assert _read(pos)["MU"]["agent"]["zones"]["stop_level"] == 800.0
     assert _read(pos)["GOOGL"]["agent"]["zones"]["stop_level"] == 335.5
     assert list(_read(wl)) == ["GOOGL"]
@@ -347,6 +396,11 @@ def test_blocked_promotions_is_a_pure_function_of_the_two_docs(repo):
         "GOOGL": _synthetic_underlying(json.loads(json.dumps(GOOGL_REAL_AGENT))),
         "GOOGL270115C390000": _held_option()}}
     wl_doc = {"tickers": {"GOOGL": GOOGL_STUB}}
+    # active+有图 → live-skip 域, 不再计入 blocked ()
+    assert wm.blocked_promotions(pos_doc, wl_doc) == []
+
+    # closed+有图 + stub → blocked 的存留域
+    pos_doc["tickers"]["GOOGL"]["status"] = "closed"
     assert wm.blocked_promotions(pos_doc, wl_doc) == ["GOOGL"]
 
     # 期权平掉 → GOOGL 不再是持仓 → 根本不会促升 → 无所谓拦不拦
@@ -354,7 +408,7 @@ def test_blocked_promotions_is_a_pure_function_of_the_two_docs(repo):
     assert wm.blocked_promotions(pos_doc, wl_doc) == []
 
 
-def test_detect_only_reports_the_block_without_writing(repo):
+def test_detect_only_reports_the_skip_without_writing(repo):
     pos, wl = repo(
         {"GOOGL": _synthetic_underlying(json.loads(json.dumps(GOOGL_REAL_AGENT))),
          "GOOGL270115C390000": _held_option()},
@@ -364,7 +418,7 @@ def test_detect_only_reports_the_block_without_writing(repo):
 
     result = wm.run_migration(apply=False)
 
-    assert result["promote_blocked"] == ["GOOGL"]
+    assert result["promote_skipped_live"] == ["GOOGL"]
     assert "GOOGL" not in result["to_promote"]
     assert (pos.read_text(), wl.read_text()) == before
 

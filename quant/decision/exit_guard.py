@@ -55,6 +55,7 @@ from quant.core.paths import (# noqa: E402
 )
 from quant.core.timeutil import et_today, now_utc_iso  # noqa: E402
 from quant.options import premium_proj  # noqa: E402  止损显示折基 (binding_stop 单一装配点)
+from quant.core.sizing import granting_gate_level  # noqa: E402  期权 S5g: 授予 cap 的 gate = 退出线
 
 PARAMS = {
     "ratchet_arm_gain": 0.50,       # 峰值 ≥ +50% → 保本地板 (赢单不许变亏单)
@@ -77,7 +78,14 @@ PARAMS = {
     # S1=-25 是 用户 知情保守裁决 —— 回测窗  末起为 AI 牛市, whipsaw 读数
     # 被「什么都涨回来」抬高不可外推, 保守取紧; 紧档在牛市样本的 mean 代价
     # (-20.4pp) 同被牛市偏置污染。+12 月复测窗 (含更多 regime) 复核。
-    "opt_s1_stop": -0.25,           # premium ≤ 成本×(1-25%) → 清仓 (硬 stop)
+    # 用户 裁「收到 20%」(gate1 期权入场同日开放): 42 张 Jan27 重放上
+    # −20 vs −25 = p10 −27.5 vs −32.3 (尾部好) / mean +24.8 vs +32.6 / whipsaw 95%
+    # vs 91% —— 知情换尾部。sizing.OPTION_ATRISK_LOSS_FRAC 随 pin 跟到 0.20。
+    "opt_s1_stop": -0.20,           # premium ≤ 成本×(1-20%) → 清仓 (硬 stop)
+    # S5g gate 退出线 (用户, META 553 案): 期权的正股退出线 = 授予当前
+    # cap 的那道 gate 本身 (sizing.granting_gate_level), 收盘 ×1 日跌破即清仓;
+    # 正股仍用 bfloor_buf (gate − 0.5N), 期权含杠杆知情接受更高止损率。
+    "opt_gate_stop_days": 1,
     "opt_s2_days": (20, 25),        # d20 未收上入场+1N → 减半; d25 → 清仓
     "opt_s4_dte_floor": 90,         # DTE ≤ 90 → close-or-roll (合成弱支持 90>120)
     "opt_s3_iv_drop": 8.0,          # advisory 只播不裁: IV 自入场 -8pts 且未 +1N
@@ -256,20 +264,32 @@ def _iv_at(underlying: str, date_str: str, latest: bool = False) -> Optional[flo
 def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
                         avg_cost: Optional[float], qty: float, dte: Optional[int],
                         underlying: str, klines: List[dict],
-                        p: Dict = PARAMS) -> Tuple[List[Dict], List[str]]:
-    """单腿 long call 亏损侧 S1/S2/S4 + S3 advisory (用户  终裁接线)。
+                        p: Dict = PARAMS, *,
+                        gate_level: Optional[float] = None) -> Tuple[List[Dict], List[str]]:
+    """单腿 long call 亏损侧 S1/S2/S4 + S3 advisory (用户终裁接线)。
 
     盈利侧 (棘轮/G-01/趋势死亡线) 已有 —— 本函数只补**棘轮武装前**的裸窗口
     (构造性盲区: OTM 横盘 + IV 回落 premium -64% 零告警, §13.4 立项 ;
     GOOGL  案: spot -6.2% 时 premium -41.5%, underlying stop 慢一个量级)。
     fired flags 一次性; S1 收复 stop 线 +2% 重新武装 (同棘轮语义)。
     S2 单张不可拆: 减半档降级为提示行, d25 清仓档照常 (整股约束哲学)。
+
+    S5g (用户, META 553 案): `gate_level` = 授予 underlying 当前 cap 的
+    那道 gate (sizing.granting_gate_level); underlying 收盘 ×opt_gate_stop_days 跌破
+    → 清仓一枪, 收回 gate 之上重新武装。这是「见底条件失效」的机械形状 —— 期权
+    不等正股的 bfloor_buf。None = 常规参与卡/参与流已断, 退回卡 stop (S5)。
     """
     shots: List[Dict] = []
     lines: List[str] = []
     ov = g.setdefault("opt_overlay", {
         "s1_fired": False, "s2_half_fired": False, "s2_full_fired": False,
         "s4_fired": False})
+    ov.setdefault("gate_fired", False)
+    # 写回 guard 供显示层/画线读 (brief stop_status · price_reminder exit_floor_map):
+    # gate 线是 underlying 基, 与 trail 同基, 挂正股 code。
+    g["opt_gate_stop"] = ({"level": round(float(gate_level), 4),
+                           "days": int(p.get("opt_gate_stop_days") or 1)}
+                          if gate_level else None)
     if mark is None or not avg_cost:
         return shots, lines
     s1_level = avg_cost * (1 + p["opt_s1_stop"])
@@ -286,6 +306,26 @@ def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
                      f"× {1 + p['opt_s1_stop']:.0%} = {_fmt(s1_level)}。"
                      f"行动【今日内】: 清仓 {qty:g} 张 — 这是资金管理线, 不看 underlying 在哪。"
                      f"无 override 路径；不执行 = 规则外评 C 起步。(期权退出栈 S1)")})
+
+    # S5g gate 退出线 (underlying 收盘口径, 已完成日线)
+    if gate_level and klines:
+        gdays = int(p.get("opt_gate_stop_days") or 1)
+        tail = [coerce_float(r.get("close")) for r in klines[-gdays:]]
+        latest = tail[-1] if tail else None
+        if ov["gate_fired"] and latest is not None and latest > gate_level:
+            ov["gate_fired"] = False
+            lines.append(f"{ticker}: {underlying} close {_fmt(latest)} 收回 gate "
+                         f"{_fmt(gate_level)} 之上, S5g 重新武装")
+        if not ov["gate_fired"] and len(tail) == gdays and all(
+                c is not None and c < gate_level for c in tail):
+            ov["gate_fired"] = True
+            shots.append({
+                "ticker": ticker, "type": "opt_gate_stop", "value": latest,
+                "text": (f"🚨 {ticker} 跌破授权 gate: {underlying} 收盘 {_fmt(latest)} < gate "
+                         f"{_fmt(gate_level)} (×{gdays}日)。行动【今日内】: 清仓 {qty:g} 张 — "
+                         f"见底条件失效即走, 不等正股 bfloor (期权含杠杆, 接受稍高止损率)。"
+                         f"无 override 路径, "
+                         f"不执行 = 规则外评 C 起步。(期权退出栈 S5g)")})
 
     # S2 时间 stop (锚 = 入场日 underlying close + 1×ATR20@入场)
     seed, armed = g.get("seed_close"), g.get("armed_date")
@@ -629,7 +669,8 @@ def evaluate(doc: Dict, guards: Dict, today: str,
                              f"let-winner-run 只减不清。无 override 路径；不执行 = 规则外评 C 起步。(G-01)")})
             # 亏损侧 overlay S1/S2/S4 + S3 advisory（终裁；棘轮武装前的裸窗口）
             ov_shots, ov_lines = option_loss_overlay(
-                ticker, g, mark, avg_cost, qty, dte, underlying, klines, p)
+                ticker, g, mark, avg_cost, qty, dte, underlying, klines, p,
+                gate_level=granting_gate_level((doc.get("tickers") or {}).get(underlying)))
             one_shot.extend(ov_shots)
             lines.extend(ov_lines)
 
@@ -718,7 +759,9 @@ def evaluate(doc: Dict, guards: Dict, today: str,
                   "spot": coerce_float((klines[-1] or {}).get("close")) if klines else None,
                   "strike": occ.get("strike"), "dte_days": dte,
                   "iv_pct": coerce_float(broker.get("iv_pct")),
-                  "delta": coerce_float(broker.get("delta"))}
+                  "delta": coerce_float(broker.get("delta")),
+                  "gate_level": coerce_float((g.get("opt_gate_stop") or {}).get("level")),
+                  "gate_days": int((g.get("opt_gate_stop") or {}).get("days") or 1)}
         bs = premium_proj.binding_stop(
             is_option=bool(occ), card_stop=card_stop, card_days=days,
             lock_floor=coerce_float(r.get("floor")), lock_stage=r.get("stage"),

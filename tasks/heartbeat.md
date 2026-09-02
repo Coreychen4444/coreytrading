@@ -11,8 +11,8 @@ Run the repository's periodic monitoring loop.
 
 Treat news and macro context as `[FYI]`. Position authorization comes from the deterministic card, structure and risk layers.
 
-When material industry events occur, add at most two sourced `[FYI]` lines for
-model releases or pricing changes, accelerator roadmaps, hyperscaler capital
-spending, major compute or data-center contracts, and supply-chain capacity or
-pricing. Trigger this track by event type rather than ticker; map it only to
-relevant holdings or candidates and state no directional recommendation.
+This task does not fetch news, social posts or macro data. Send the rendered
+cards verbatim and append no commentary of your own: a field the report does not
+contain is a field the narrator would invent. If the operator has configured an
+intelligence archive, it may be read read-only and cited with its date; when it
+says nothing, say nothing.

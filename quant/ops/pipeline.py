@@ -108,6 +108,12 @@ STAGES: List[Stage] = [
           "平仓收尾: qty 归零的卡片清 lots + 标 closed + 落 exit_info (lots 归档不删)。"
           "须在 fills 之后 (要事件流算 realized_pnl)、brief 之前 (否则简报拿死卡当持仓)",
           parse_json=True, needs_opend=False),
+    Stage("exit_score", ["quant/journal/exit_score.py", "--json"], BOTH,
+          "结构性退出自动评分 → scores.jsonl (2026-08-25 用户, NBIS 案): 降级在案 + "
+          "close_reconcile 落了 exit_info → 时延档 D+0=A/D+1=B/D+2+=C, 幂等去重。"
+          "须在 reconcile 之后 (exit_info 是判据)、watchlist_sync 之前 (促升覆盖 "
+          "closed 卡前评完); unresolved_demotions (点名) 的对偶 (记分)",
+          parse_json=True, needs_opend=False),
     Stage("watchlist_sync", ["quant/sync/watchlist_sync.py", "--json"], BOTH,
           "moomoo 自选分组 ↔ watchlist.json 对账 (briefing 须先于 kline_cache, 新 stub "
           "当轮即可拉 K 线)。已持仓 → 自动移出分组 (入场候选语义) / 平仓 → "
@@ -380,7 +386,7 @@ def main(argv: List[str]) -> int:
             extra.append("--event-day")
         if a.read_only and s.key == "brief":
             extra.append("--read-only")          # 不消耗真 heartbeat 的告警窗口
-        if a.read_only and s.key in ("reconcile", "lots", "autopaint"):
+        if a.read_only and s.key in ("reconcile", "exit_score", "lots", "autopaint"):
             # A preview must not mutate trading state.
             # Autopaint launches a detached writer, so preview mode only reports targets.
             extra.append("--dry-run")

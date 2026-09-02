@@ -41,6 +41,12 @@ def no_earnings_today(monkeypatch):
                         lambda *a, **k: {"power": 1e9, "room": 1e9, "spent_today": 0.0,
                                          "as_of": TODAY, "implied_cash": 1e9,
                                          "leveraged": False})
+    # 同族第三发预防 ( staleness 接线时封): _admit 的机械 staleness
+    # 价格腿走 book.bars → live kline 缓存, 而 fixture 用 INTC/MRVL 等**真 ticker**
+    # —— 真实市场哪天来一根 >2×ATR14 的 bar, 这里一片红且第二天自己变绿。
+    # 授权判据测试不读 live: 空 rows = 价格/vol 腿沉默, 时间腿 (valid_until/
+    # last_reviewed) 照常可测。staleness 判别式本身钉在 tests/core/test_structure.py。
+    monkeypatch.setattr(tgs.book, "bars", lambda *a, **k: [])
 
 POS = {"tickers": {
     "INTC": {"broker": {"qty": 4},          # qty ≡ lots 之和: 对不上是台账守卫的用例, 不是这里的
@@ -466,3 +472,68 @@ def test_grant_budget_maxed_is_zero_not_advance():
     wl = tgs.grant_actual_cap("MSFT", WL["tickers"]["MSFT"], 20000.0, None, QUOTE,
                               veto_of=UP, exposure_of=lambda t: 0.0)
     assert wl["binding"] == "regime" and wl["cap_usd"] == 1000.0   # watchlist 原路
+
+
+# ── 机械 staleness 接进白名单 ( 用户, MU 一张卡四个数案) ──
+#
+# entry_guard 判 STALE 的同一判别式 (core.zone_mech_stale) 现在也守 _admit:
+# 此前这里只查 valid_until, MU 8/24 breakdown 后 entry_guard 拒绝给计划,
+# 白名单却照常授权 $7,460、z1 备注画 950 (40%:7.5k)。z1 预算备注经
+# z1_budgets → desired_members 同拍跟随, 出组即回落裸观察线。
+
+_MU_ZONES = {"accumulation_zone_1": [940.5, 950.0], "accumulation_zone_2": [921.5, 940.5],
+             "trim_zone": [990.0, 1008.0], "valid_until": "2026-08-28"}
+
+
+def _mu_card(zones=None):
+    return {"status": "watching", "moomoo_listed": True,
+            "agent": {"current_regime": {"name": "R_突破_945", "cap_pct_nav": 0.4,
+                                         "source": "card", "since": "2026-08-14"},
+                      "zones": dict(zones or _MU_ZONES)}}
+
+
+def _bars(closes):
+    return [{"time": f"2026-08-{20 + i:02d}", "close": c, "high": c + 5, "low": c - 5}
+            for i, c in enumerate(closes)]
+
+
+def test_breakdown_stale_card_is_evicted_and_reported():
+    """valid_until 未到 (8/28) 但收盘破 z2 下沿 = breakdown stale → 不进组 + 必报。
+    MU 实况数字。"""
+    wl = {"tickers": {"MU": _mu_card()}}
+    members, notes = tgs.desired_members({"tickers": {}}, wl, "2026-08-25",
+                                         bars_of=lambda t: _bars([966.78, 910.43]))
+    assert "MU" not in members
+    assert any("MU" in n and "zone stale" in n and "breakdown" in n for n in notes)
+
+
+def test_fresh_card_still_enters_with_same_bars_shape():
+    wl = {"tickers": {"MU": _mu_card()}}
+    members, notes = tgs.desired_members({"tickers": {}}, wl, "2026-08-25",
+                                         bars_of=lambda t: _bars([966.78, 945.0]))
+    assert "MU" in members
+
+
+def test_no_klines_price_legs_silent_membership_kept():
+    """无 K 线 → 价格腿沉默不拦 (判不了的腿不拦); 「无 K 线保守不 grant」仍归
+    grant 层 structure_veto_of, membership 不替它裁。"""
+    wl = {"tickers": {"MU": _mu_card()}}
+    members, _ = tgs.desired_members({"tickers": {}}, wl, "2026-08-25",
+                                     bars_of=lambda t: [])
+    assert "MU" in members
+
+
+def test_stale_eviction_also_covers_position_cards():
+    """持仓票同权 ( z1 补洞的对称面): 持仓卡 stale → 加仓授权同拍撤。"""
+    pos = {"tickers": {"MRVL": {
+        "broker": {"qty": 18},
+        "lots": {"position": [{"qty": 18, "avg_cost": 225.33}]},
+        "agent": {"current_regime": {"name": "R_突破_223", "cap_pct_nav": 0.4,
+                                     "source": "auto", "since": "2026-08-15"},
+                  "zones": {"accumulation_zone_1": [233.0, 239.2],
+                            "accumulation_zone_2": [225.0, 233.0],
+                            "trim_zone": [262.2, 268.0], "valid_until": "2026-09-01"}}}}}
+    members, notes = tgs.desired_members(pos, {"tickers": {}}, "2026-08-25",
+                                         bars_of=lambda t: _bars([230.0, 220.0]))
+    assert "MRVL" not in members
+    assert any("MRVL" in n and "zone stale" in n for n in notes)

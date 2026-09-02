@@ -47,19 +47,22 @@ def test_shock_breaker_mult_live_equals_backtest():
 
 
 def test_breakout_stale_days_same_in_guard_and_brief():
-    """zone-maintenance「连续 ≥2 交易日」stale 确认口径的两份手搓。
+    """zone-maintenance stale 口径三方恒等 (core 真源 + eg 委托 + pb 手搓孪生)。
 
-    entry_guard (入场侧 STALE 判定) 与 portfolio_brief (简报 zone_stale 告警)
-    各自实现 breakout/breakdown-stale。口径漂了的后果: 一边已判 STALE 拒绝
-    授权, 另一边还没响 —— 「两条线并存报了不 binding 那条」的既有失效形状
-    (ledger §3.5-breakout)。
+    判别式下沉 core.structure.zone_mech_stale (MU 一张卡四个数案:
+    entry_guard STALE 拒绝给计划, today_group 白名单照常授权 + z1 备注带预算)。
+    eg/pb 常量现为 re-export —— 本测试防的是有人把 re-export 改回字面量后
+    再单独改 core: 口径漂了的后果照旧是「一边已判 STALE 拒绝授权, 另一边还
+    没响」(ledger §3.5-breakout / 同概念双判别式惯犯)。
     """
+    from quant.core import structure as st
     from quant.decision import entry_guard as eg
     from quant.report import portfolio_brief as pb
-    assert eg.STALE_CONFIRM_DAYS == pb.STALE_CONFIRM_DAYS == 2
-    # Breakdown is immediate; volatility is scaled by 2×ATR14 in both consumers.
-    assert eg.STALE_BREAKDOWN_DAYS == pb.STALE_BREAKDOWN_DAYS == 1
-    assert eg.STALE_VOL_ATR_MULT == pb.STALE_VOL_ATR_MULT == 2.0
+    assert st.STALE_CONFIRM_DAYS == eg.STALE_CONFIRM_DAYS == pb.STALE_CONFIRM_DAYS == 2
+    # Breakdown is immediate; volatility is scaled by 2×ATR14 in every consumer.
+    assert st.STALE_BREAKDOWN_DAYS == eg.STALE_BREAKDOWN_DAYS == pb.STALE_BREAKDOWN_DAYS == 1
+    assert st.STALE_VOL_ATR_MULT == eg.STALE_VOL_ATR_MULT == pb.STALE_VOL_ATR_MULT == 2.0
+    assert st.STALE_DAYS_REVIEWED == 14  # last_reviewed 怀疑过期 (zone-maintenance 时间触发)
 
 
 def test_chandelier_trail_constants_match_exit_guard():

@@ -66,6 +66,29 @@ def _erases_card(existing: Dict[str, Any], incoming: Dict[str, Any]) -> bool:
         not (((incoming or {}).get("agent") or {}).get("zones"))
 
 
+def _already_live(existing: Dict[str, Any]) -> bool:
+    """positions 卡 active 且有图 = 这张卡正被 live 管理, 促升无事可做。
+
+    出现场景 = 期权 underlying 的合法双卡态 (META 案): 正股 qty 0
+    只持期权 → watchlist_sync 的 held_bare 不移出分组 (候选语义, 有意) →
+    sync 建 stub, 而 migrate 的 held_incl_option_underlyings 判它"已持仓"要促升。
+    此时 positions 卡活着、带图、机器转移在上面跑 (reclaim_553 cap 0.4 即 8/26
+    机器授的) —— 促升 wholesale 替换 agent 会把机器 regime 与 regime_history
+    (= `sizing.gate_count` 的档位记录) 一起抹掉: candidate 带 card 源 regime →
+    derive(bucket=positions) → cap 0, 授权与档位双毁。而候选卡留在 watchlist
+    本来就是这个双卡态的稳定形状 (entry_guard 读它做入场计划, 加仓授权归
+    positions 卡)。促升的本职是「候选成交了, 把分析搬进 positions」——
+    对一张已经在被管理的活卡, 它只有破坏没有贡献。
+
+    GOOGL 守卫 (`_erases_card`) 只挡了「空卡覆盖」这半; 空卡被拦后
+    补画候选卡恰好走进另一半 (画了图的覆盖) —— 判据逐腿被击穿的形状,
+    用户 卡片体检时发现, 本函数补上第二腿。
+    真正的重进 (平仓→回组→再买) 不受影响: 那时 positions 卡 status=closed。
+    """
+    return (existing or {}).get("status") == "active" and \
+        bool(((existing or {}).get("agent") or {}).get("zones"))
+
+
 def blocked_promotions(pos_doc: Dict[str, Any], wl_doc: Dict[str, Any]) -> List[str]:
     """会被守卫拦下的促升 —— **对账不是事件**, 两份 JSON 的纯函数。
 
@@ -78,7 +101,8 @@ def blocked_promotions(pos_doc: Dict[str, Any], wl_doc: Dict[str, Any]) -> List[
     wl = wl_doc.get("tickers") or {}
     pos = pos_doc.get("tickers") or {}
     return sorted(t for t in set(wl) & held
-                  if _erases_card(pos.get(t) or {}, wl[t]))
+                  if not _already_live(pos.get(t) or {})
+                  and _erases_card(pos.get(t) or {}, wl[t]))
 
 
 def candidate_to_position_block(candidate: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,8 +205,14 @@ def run_migration(apply: bool = False) -> Dict[str, Any]:
     held = get_active_portfolio_tickers(pos_doc)
     wl_tickers = set(wl_doc.get("tickers", {}).keys())
 
-    # Watchlist → positions: tickers now actually held
-    to_promote = sorted(wl_tickers & held)
+    # Watchlist → positions: tickers now actually held。
+    # active 且有图的 positions 卡整票跳过 (_already_live): 促升对它只有破坏
+    # (机器 regime + regime_history 会被 candidate 的 agent 整块顶掉) ——
+    # 期权 underlying 双卡态是稳定合法形状, 候选卡留在 watchlist。
+    skipped_live = sorted(
+        t for t in wl_tickers & held
+        if _already_live(pos_doc.get("tickers", {}).get(t) or {}))
+    to_promote = sorted((wl_tickers & held) - set(skipped_live))
 
     # Stale positions: have an agent block but broker.qty == 0 and not closed
     stale: List[str] = []
@@ -247,6 +277,7 @@ def run_migration(apply: bool = False) -> Dict[str, Any]:
         "to_promote": to_promote,
         "promoted": promoted,
         "promote_blocked": blocked,
+        "promote_skipped_live": skipped_live,
         "stale_position_zones": stale,
         "applied": apply,
     }

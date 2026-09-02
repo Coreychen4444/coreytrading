@@ -501,20 +501,81 @@ def _ov_setup(tmp_path, monkeypatch, klines):
 
 
 def test_opt_s1_fires_once_and_rearms(tmp_path, monkeypatch):
-    """S1: mark ≤ 成本×0.75 → 一枪; 同价不重复; 收复 +2% 重新武装再破再响。"""
+    """S1: mark ≤ 成本×0.80 ( −25→−20) → 一枪; 同价不重复; 收复 +2% 重新武装再破再响。"""
     _ov_setup(tmp_path, monkeypatch, _flat_klines("2026-06-05"))
+    assert exit_guard.PARAMS["opt_s1_stop"] == -0.20
     guards = {"positions": {}}
-    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(26.2), guards, "2026-06-05")
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(27.9), guards, "2026-06-05")
     assert [s["type"] for s in shots] == ["opt_s1_stop"], \
-        f"35×0.75=26.25, mark 26.2 应触发 S1, got {[s['type'] for s in shots]}"
+        f"35×0.80=28.0, mark 27.9 应触发 S1, got {[s['type'] for s in shots]}"
     assert "清仓" in shots[0]["text"]
-    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(26.0), guards, "2026-06-06")
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(27.5), guards, "2026-06-06")
     assert shots == [], "S1 fired flag 应去重"
-    # 收复 26.25×1.02=26.775 之上 → 重武装 → 再破再响
-    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(27.0), guards, "2026-06-07")
+    # 收复 28.0×1.02=28.56 之上 → 重武装 → 再破再响
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(28.6), guards, "2026-06-07")
     assert shots == []
-    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(26.0), guards, "2026-06-08")
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc(27.9), guards, "2026-06-08")
     assert [s["type"] for s in shots] == ["opt_s1_stop"]
+    # 旧档 −25 的 26.2 现在当然也触发, 但 27.9 在旧档不会 —— 这条断言是档位变异守卫
+    guards2, shots2, _, _ = exit_guard.evaluate(_ov_doc(28.1), {"positions": {}}, "2026-06-05")
+    assert not any(s["type"] == "opt_s1_stop" for s in shots2)
+
+
+def _ov_doc_with_gate(mark, gate_level=360.0, qty=1.0, avg_cost=35.0, history=None):
+    """期权 + underlying 卡 (qty 0, 只提供 regime_history = 授予 cap 的 gate)。"""
+    doc = _ov_doc(mark, qty=qty, avg_cost=avg_cost)
+    doc["tickers"]["GOOGL"] = {
+        "status": "active", "instrument": {"type": "stock"},
+        "broker": {"qty": 0.0}, "lots": {},
+        "agent": {"regime_history": history if history is not None else [
+            {"date": "2026-05-20", "direction": "down", "level": gate_level, "cap_pct_nav": 0},
+            {"date": "2026-05-28", "direction": "up", "level": gate_level, "cap_pct_nav": 0.40}]}}
+    return doc
+
+
+def test_opt_gate_stop_fires_on_close_below_granting_gate_and_rearms(tmp_path, monkeypatch):
+    """S5g (用户, META 553 案): underlying 收盘 ×1 日 < 授予 cap 的 gate
+    → 清仓一枪 (不等 bfloor); 收回 gate 之上重新武装; guard 上写回 opt_gate_stop 供
+    brief/画线读 (underlying 基)。"""
+    ks = _flat_klines("2026-06-05")            # close 350 恒 < gate 360
+    _ov_setup(tmp_path, monkeypatch, ks)
+    guards = {"positions": {}}
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc_with_gate(33.0), guards, "2026-06-05")
+    types = [s["type"] for s in shots]
+    assert "opt_gate_stop" in types, f"close 350 < gate 360 应触发 S5g, got {types}"
+    shot = next(s for s in shots if s["type"] == "opt_gate_stop")
+    assert "清仓 1 张" in shot["text"] and "360" in shot["text"] and "S5g" in shot["text"]
+    g = guards["positions"]["GOOGL270115C390000"]
+    assert g["opt_gate_stop"] == {"level": 360.0, "days": 1}
+    assert g["opt_overlay"]["gate_fired"] is True
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc_with_gate(33.0), guards, "2026-06-06")
+    assert not any(s["type"] == "opt_gate_stop" for s in shots), "fired flag 应去重"
+    # 收回 gate 之上 → 重武装; 再跌破 → 再响
+    for k in ks[-1:]:
+        k["close"] = 365.0
+    _ov_setup(tmp_path, monkeypatch, ks)
+    guards, shots, _, lines = exit_guard.evaluate(_ov_doc_with_gate(33.0), guards, "2026-06-08")
+    assert guards["positions"]["GOOGL270115C390000"]["opt_overlay"]["gate_fired"] is False
+    assert any("S5g 重新武装" in ln for ln in lines)
+    for k in ks[-1:]:
+        k["close"] = 350.0
+    _ov_setup(tmp_path, monkeypatch, ks)
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc_with_gate(33.0), guards, "2026-06-09")
+    assert any(s["type"] == "opt_gate_stop" for s in shots)
+
+
+def test_opt_gate_stop_absent_without_granting_gate(tmp_path, monkeypatch):
+    """常规参与卡 (没爬过线) / 参与流被 down 打断 → 无 gate 线, 退回卡 stop (S5), 不误响。"""
+    _ov_setup(tmp_path, monkeypatch, _flat_klines("2026-06-05"))
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc_with_gate(33.0, history=[]),
+                                              {"positions": {}}, "2026-06-05")
+    assert not any(s["type"] == "opt_gate_stop" for s in shots)
+    assert guards["positions"]["GOOGL270115C390000"]["opt_gate_stop"] is None
+    broken = [{"date": "2026-05-28", "direction": "up", "level": 360.0, "cap_pct_nav": 0.40},
+              {"date": "2026-06-01", "direction": "down", "level": 340.0, "cap_pct_nav": 0}]
+    guards, shots, _, _ = exit_guard.evaluate(_ov_doc_with_gate(33.0, history=broken),
+                                              {"positions": {}}, "2026-06-05")
+    assert not any(s["type"] == "opt_gate_stop" for s in shots)
 
 
 def test_opt_s2_half_then_full_on_flat_underlying(tmp_path, monkeypatch):
@@ -563,12 +624,13 @@ def test_opt_s4_dte_floor_fires_once(tmp_path, monkeypatch):
 
 
 def test_atrisk_option_uses_s1_fraction():
-    """at-risk 期权分支 = 保费 × 0.25 (放宽裁决), 且与 S1 档位钉死相等。"""
+    """at-risk 期权分支 = 保费 × |S1| (0.20 自; 0.25 是 放宽裁决的
+    档位), 且与 S1 档位钉死相等。"""
     from quant.core import sizing
     assert sizing.OPTION_ATRISK_LOSS_FRAC == abs(exit_guard.PARAMS["opt_s1_stop"]), \
         "at-risk 放宽系数必须锚 S1 档位 — 改一处必须同改另一处"
     from quant.report.portfolio_brief import at_risk_breach_signal
-    # 保费 mark $2,000/张 ×2 张 = $4,000, ×0.25 = $1,000 at-risk; cap 5%×$21k=$1,050 → 不超
+    # 保费 mark $2,000/张 ×2 张 = $4,000, ×0.20 = $800 at-risk; cap 5%×$21k=$1,050 → 不超
     item = {"ticker": "GOOGL270115C390000", "qty": 2, "current_price": 20.0}
     assert at_risk_breach_signal(item, None, None, 21000.0) is None
     # 全额口径下 $4,000 > $1,050 早超了 — 本断言在旧口径必红 (变异守卫)

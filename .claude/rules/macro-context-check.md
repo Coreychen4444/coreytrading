@@ -7,8 +7,12 @@ Before attributing a large move to a company-specific cause:
 3. Bind any proposed catalyst to the actual time of the move.
 4. Label uncertainty and conflicting evidence explicitly.
 
-Do not treat one social or curated feed as complete coverage. Check primary
-company sources and independent news queries for the event classes in scope,
-with a weekend-aware lookback when the first session follows a market closure.
+This repository does not fetch news, social posts or macro intelligence of its
+own. Attribution uses the market data it already owns (index and sector
+benchmarks, volatility, tape) plus the operator's authorized intelligence
+archive if one is configured, read-only. When neither answers, "unknown
+catalyst" is a valid, preferred result: never invent a narrative to fill it.
+Do not treat one curated feed as complete coverage, and use a weekend-aware
+lookback when the first session follows a market closure.
 
 Context is informational. It may explain a move, but it does not override structure, stop, cap or sizing rules. Never substitute an old article's number for a current market observation.

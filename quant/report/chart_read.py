@@ -174,6 +174,12 @@ def book_tickers() -> List[str]:
     return sorted(out)
 
 
+HEADER = ("[FYI] 收盘判读 — 观察层，零授权效力\n"
+          "链条 Context → Structure → Price Action → Volume → Indicators → Trade\n"
+          "形态 = 假设 + 确认 + 证伪 + 先验强度（Lo 2000 族；民间项已标注）\n"
+          + patterns.STATE_LEGEND)
+
+
 # ══════════════════════════════════════════════════════════════════
 # ① Context
 # ══════════════════════════════════════════════════════════════════

@@ -9,6 +9,23 @@ from quant.options import option_plan as op  # noqa: E402
 
 # ── IV 闸门 (options-strategy-framework §六 canonical 的可执行副本) ──
 
+def test_build_stops_at_iv_hard_gate_before_touching_the_chain(monkeypatch):
+    """IV 硬门槛 (用户): 不过门 = 不选约不拉链 (fetch_chain 一次不调),
+    error 原文带 VETO 与依据; 过门才往下走。"""
+    calls = []
+    monkeypatch.setattr(op, "fetch_chain", lambda *a, **k: calls.append(1) or None)
+    monkeypatch.setattr(op.iv_logger, "percentile", lambda t: {
+        "ticker": t, "latest_iv_pct": 88.0, "samples": 51, "iv_percentile": 0.0, "reliable": False})
+    p = op.build("AAOI", [100.0, 98.0], 1500.0, target_dte=270, stop=90.0)
+    assert "IV 硬门槛 VETO" in p["error"] and p["hard_gate"]["basis"] == "abs"
+    assert calls == [], "VETO 之后不该去拉链"
+    assert "⛔" in op.render(p)
+    monkeypatch.setattr(op.iv_logger, "percentile", lambda t: {
+        "ticker": t, "latest_iv_pct": 39.0, "samples": 8, "iv_percentile": 12.5, "reliable": False})
+    p = op.build("NVDA", [100.0, 98.0], 1500.0, target_dte=270, stop=90.0)
+    assert calls == [1] and p["error"].startswith("链数据不可得")
+
+
 def test_iv_gate_thresholds_match_canonical():
     assert op.iv_gate(85.0)["verdict"] == "禁 naked long"
     assert op.iv_gate(75.0)["verdict"] == "强 sell-premium tilt"

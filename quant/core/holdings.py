@@ -83,6 +83,11 @@ def live_tickers(doc: dict) -> set[str]:
 UNMANAGED_ROLES = frozenset({"commemorative_hold"})
 
 
+#: 参考票角色 —— 只为量能/板块基准躺在自选里, **不交易**。
+#: 与 UNMANAGED_ROLES 同理, 这个字符串在全仓也只允许出现在这里(测试棘轮强制)。
+#: ⚠️ 推荐配置是**入场候选分组里不放参考票**(指数/ETF 观察指标归券商的关注列表),
+#: 基准 K 线改走 kline_cache.BENCHMARKS 硬名单 —— 数据层与 watchlist membership
+#: 解耦。判别式保留为防御: 万一参考票又被加进候选分组, 各消费端的跳过语义依然正确。
 REFERENCE_ROLES = frozenset({"volume_reference"})
 
 

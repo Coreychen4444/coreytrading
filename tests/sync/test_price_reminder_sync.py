@@ -21,6 +21,9 @@ def pin_external_capacity_inputs(monkeypatch):
             "as_of": TODAY, "implied_cash": 1e9, "leveraged": False,
         },
     )
+    # Mechanical staleness reads bars through book; an empty series keeps the
+    # note-construction assertions independent from live market data.
+    monkeypatch.setattr(tgs.book, "bars", lambda *args, **kwargs: [])
 
 
 POS = {"tickers": {
@@ -507,6 +510,26 @@ def test_option_position_splits_bases_underlying_vs_contract():
     assert (g01["type"], g01["value"], g01["note"]) == ("PRICE_UP", 66.0, "g01")
 
 
+def test_option_gate_stop_draws_on_underlying_code_with_gate_note():
+    """S5g (用户): exit_guard 写在 guard 上的 opt_gate_stop (授予 cap 的
+    gate) 是 underlying 基 → 与 trail/卡 stop 同基取 max 挂正股 code, note stop:gate;
+    exit_floor_map 只在期权 guard 有它时带 key。"""
+    occ = "META270115C560000"
+    pos = {"tickers": {occ: {
+        "broker": {"qty": 1, "current_price": 60.0},
+        "lots": {"base": [], "position": [{"qty": 1, "avg_cost": 71.0}]},
+        "agent": {"zones": {"stop_level": 542.59, "stop_level_basis": "underlying"}}}}}
+    guards = {"positions": {occ: {"ratchet": {"floor": None}, "trail": {"trail": 530.0},
+                                  "opt_gate_stop": {"level": 553.0, "days": 1}}}}
+    floors = prs.exit_floor_map(guards, pos)
+    assert floors == {occ: {"lock": None, "trail": 530.0, "gate": 553.0}}
+    lines, _ = prs.desired_lines(pos, {"tickers": {}}, TODAY, floors=floors)
+    by = {(d["ticker"], d["kind"]): d for d in lines}
+    und = by[("META", "stop")]
+    assert (und["code"], und["value"], und["note"]) == ("US.META", 553.0, "stop:gate")
+    assert (occ, "stop") not in by                              # 合约 code 无同基候选
+
+
 def test_option_price_basis_card_stop_stays_on_contract():
     occ = "AAOI270617C140000"
     pos = {"tickers": {occ: {"broker": {"qty": 2, "current_price": 30.0},
@@ -708,3 +731,28 @@ def test_oz1_skipped_without_grant_or_expired():
                                  budgets={"MSFT": "40%:8.5k"}, option_plans=plans)
     assert not any(d["kind"] == "oz1" for d in lines)
     assert any("已到期" in n for n in notes)
+
+
+def test_z1_budget_follows_staleness_eviction(monkeypatch):
+    """机械 stale 卡出白名单 ⇒ z1 预算备注同拍消失 ( 用户: 接进
+    today_group + z1 画线 — 一处闸两处生效)。MU 8/25 案: 手机备注 950
+    `z1:40%:7.5k` 在 entry_guard 已判 STALE 之后仍在邀请按旧图入场。"""
+    wl = {"tickers": {
+        "MU": {"status": "watching", "moomoo_listed": True,
+               "agent": {"current_regime": {"name": "R_突破_945", "cap_pct_nav": 0.4,
+                                            "since": "2026-08-14", "source": "card"},
+                         "zones": {"accumulation_zone_1": [940.5, 950.0],
+                                   "accumulation_zone_2": [921.5, 940.5],
+                                   "trim_zone": [990.0, 1008.0],
+                                   "valid_until": "2026-08-28"}}},
+    }}
+    bd = [{"time": "2026-08-21", "close": 966.78, "high": 970, "low": 960},
+          {"time": "2026-08-24", "close": 910.43, "high": 968, "low": 905}]
+    monkeypatch.setattr(tgs.book, "bars", lambda t: bd)
+    assert prs.z1_budgets({"tickers": {}}, wl, "2026-08-25", nav=18651.0,
+                          quote_of=QUOTE, veto_of=UP) == {}
+    fresh = [{"time": "2026-08-21", "close": 966.78, "high": 970, "low": 960},
+             {"time": "2026-08-24", "close": 945.0, "high": 968, "low": 940}]
+    monkeypatch.setattr(tgs.book, "bars", lambda t: fresh)
+    assert "MU" in prs.z1_budgets({"tickers": {}}, wl, "2026-08-25", nav=18651.0,
+                                  quote_of=QUOTE, veto_of=UP)

@@ -47,6 +47,8 @@ The public repository contains the complete reusable operating model while exclu
 - `trade/us_stock/holding/state/watchlist.json` is the local single source of truth for candidate cards and entry analysis.
 - `trade/us_stock/holding/state/exit_guards.json` is script-owned exit-stack state.
 - `trade/us_stock/holding/state/option_plans.json` is generated option-planning state.
+- `trade/us_stock/valuation/inputs.json` is the valuation layer's hand-written region; `valuations.jsonl` and `calibration.jsonl` are its append-only prediction and reconciliation ledgers.
+- `ai_news/` is an optional, user-owned intelligence workspace outside this repository. Trading code may read the macro snapshot and the valuation overlay ledger from it, must degrade gracefully when they are missing, and must never write there or treat their contents as authorization.
 - Canonical path constants live in `quant/core/paths.py`. Business modules must import paths from there rather than derive repository roots themselves.
 - State writers use the atomic JSON helpers and shared state lock from `quant/core/io_json.py`.
 
@@ -115,6 +117,7 @@ Dependencies move downward only:
 ops          orchestration and notifications
 ├── report   read-time presentation and alerts
 ├── journal  event/decision/accounting annotations
+├── valuation fundamental fair value and implied expectations (judgement only)
 ├── decision deterministic gates and state transitions
 │   ├── options contract selection and premium mapping
 │   └── risk portfolio/position risk analysis
@@ -158,7 +161,7 @@ Current invariants:
 - The portfolio shock budget is `SHOCK_BUDGET = 0.15` of NAV using `SHOCK_X = 1.88`.
 - The portfolio gross ceiling is `GROSS_CAP = 1.10` of NAV.
 - The per-position stop-risk ceiling is `AT_RISK_CAP_FRAC = 0.05` of NAV.
-- Long-option at-risk loss uses `OPTION_ATRISK_LOSS_FRAC = 0.25`, pinned to the premium stop assumption.
+- Long-option at-risk loss uses `OPTION_ATRISK_LOSS_FRAC = 0.20`, pinned to the premium stop assumption.
 - The shock breaker threshold is `SHOCK_BREAKER_MULT = 1.5` times the portfolio shock budget.
 - Gate risk ceilings are cumulative: gate 1 = `2.5%`, gate 2 = `4.0%`, gate 3 and above = `5.0%` of NAV.
 - There is one campaign risk budget unlocked by gates; there are no independent `R1/R2/R3` cash buckets.
@@ -166,7 +169,8 @@ Current invariants:
 - `sizing.gate_count(card)` counts only upward transitions that granted a cap.
 - A down transition or completed campaign resets the participation stream to the first gate.
 - Close receipts may live on either the position card or the re-added watchlist card; the gate-count predicate reads both.
-- Options are forbidden at the first gate. `OPTION_MIN_GATE = 2`.
+- Options may enter at the first cap-granting gate (`OPTION_MIN_GATE = 1`) under the same qualification a stock entry needs, and only after a hard implied-volatility gate: a low IV percentile, or a low absolute ATM IV while the series is too short to rank. Missing IV data is a refusal, not a pass.
+- A long option's underlying exit line is the gate that granted the cap, confirmed on the close. The stock's buffered gate floor does not apply to it.
 - Option premium caps use the newly unlocked gate-risk increment, not the cumulative stock budget.
 - Stock exposure, option premium, option delta notional, stop risk, shock occupancy and gross exposure are different units. Convert explicitly; never compare them as if they were the same money.
 - `sizing.entry_cap()` is the single answer to “how much can this order actually use?”
@@ -179,8 +183,8 @@ Actual entry capacity is the minimum of:
 4. remaining portfolio shock budget;
 5. remaining gross capacity;
 6. account buying-power room;
-7. event-day adjustment;
-8. whole-unit feasibility.
+8. event-day adjustment;
+9. whole-unit feasibility.
 
 `cash` from a broker payload is not automatically buying power. Use `quant/core/book.py` to assemble NAV, market value, buying-power room, ATR/price and portfolio usage.
 
@@ -228,6 +232,8 @@ Only `quant/sync/` writes broker blocks in positions/watchlist state.
 - `price_reminder_sync.py` reconciles only reminders owned by its note vocabulary. User-created reminders are never touched.
 - The downside reminder is the binding maximum of card stop, profit-lock floor and trend trail, with basis kept separate for option premium versus underlying price.
 - Z1 reminder notes use the actual output of `sizing.entry_cap()`, not a copied percentage.
+- `company_profile_sync.py` writes the machine-owned business/balance-sheet region of a card from broker fundamentals; the prose region (business model, financing notes) is hand-written and never touched by the machine writer. It carries zero authorization effect.
+- `valuation_sync.py` mirrors the latest ledger row of the valuation layer into the card's machine-owned `agent.valuation` block. The valuation layer never writes state itself; mirroring belongs to sync.
 - `today_group_sync.py` maintains the optional entry-authorization group from explicit regime cap, structural validity, gate state, staleness and current capacity.
 - Authorization state is not execution timing. A valid cap may wait for a zone; an attractive price cannot create a cap.
 - Lot drift is reported as infrastructure state. Because exposure deduction reads broker quantity and price, drift must not silently create a second authorization formula.
@@ -239,7 +245,7 @@ Only `quant/sync/` writes broker blocks in positions/watchlist state.
 - `iv_logger.py`: ATM IV history used by IV gates and calibration.
 - `nav_snapshot.py`: NAV and benchmark snapshot used by portfolio math.
 - `earnings_calendar.py`: forward earnings/reaction-day cache consumed offline by sizing and reports.
-- `macro_fetch.py`, `x_fetch.py` and `x_search.py`: dated informational context; never an authorization source.
+- `macro_fetch.py`: dated informational context; never an authorization source.
 - `skhy_premium.py`: instrument-specific premium history where enabled.
 
 Data ingestion records source and freshness. A failed fetch must be visible and must not mutate an existing valid observation into zero.
@@ -269,6 +275,7 @@ Data ingestion records source and freshness. A failed fetch must be visible and 
 - ATR/parabolic trend trail;
 - option gain tiers;
 - option premium-loss, time and DTE overlays;
+- the underlying gate stop for an option opened at a cap-granting gate;
 - margin/buying-power infrastructure warnings;
 - re-arm rules after a valid recovery or new high-water mark.
 
@@ -292,15 +299,34 @@ Exit mechanics do not accept a narrative or macro exception. A process score may
 - `quant/risk/kelly_size.py` and `chain_layers.py` are analysis tools. Their output does not bypass the core cap stack.
 - Option premium paid, delta notional, theoretical maximum loss and underlying stop risk must be shown as separate quantities.
 
+## Valuation layer
+
+`quant/valuation/` turns fundamentals into a fair-value opinion. It is a judgement layer with **zero authorization effect**: architecture tests pin that it never imports sizing, entry, exit or authorization-group code, and that none of them import it. Undervalued is not a GO and overvalued is not a SELL — entry still belongs to zone and gate, exit still belongs to the exit stack.
+
+- `fundamentals.py` fetches statements, snapshots, valuation percentiles and sell-side targets into an ignored cache; the cache is always refetchable and never enters Git.
+- `archetypes.py` holds business-model prototypes and validates the hand-written input region. An unknown key is an error, not a silent skip: a mistyped override is worse than no override.
+- `model.py` is pure math: a discounted free-cash-flow engine, an institutional-consensus engine, reverse-implied growth and margin, scenarios, weighted fair value, valuation duration and rate sensitivity.
+- `valuate.py` orchestrates a run, renders it and appends one ledger line per valuation, carrying the input snapshot so the estimate stays auditable.
+- `overlays.py` is the only way news reaches the model: a structured, validated, append-only record naming the instrument, channel, driver, magnitude, reliability and expiry. Low-reliability records are recorded and visibly ignored rather than applied. The model never reads prose.
+- `calibrate.py` reconciles ledger predictions against realized results and re-runs point-in-time valuations for backtesting. Decision rules are pre-registered before the numbers are read.
+
+Layer rules:
+
+- Confidence must fall when the estimate leans on the terminal value, on a short history, or on a margin sitting at a historical extreme.
+- A cyclical instrument is normalized rather than extrapolated from a peak; a peak-margin, low-multiple print is a trap, not a bargain.
+- Premium paid, notional exposure and fair value are different quantities and are reported separately.
+- The valuation layer never writes position or watchlist state. Mirroring a result onto a card belongs to `quant/sync/valuation_sync.py`, and the mirrored block is informational only.
+
 ## Journal and report layers
 
 - `quant/journal/decision_log.py` appends structured EV/probability worksheets.
 - `quant/journal/annotate_event.py` adds review fields to rule-external events, can append process scores, and provides a paired manual cap/gate stamp for historical BUY fills only after the operator verifies the authorization that existed at fill time.
+- `quant/journal/exit_score.py` scores a structural exit mechanically: a closed card with an exit record and a demotion on file gets a latency-tier process score. It grades only latency and completeness — reasoning stays with the operator, its rows are recognizable by their source field, and it never backfills history before the rule existed. It is the counterpart of the unresolved-demotion callout: one tracks exits that have not happened, the other records the ones that did.
 - Planned, mechanically authorized fills do not need duplicate narrative classification.
 - Rule-external events do require review: examples include cap-zero entries, missing authorization-group membership, no-chase violations, trim-area adds, no-add-lock violations, unplanned limit changes or ignored exit alerts.
 - Tier and authorization fields are mechanically derived where possible; the human supplies reasoning and checklist status.
 - Lots are accounting, not annotation. Every fill must reconcile even when no narrative review is required.
-- `quant/report/portfolio_brief.py` assembles position cards, alerts, budgets, exits and operational warnings. Held-stock add capacity includes the same price ladder, whole-share split and structural ordering used by entry plans.
+- `quant/report/portfolio_brief.py` assembles position cards, alerts, budgets, exits and operational warnings. Any mirrored valuation reaches it as a clearly marked informational line that never enters the mechanical action ranking. Held-stock add capacity includes the same price ladder, whole-share split and structural ordering used by entry plans.
 - Use `--read-only` for session inspection; the default alerting mode may consume cooldown state.
 - Reports must preserve binding constraints and original warnings from their deterministic sources. Do not paraphrase away severity.
 - `perf_report.py` provides tier/gate performance and process-versus-outcome review.
@@ -318,19 +344,20 @@ The dependency order is:
 3. open-order synchronization;
 4. fill/event synchronization;
 5. close reconciliation;
-6. watchlist membership reconciliation;
-7. watchlist-to-position migration;
-8. lot reconciliation;
-9. `card_autopaint.py` detection and detached agent launch for eligible empty cards;
-10. completed K-line update for close-dependent modes;
-11. NAV snapshot before any consumer that sizes from NAV;
-12. IV, earnings and optional premium datasets;
-13. structure-drift observation;
-14. portfolio brief after all producer stages and before any regime transition that can replace an exit boundary;
-15. regime transition after exit evaluation in close-dependent modes;
-16. broker reminder reconciliation from the post-transition card and same-run exit stack;
-17. entry-authorization group reconciliation from post-transition state;
-18. entry plan after current state, market data, NAV and transitions are complete.
+6. structural-exit scoring, after close reconciliation writes the exit record and before candidate migration can overwrite the closed card;
+7. watchlist membership reconciliation;
+8. watchlist-to-position migration;
+9. lot reconciliation;
+10. `card_autopaint.py` detection and detached agent launch for eligible empty cards;
+11. completed K-line update for close-dependent modes;
+12. NAV snapshot before any consumer that sizes from NAV;
+13. IV, earnings and optional premium datasets;
+14. structure-drift observation;
+15. portfolio brief after all producer stages and before any regime transition that can replace an exit boundary;
+16. regime transition after exit evaluation in close-dependent modes;
+17. broker reminder reconciliation from the post-transition card and same-run exit stack;
+18. entry-authorization group reconciliation from post-transition state;
+19. entry plan after current state, market data, NAV and transitions are complete.
 
 `card_autopaint.py` must return without waiting for analysis. It excludes reference
 instruments, unmanaged positions, option contracts and cards that already have zones.
@@ -351,6 +378,7 @@ Pipeline invariants:
 - Producer stages precede consumers.
 - Fills precede lot/close reconciliation.
 - Close reconciliation precedes watchlist re-add logic.
+- Structural-exit scoring runs between close reconciliation and candidate migration, so the closed card is still the one being scored.
 - Watchlist-to-position migration precedes lot reconciliation.
 - NAV precedes reminders, reports and entry sizing.
 - Portfolio brief and exit evaluation precede regime transitions that may replace the breached stop.
@@ -526,7 +554,7 @@ Before handoff:
 4. confirm examples remain synthetic and parseable;
 5. confirm source and target Git bases were not unintentionally changed;
 6. report skipped or unavailable checks honestly;
-7. do not stage, commit, push, register tasks or send notifications unless requested.
+8. do not stage, commit, push, register tasks or send notifications unless requested.
 
 ## Definition of done
 

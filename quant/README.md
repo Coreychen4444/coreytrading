@@ -9,12 +9,18 @@
 
 ```
   ops          编排 / 通知 / 运维
-   │           pipeline · tg_notify · commit_state.sh · sync_memory.sh
+   │           pipeline · card_autopaint · tg_notify
    ├── report  报告层（读时计算，不产生新状态）
    │           portfolio_brief · perf_report · gate_ladder_report · gate_audit
    │           chart_read（每日收盘判读，**判读层零授权效力**）
    ├── journal 账本写入层（prose-only 不算落库）
    │           annotate_event · decision_log
+   ├── valuation 估值层（**判断层零授权效力**：读三表/快照/K 线/宏观快照，写自己的账本）
+   │           fundamentals（OpenD 三表+快照+PE 分位+目标价 → market/fundamentals 缓存）
+   │           archetypes（商业模式原型缺省 + 人工区 inputs.json 校验）
+   │           model（FCFF-DCF · EPS×PE · 反向隐含 · 情景 · 久期，纯函数）
+   │           valuate（CLI 编排/渲染/valuations.jsonl 账本）
+   │           overlays（新闻→驱动契约: 校验/生效筛选/CLI append）· calibrate（财报后对账 + 当时重估回测）
    ├── decision 决策层（机械闸门）
    │           entry_guard · exit_guard · regime_transition · regime_score
    │           structure_drift · level_map · catalyst_check · tape_check
@@ -24,8 +30,10 @@
    │           state_io · stock_fetch · order_sync · trade_history_sync
    │           watchlist_sync · watchlist_migrate · price_reminder_sync
    │           lot_reconcile（买入落账） · close_reconcile（平仓收尾） · today_group_sync
+   │           company_profile_sync（券商财报 → agent.company_profile 机器区：商业模式/资产负债表/TTM 资本强度）
+   │           valuation_sync（valuations.jsonl 最新行 → agent.valuation 机器区；估值层不写 state，镜像归 sync）
    ├── data    把外部世界读进本地
-   │           market_data · macro_fetch · x_fetch
+   │           market_data · macro_fetch · earnings_calendar
    │           kline_cache · iv_logger · nav_snapshot · skhy_premium
    └── core    纯共享库 · 单一真源 · 无副作用
                paths · env · io_json · timeutil · num · occ · schema · ledger
@@ -47,6 +55,7 @@
 | `options/` | 期权合约级执行参数 | 需要期权链 / Greeks / BS 定价 |
 | `risk/` | 单档上限与组合集中度 | 回答"能下多少"而非"要不要下" |
 | `journal/` | 决策与成交写进账本 | 往 `events/` / `scores.jsonl` append |
+| `valuation/` | 基本面 → 公允价/隐含预期/高估低估（判断层） | 不 import 授权层、不写 positions/watchlist；输出是**判断**不是动作（测试钉死） |
 | `report/` | 读时计算的人类可读输出 | 只读不写（除告警冷却状态） |
 | `ops/` | 编排、通知、仓库运维 | 调别的脚本，或与外部系统（Telegram/git）打交道 |
 | `research/` | 公开研究机械件与合成脚手架 | 只产出统计，不保存私人数据、结果或裁决 |

@@ -33,12 +33,32 @@ EARNINGS_DEEP_DIR = MARKET_DIR / "earnings_deep"   # 历史财报事件存档 <T
 EARNINGS_CALENDAR_PATH = MARKET_DIR / "earnings_calendar.json"
 PREMIUM_DIR = MARKET_DIR / "premium"          # ADR/跨市场溢价追踪, <TICKER>.jsonl ()
 SKHY_PREMIUM_PATH = PREMIUM_DIR / "SKHY.jsonl"
+FUNDAMENTALS_DIR = MARKET_DIR / "fundamentals"   # OpenD 三表/快照/估值分位缓存 <TICKER>.json (可重拉, 不入 git; 估值层)
+VALUATION_DIR = ROOT / "trade" / "us_stock" / "valuation"           # 估值层 (判断层, 零授权效力)
+VALUATION_INPUTS_PATH = VALUATION_DIR / "inputs.json"               # 人工区: 商业模式原型 + 覆盖 + 增量新闻 overlay
+VALUATIONS_PATH = VALUATION_DIR / "valuations.jsonl"                # 每次估值一行 = 可校准的预测账本
+VALUATION_CALIBRATION_PATH = VALUATION_DIR / "calibration.jsonl"    # 对账/回测校准结果 (每条预测 vs 实际一行)
 NAV_HISTORY_PATH = EVENTS_DIR / "nav_history.jsonl"
 DECISIONS_PATH = EVENTS_DIR / "decisions.jsonl"
 SCORES_PATH = JOURNALS_DIR / "scores.jsonl"
 
 TMP_DIR = ROOT / "tmp"
 HEARTBEAT_STATE_PATH = TMP_DIR / "heartbeat-state.json"
+
+# Optional intelligence layer.  Everything below AI_NEWS_DIR is produced by a
+# separate, user-owned news/macro workflow that lives outside this repository:
+# trading code may only READ these paths and must degrade gracefully when they
+# are absent.  Nothing here grants authorization.
+AI_NEWS_DIR = ROOT / "ai_news"
+AI_NEWS_STATE_DIR = AI_NEWS_DIR / "state"
+MACRO_DIR = AI_NEWS_DIR / "macro"
+MACRO_CURRENT_PATH = MACRO_DIR / "current.json"
+MACRO_HISTORY_DIR = MACRO_DIR / "history"
+MACRO_EVENTS_DIR = MACRO_DIR / "events"
+MACRO_SNAPSHOTS_DIR = MACRO_DIR / "snapshots"
+MACRO_SCHEMA_PATH = AI_NEWS_DIR / "schema" / "macro-state.schema.json"
+VALUATION_OVERLAYS_PATH = AI_NEWS_DIR / "valuation" / "overlays.jsonl"   # 新闻→估值驱动 overlay (情报层经 quant/valuation/overlays.py add 写, 估值层只读)
+MACRO_LOCK_PATH = AI_NEWS_STATE_DIR / ".macro-state.lock"
 
 STATE_LOCK_PATH = Path(os.environ.get("COREYTRADING_STATE_LOCK_PATH",
                                       str(STATE_DIR / ".state.lock")))

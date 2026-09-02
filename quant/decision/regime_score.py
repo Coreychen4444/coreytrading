@@ -27,7 +27,7 @@ CLI:
 
 数据缺口(诚实):
   - RSI/ATR/MA/量/K线/见底 = OpenD 今天就能算
-  - VIX = OpenD 取不稳,建议 WebSearch 后用 --vix / --vix-chg 传入
+  - VIX = OpenD 取不稳; 自动取数走 macro_fetch (FRED), 取不到用 --vix / --vix-chg 手动传入
   - 期权 IV = 取的是 spot IV;真正的 IV Rank(历史百分位)OpenD 无历史,
     需另攒数据,当前只能用 spot + 经验阈值粗判(会大声标注)
 """

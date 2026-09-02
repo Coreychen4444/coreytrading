@@ -121,6 +121,102 @@ def _validate_regime(block: Any, p: str, *, is_last: bool) -> list[str]:
     return errors
 
 
+# ── company_profile (, 用户: 配合 ai_news 利率传导链) ─────
+#
+# agent.company_profile = 公司层事实底座 (商业模式 + 资产负债表 + TTM 资本强度),
+# 消费者是 ai_news 宏观 agent 的公司暴露卡 (§7)。零授权效力。
+# 所有权分区: 机器区 (balance_sheet/fundamentals_ttm/source/fetched_at,
+# company_profile_sync 覆盖) / 人工区 (business_model/financing_notes/notes_as_of,
+# prose 模式写)。这里只拦结构性破坏 —— 数字口径归写侧模块 docstring。
+_PROFILE_NUMERIC_BS = (
+    "cash_and_sti_m", "restricted_cash_m", "lt_investments_m", "current_debt_m",
+    "lt_debt_m", "current_lease_m", "lt_lease_m", "net_ppe_m", "total_assets_m",
+    "total_equity_m", "total_debt_m", "net_cash_ex_leases_m",
+)
+_PROFILE_NUMERIC_TTM = (
+    "revenue_m", "operating_cash_flow_m", "capex_m", "free_cash_flow_m",
+    "interest_income_m", "interest_expense_m", "capex_to_revenue_pct",
+    "capex_to_ocf_pct",
+)
+
+
+def _iso_date_ok(v) -> bool:
+    s = str(v or "")
+    return len(s) >= 10 and s[4] == "-" and s[7] == "-"
+
+
+def _validate_company_profile(agent: dict, p: str) -> list[str]:
+    cp = agent.get("company_profile")
+    if cp is None:
+        return []
+    if not isinstance(cp, dict):
+        return [f"{p}.agent.company_profile must be a dict"]
+    errs: list[str] = []
+    for key in ("business_model", "financing_notes"):
+        v = cp.get(key)
+        if v is not None and not (isinstance(v, str) and v.strip()):
+            errs.append(f"{p}.agent.company_profile.{key} must be non-empty string when present")
+    bs = cp.get("balance_sheet")
+    if bs is not None:
+        if not isinstance(bs, dict):
+            errs.append(f"{p}.agent.company_profile.balance_sheet must be a dict")
+        else:
+            if not _iso_date_ok(bs.get("as_of")):
+                errs.append(f"{p}.agent.company_profile.balance_sheet.as_of must be YYYY-MM-DD "
+                            f"(got {bs.get('as_of')!r} — 无 as-of 的报表数字不许落卡)")
+            for key in _PROFILE_NUMERIC_BS:
+                v = bs.get(key)
+                if v is not None and not _is_num(v):
+                    errs.append(f"{p}.agent.company_profile.balance_sheet.{key} must be numeric/null (got {v!r})")
+    ttm = cp.get("fundamentals_ttm")
+    if ttm is not None:
+        if not isinstance(ttm, dict):
+            errs.append(f"{p}.agent.company_profile.fundamentals_ttm must be a dict")
+        else:
+            for key in _PROFILE_NUMERIC_TTM:
+                v = ttm.get(key)
+                if v is not None and not _is_num(v):
+                    errs.append(f"{p}.agent.company_profile.fundamentals_ttm.{key} must be numeric/null (got {v!r})")
+    if (bs is not None or ttm is not None) and not str(cp.get("source") or "").strip():
+        errs.append(f"{p}.agent.company_profile.source missing (机器区数字必须带出处)")
+    return errs
+
+
+# ── valuation (, 用户: 估值结果落卡片机器区) ─────────────────
+#
+# agent.valuation = 估值层 (quant/valuation) 最新一行账本的摘要, 由 sync/valuation_sync 从
+# valuations.jsonl 镜像到卡上 (卡片是简报/trading-analysis 读的地方)。**判断层零授权效力**:
+# 不被 sizing/entry_guard/exit_guard/today_group 读; 低估 ≠ GO, 高估 ≠ SELL。
+# 这里只拦结构性破坏: 判定/置信词表、数值类型、as_of/source 出处。
+_VALUATION_VERDICTS = ("低估", "偏低", "合理", "偏高", "高估", "无法判定")
+_VALUATION_CONFIDENCE = ("高", "中", "低")
+_VALUATION_NUMERIC = ("price", "fair_value", "ratio", "implied_cagr", "implied_horizon_years",
+                      "implied_target_margin", "implied_cagr_at_current_margin", "news_applied")
+
+
+def _validate_valuation(agent: dict, p: str) -> list[str]:
+    v = agent.get("valuation")
+    if v is None:
+        return []
+    if not isinstance(v, dict):
+        return [f"{p}.agent.valuation must be a dict"]
+    errs: list[str] = []
+    if not _iso_date_ok(v.get("as_of")):
+        errs.append(f"{p}.agent.valuation.as_of must be YYYY-MM-DD (无 as-of 的估值不许落卡)")
+    if v.get("verdict") not in _VALUATION_VERDICTS:
+        errs.append(f"{p}.agent.valuation.verdict must be one of {_VALUATION_VERDICTS} (got {v.get('verdict')!r})")
+    if v.get("confidence") not in _VALUATION_CONFIDENCE:
+        errs.append(f"{p}.agent.valuation.confidence must be one of {_VALUATION_CONFIDENCE}")
+    for key in _VALUATION_NUMERIC:
+        val = v.get(key)
+        if val is not None and not _is_num(val):
+            errs.append(f"{p}.agent.valuation.{key} must be numeric/null (got {val!r})")
+    for key in ("source", "fyi"):
+        if not str(v.get(key) or "").strip():
+            errs.append(f"{p}.agent.valuation.{key} missing (机器区必须带出处与 FYI 行)")
+    return errs
+
+
 def _validate_card_regime(agent: dict, p: str, tk: str) -> list[str]:
     """zones ↔ current_regime 同生同死 + 形状 (regime 统一 , 方案 a)。
 
@@ -207,6 +303,8 @@ def validate_positions_doc(doc: dict) -> tuple[list[str], list[str]]:
 
         errors.extend(_validate_regime(agent.get("last_regime"), f"{p}.agent.last_regime", is_last=True))
         errors.extend(_validate_regime(agent.get("next_regime"), f"{p}.agent.next_regime", is_last=False))
+        errors.extend(_validate_company_profile(agent, p))
+        errors.extend(_validate_valuation(agent, p))
         if t.get("status") == "active":
             errors.extend(_validate_card_regime(agent, p, tk))
 
@@ -269,6 +367,8 @@ def validate_watchlist_doc(doc: dict) -> tuple[list[str], list[str]]:
                     errors.append(f"{p}.agent.zones.{zk} must be [lo, hi] numeric pair")
         errors.extend(_validate_regime(agent.get("last_regime"), f"{p}.agent.last_regime", is_last=True))
         errors.extend(_validate_regime(agent.get("next_regime"), f"{p}.agent.next_regime", is_last=False))
+        errors.extend(_validate_company_profile(agent, p))
+        errors.extend(_validate_valuation(agent, p))
         if str(t.get("status")) == "watching":
             errors.extend(_validate_card_regime(agent, p, tk))
     return errors, warnings

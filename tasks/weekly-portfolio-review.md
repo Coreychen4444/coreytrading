@@ -6,5 +6,7 @@ Review the locally configured portfolio without publishing account data.
 2. Audit exposure, concentration, shock budget, at-risk limits, option DTE/IV, stale cards and unresolved infrastructure warnings.
 3. Reconcile broker quantity, lots, fills and journals before judging performance.
 4. Separate process quality from outcome quality; identify rule-external actions that need annotation.
-5. Record reusable methodology only after removing identifiers and personal account values.
-6. Do not place orders or push local state to a remote repository.
+5. Render the valuation digest and the post-earnings reconciliation of the valuation ledger. It is a judgement
+   layer: quote it as context, never as an entry, exit or cap decision.
+6. Record reusable methodology only after removing identifiers and personal account values.
+7. Do not place orders or push local state to a remote repository.

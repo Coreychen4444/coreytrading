@@ -55,6 +55,7 @@ from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, dow, earnings  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓 + 短期道氏排序键)
 from quant.core.holdings import is_traded  # noqa: E402  (参考票判据单一真源)
+from quant.data import iv_logger  # noqa: E402  (期权 IV 硬门槛的 percentile 源)
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (# noqa: E402
@@ -64,11 +65,13 @@ from quant.core.paths import (# noqa: E402
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
 from quant.core.structure import (# noqa: E402
     structure_repair_veto, gate_coherence, gate_staleness, gates_of, structure_lines,
-    zone_bands, zone_position,          # 真源在 core (sync/lot_reconcile 同读); 此处 re-export
+    zone_bands, zone_mech_stale, zone_position,  # 真源在 core (sync/lot_reconcile 同读); 此处 re-export
 )
-from quant.core.sizing import (# noqa: E402
+from quant.core import structure as structure_stale  # noqa: E402  (staleness 常量 re-export 源)
+from quant.core.sizing import (  # noqa: E402
     AT_RISK_CAP_FRAC, OPTION_ATRISK_LOSS_FRAC, OPTION_MIN_GATE,
     binding_stop, constraint_lines, entry_cap, option_premium_cap_frac,
+    granting_gate_level, long_call_iv_gate,
     read_constraints, regime_cap_frac,
     gate_count, gate_risk_cap_frac, regime_gate, regime_lines, share_ladder, usage_lines,
 )
@@ -81,10 +84,9 @@ PARAMS = {
     # 授权量 = current_regime.cap_pct_nav 单一来源 (分类轴退役,
     # classification_removal_design.md) —— 本表不再存任何 cap 数; sizing 主尺 =
     # gate 预算 (sizing.GATE_RISK_CAPS), 档位 = sizing.gate_count(card)。
-    # IV 闸门 (percentile 数据 <120 天前用绝对值代理; canonical: options-strategy-framework §六)
-    "iv_hard_no_single_leg": 80.0,   # ATM IV ≥80% → 禁单腿买权 (spread/DITM/正股)
-    "iv_soft_half_size": 60.0,       # 60-80% → 偏 DITM/spread (: "size 减半"
-                                     # 已从文案删除 — 它从未接进任何 cap, 见 iv_gate_line)
+    # IV 闸门: 起单腿 long call 的**硬门槛**住 sizing.long_call_iv_gate
+    # (percentile <40 可信时 / 绝对 ATM IV <50% 兜底 / 无数据不放行), 本表不再存 IV 数
+    # (旧 iv_hard_no_single_leg 80 / iv_soft_half_size 60 两条播报带同批退役)。
     # Ladder (greedy-bid trap 3 档强制; parabolic 锚 = entry_execution 校准)
     #  回测 (analytics/entry_ladder_backtest.py, 2237 样本): 前置 50/30/20
     # 全 regime 均值 +0.5~0.9pp vs 40/35/25, 中位/尾部不劣; 未成交档每 2 交易日重锚只升不降
@@ -109,14 +111,20 @@ PARAMS = {
 }
 
 # zone-maintenance breakout-stale (上行) 确认口径「连续 ≥2 交易日」。
-# portfolio_brief.zone_staleness 手搓同一份 (历史各自实现的有意重复, 保留),
-# 相等由 tests/test_constant_pins.py 钉死 (BACKLOG §3.5) —— 改口径两处同改。
-STALE_CONFIRM_DAYS = 2
-# Breakdown staleness is immediate because an old-zone buy can execute inside
-# broken structure. Upward breakouts retain confirmation to limit redraw churn.
-# Volatility staleness uses a calibrated per-instrument 2×ATR14 ruler.
-STALE_BREAKDOWN_DAYS = 1
-STALE_VOL_ATR_MULT = 2.0
+# 判别式内核已下沉 core.structure.zone_mech_stale (单一真源 —— 入场侧、白名单与
+# 画线读同一份), 本模块 zone_staleness 委托之; 常量 re-export 保证三方
+# (core/eg/pb) 恒等, pin 测试照钉。portfolio_brief.zone_staleness 手搓孪生保留
+# (历史有意重复) —— 改口径改 core。
+STALE_CONFIRM_DAYS = structure_stale.STALE_CONFIRM_DAYS
+# ① 破位 stale 不等确认 —— 收盘 < z2 下沿**当日**即 stale。破位后多等一天没有
+#   意义, 挂单语义已反转 (带内限价 BUY = 挂上即市价成交在破位区); 上行 breakout
+#   保持 ×2 (挂单只是不成交, 无执行危害, 确认避免 churn) —— 不对称是有意的。
+# ② 波动 stale 用 per-ticker ATR 尺 —— |单日收收| > 2×ATR14。固定百分比一把尺
+#   量不了两个池: 高波动票的 ±10% 是日常噪音, 低波动票的同一个数是地震。
+#   倍数校准 (180 日 × 15 票 ≈ 2,490 票日): 2.0× 触发率 1.5% ≈ 每票两月一次,
+#   命中全为真结构日; 1.5× 吵三倍 (4.7%), 2.5× 开始漏真事件。
+STALE_BREAKDOWN_DAYS = structure_stale.STALE_BREAKDOWN_DAYS
+STALE_VOL_ATR_MULT = structure_stale.STALE_VOL_ATR_MULT
 
 
 # ── 纯计算层 (tests/decision/test_entry_guard.py 覆盖) ───────────
@@ -330,41 +338,12 @@ def next_regime_lines(agent: dict, rows: List[dict]) -> Tuple[List[str], bool]:
 
 
 def zone_staleness(zb: dict, thesis: dict, rows: List[dict], today: str) -> List[str]:
-    """staleness 触发清单 (zone-maintenance 时间/价格触发的机械子集)。空 = fresh。"""
-    out: List[str] = []
-    vu = zb.get("valid_until")
-    if vu and str(vu) < today:
-        out.append(f"valid_until {vu} 已过期")
-    lr = str((thesis or {}).get("last_reviewed") or "")[:10]
-    if lr:
-        try:
-            gap = (date.fromisoformat(today) - date.fromisoformat(lr)).days
-            if gap > PARAMS["zone_stale_days_reviewed"]:
-                out.append(f"last_reviewed {lr} 距今 {gap}d > {PARAMS['zone_stale_days_reviewed']}d")
-        except ValueError:
-            pass
-    closes = [(str(r.get("time", ""))[:10], coerce_float(r.get("close")))
-              for r in rows[-(STALE_CONFIRM_DAYS + 1):]]
-    closes = [(t, c) for t, c in closes if c]
-    if len(closes) >= STALE_CONFIRM_DAYS:
-        last = closes[-STALE_CONFIRM_DAYS:]
-        trim = zb.get("trim")
-        if isinstance(trim, list) and len(trim) == 2 and all(c > trim[1] for _, c in last):
-            out.append(f"连续 {STALE_CONFIRM_DAYS} 日收盘 > trim 上沿 (breakout stale)")
-    # A close below zone 2 invalidates the map immediately.
-    z2 = zb.get("z2")
-    if closes and isinstance(z2, list) and len(z2) == 2 and closes[-1][1] < z2[0]:
-        out.append(f"收盘 {closes[-1][1]:g} < zone2 下沿 {z2[0]:g} "
-                   "(breakdown stale, 当日口径 — 带内挂单语义已反转)")
-    # Volatility uses a per-instrument ruler; insufficient ATR data suppresses only this leg.
-    a14 = (technical.atr(rows, 14) or [None])[-1]
-    cl2 = [coerce_float(r.get("close")) for r in rows[-2:]]
-    if a14 and len(cl2) == 2 and cl2[0] and cl2[1]:
-        chg, thr = abs(cl2[1] / cl2[0] - 1), STALE_VOL_ATR_MULT * a14 / cl2[0]
-        if chg > thr:
-            out.append(f"单日 {chg * 100:.1f}% > {STALE_VOL_ATR_MULT:g}×ATR14 "
-                       f"({thr * 100:.1f}%) (volatility stale)")
-    return out
+    """staleness 触发清单 (zone-maintenance 时间/价格触发的机械子集)。空 = fresh。
+
+    起委托 core.structure.zone_mech_stale (单一真源) —— zb 键名
+    (z2/trim/valid_until) 与原始 zones 键名 core 版都认, 输出文本逐字同源。
+    """
+    return zone_mech_stale(zb, thesis, rows, today)
 
 
 def reclaimed_gate_of(agent: dict, today: str,
@@ -545,22 +524,37 @@ def latest_iv(ticker: str) -> Optional[dict]:
     return last
 
 
+def option_iv_gate(ticker: str) -> dict:
+    """单腿 long call 的 IV 硬门槛 (用户「硬门槛」): percentile <40
+    (序列 ≥60 可信) / 绝对 ATM IV <50% (兜底) / 无数据不放行。判别式单源 =
+    sizing.long_call_iv_gate; 本函数只把 iv_logger 的读数喂进去并带上播报字段。
+    → {allowed, basis, reason, pct, samples, abs_iv}。
+
+    为什么是硬门槛: 见底点 (gate1) 恰是 IV 峰值 (AAOI g1 149%→g2 112% / LITE 114→91 /
+    MU 93→67), Δ0.7 270DTE call 在正股 +4~9% 时因 vega crush 仍 −6~−21%; 08-11 曾把
+    60-80 带的"size 减半"从文案删掉 (从未进 cap), 现在的门是真门: 不过 = 不选约。
+    """
+    try:
+        ivp = iv_logger.percentile(ticker)
+    except Exception as e:                                        # noqa: BLE001
+        ivp = {"error": f"{type(e).__name__}: {e}"}
+    if ivp.get("error"):
+        row = latest_iv(ticker)
+        abs_iv = coerce_float((row or {}).get("atm_iv_pct"))
+        g = long_call_iv_gate(None, False, abs_iv)
+        return {**g, "pct": None, "samples": 0, "abs_iv": abs_iv}
+    g = long_call_iv_gate(ivp.get("iv_percentile"), bool(ivp.get("reliable")),
+                          ivp.get("latest_iv_pct"))
+    return {**g, "pct": ivp.get("iv_percentile"), "samples": ivp.get("samples"),
+            "abs_iv": ivp.get("latest_iv_pct")}
+
+
 def iv_gate_line(ticker: str) -> str:
-    row = latest_iv(ticker)
-    if not row:
-        return f"IV 未入库 — 期权 vehicle 前先跑 iv_logger (--tickers {ticker})"
-    iv = coerce_float(row.get("atm_iv_pct"))
-    if iv is None:
-        return "IV 数据异常"
-    #  (用户 裁「从文案里删」): 旧文案在 60-80 带写"期权 size 减半" ——
-    # option_plan 的保费预算由分类 cap / 名义折算 / at-risk 三条决定, **从不读 IV**,
-    # 那句话是一条只活在文本里的 cap。规则不进代码 = 不存在, 所以删掉而不是留着
-    # 让人以为 size 已经被砍过。IV 读数保留 (情报), vehicle 倾斜归 用户 判。
-    tag = (f"≥{PARAMS['iv_hard_no_single_leg']:.0f} → 禁单腿买权 (spread/DITM/正股)"
-           if iv >= PARAMS["iv_hard_no_single_leg"] else
-           "60-80 → 偏 DITM/spread"
-           if iv >= PARAMS["iv_soft_half_size"] else "<60 → 单腿可考虑")
-    return f"ATM IV {iv:.1f}% ({row.get('date')}) → {tag}"
+    g = option_iv_gate(ticker)
+    if g["basis"] == "none":
+        return f"IV 未入库 — 期权硬门槛不放行; 先跑 iv_logger (--tickers {ticker})"
+    head = "✓ 单腿 long call 可用" if g["allowed"] else "⛔ VETO 单腿 long call → 正股"
+    return f"IV 硬门槛 {head} — {g['reason']} (n={g.get('samples') or 0})"
 
 
 # ── 数据装载 + 主评估 ───────────────────────────────────────────
@@ -796,21 +790,48 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
                      risk_stop=_rs, exposure=book.exposure_of(tk),
                      gate_no=gate_count(card))
     caps["risk_stop"], caps["risk_stop_basis"] = _rs, _rs_basis
-    # 期权 gate 资格闸 (用户 :「期权要到 r2 才能进 …… 严禁在 r1 入场」
-    # —— 08-10 R1-only **整个反转**): 第一个 gate 严禁期权。本模块**不生成**期权
-    # 计划; 够 gate 的卡播报指路 (手动跑 option_plan, 保费上限 = 本档新增 risk ÷
-    # 0.25: gate2 6% / gate3 4% NAV), 不够的直说被闸拦下 —— 静默是本仓的病。
+    # 期权资格闸 (当前配置; 公开 schema 见 trade/us_stock/strategy/options/):
+    # ① gate1 起可期权 (OPTION_MIN_GATE=1) —— 见底条件 = 第一个给 cap 的 gate, 与正股
+    #    同一套资格 (cap>0 + 结构修复 + 未过期 + z1/z2 限价), 不是"随意开仓";
+    # ② IV 硬门槛 (sizing.long_call_iv_gate) —— 见底点是 IV 峰值, 高 IV 票 gate1 一律正股;
+    # ③ 过门 → 当场翻成合约级计划 (option_plan.build), 失败降级为
+    #    一行"手动跑", 不静默。保费上限 = 本档新增 risk ÷ |S1| (gate1 12.5% NAV);
+    #    期权的正股退出线 = max(卡 stop, 授予 cap 的 gate) (S5g, granting_gate_level)。
     veh = (out["constraints"] or {}).get("vehicle")
     if veh in OPTION_VEHICLES:
         _g = caps.get("gate_no") or 1
-        out["reasons"].append(
-            f"⛔ 期权 gate1 严禁 (OPTION_MIN_GATE={OPTION_MIN_GATE}: 期权样本少"
-            f" 需更高确定性) — 本档正股执行; gate{OPTION_MIN_GATE}+ 可期权 (手动跑 "
-            f"option_plan, 保费上限 gate2 {option_premium_cap_frac(2):.0%} / "
-            f"gate3 {option_premium_cap_frac(3):.0%} NAV)"
-            if _g < OPTION_MIN_GATE else
-            f"🧰 期权已够 gate{_g} (保费上限 {option_premium_cap_frac(_g):.0%} NAV) —"
-            " 本模块只出正股阶梯, 合约参数手动跑 option_plan")
+        prem_frac = option_premium_cap_frac(_g)
+        ivg = option_iv_gate(tk)
+        out["option_iv_gate"] = ivg
+        if _g < OPTION_MIN_GATE or prem_frac <= 0:
+            out["reasons"].append(
+                f"⛔ 期权 gate{_g} 无保费上限 (OPTION_MIN_GATE={OPTION_MIN_GATE}) — 本档正股执行")
+        elif not ivg["allowed"]:
+            out["reasons"].append(
+                f"⛔ 期权 IV 硬门槛 VETO: {ivg['reason']} — 本档正股执行 "
+                f"(gate{_g} 保费上限 {prem_frac:.1%} NAV 留给 IV 回落后)")
+        else:
+            out["reasons"].append(
+                f"🧰 期权 gate{_g} 可用: IV 硬门槛 ✓ ({ivg['reason']}) · 保费上限 "
+                f"{prem_frac:.1%} NAV" + (f" = ${prem_frac * nav:,.0f}" if nav else ""))
+            try:
+                from quant.options import option_plan
+                # LEAPS DTE = §13.2 下限 270, 执行 = 下限之上最近可用周期不限 Jan
+                dte, dte_floor = (270, 270) if veh == "leaps" else (45, 7)
+                ar_prem = (AT_RISK_CAP_FRAC * nav / OPTION_ATRISK_LOSS_FRAC) if nav else None
+                _gate = granting_gate_level(card)
+                _und_stop = max([v for v in (coerce_float(zb.get("stop")) if zb else None, _gate)
+                                 if v is not None], default=None)
+                plan = option_plan.build(tk, ladder, (prem_frac * nav) if nav else None,
+                                         target_dte=dte, min_dte=dte_floor,
+                                         stop=_und_stop,
+                                         notional_cap=caps.get("notional_cap"),
+                                         at_risk_premium_cap=ar_prem)
+                out["option_plan"] = option_plan.render(plan)
+                out["option_plan_data"] = plan
+            except Exception as e:                                    # noqa: BLE001
+                out["reasons"].append(f"⚠️ 期权计划生成失败 ({type(e).__name__}: {e}) — "
+                                      f"手动跑 quant/options/option_plan.py {tk}")
     stops = {
         # 显示合同 (用户: 一个位置建仓/一个位置止损/一个位置止盈):
         # 播报只给 display 一条线。structural/two_n 保留为 sizing 内部量 ——
@@ -958,16 +979,12 @@ def render(results: List[dict], nav: Optional[float], today: str,
         if r.get("option_plan"):
             lines.append("   " + "\n   ".join(r["option_plan"].splitlines()))
         elif r["verdict"] == "PLAN" and (r.get("constraints") or {}).get("vehicle") in OPTION_VEHICLES:
-            # 第一档严禁期权 = 拦; 够 gate 的说清"本模块不出合约"而不是谎报被拦
-            # (二次定版后 gate2+ 的候选卡真的可以走期权, 旧文案会骗人)。
-            _g = (r.get("caps") or {}).get("gate_no") or 1
-            lines.append(
-                f"   ⛔ vehicle={r['constraints']['vehicle']} 被 gate 资格闸拦下 "
-                f"(期权 gate{OPTION_MIN_GATE} 起, 第一档正股 only) — 本档正股执行"
-                if _g < OPTION_MIN_GATE else
-                f"   🧰 vehicle={r['constraints']['vehicle']} 已够 gate{_g} — 本模块只出"
-                f"正股阶梯, 合约参数手动跑 option_plan (保费上限 "
-                f"{option_premium_cap_frac(_g):.0%} NAV)")
+            # 没有合约级计划的 vehicle 卡: 说清是哪道门拦的 (IV 硬门槛 / 生成失败 /
+            # 无保费上限), reasons 里已有原文, 这里提到阶梯块内 —— 静默是本仓的病。
+            why = [x for x in (r.get("reasons") or [])
+                   if x.startswith(("⛔ 期权", "⚠️ 期权", "🧰 期权"))]
+            lines.append("   " + (why[-1] if why else
+                                  f"⛔ vehicle={r['constraints']['vehicle']} 无合约级计划 — 本档正股执行"))
         if r["ticker"] == "SKHY":
             pm = _skhy_premium_line()
             if pm:

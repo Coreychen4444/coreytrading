@@ -74,7 +74,7 @@ from quant.core.paths import (# noqa: E402
 from quant.core.sizing import (# noqa: E402
     binding_label, binding_stop, entry_cap, gate_count, line_price,
 )
-from quant.core.structure import MACHINE_REGIME_SOURCES, structure_repair_veto  # noqa: E402
+from quant.core.structure import MACHINE_REGIME_SOURCES, structure_repair_veto, zone_mech_stale  # noqa: E402
 from quant.core.timeutil import et_today  # noqa: E402
 
 DEFAULT_GROUP = "Today"
@@ -184,8 +184,8 @@ def grant_actual_cap(ticker: str, card: dict, nav, usage=None, quote_of=None,
 
 
 def _admit(tk: str, card: dict, today: str,
-           members: Dict[str, str], notes: List[str]) -> None:
-    """一句话判据 + 三个生命周期修饰: regime 给了 cap 且未被 锁/过期/台账对不上 → 进组。
+           members: Dict[str, str], notes: List[str], bars_of=None) -> None:
+    """一句话判据 + 三个生命周期修饰: regime 给了 cap 且未被 锁/stale/台账对不上 → 进组。
     cap≤0/无 regime = 稳态静默; 够格但被拦 = 必须报出来。"""
     grant = regime_grant(card)
     if not grant or grant[0] <= 0:
@@ -195,9 +195,17 @@ def _admit(tk: str, card: dict, today: str,
     if agent.get("pending_repaint"):
         notes.append(f"{tk}: {label} 但 pending_repaint 补画锁 — 暂不进组, 解锁后自动接上")
         return
-    vu = (agent.get("zones") or {}).get("valid_until")
-    if vu and str(vu) < today:
-        notes.append(f"{tk}: {label} 但 zones 过期 ({vu}) — 暂不进组, 重画后自动接上")
+    # 机械 staleness = entry_guard 判 STALE 的**同一判别式** (core.zone_mech_stale,
+    # 用户: 接进 today_group + z1 画线)。此前这里只查 valid_until,
+    # 机械三腿 (breakout/breakdown/volatility) 只活在 entry_guard —— MU 8/25 案:
+    # entry_guard STALE 拒绝给计划, 白名单照常授权 $7,460、z1 备注画 950 (40%:7.5k)。
+    # 同一张卡在授权面与计划面必须一个数。z1 预算备注经 z1_budgets → desired_members
+    # 同拍跟随, 出组即回落裸观察线。无 K 线 → 价格腿沉默 (判不了的腿不拦),
+    # structure_veto_of 的「无 K 线保守不 grant」在 grant 层照旧兜底。
+    stale = zone_mech_stale(agent.get("zones"), agent.get("thesis"),
+                            (bars_of or book.bars)(tk) or [], today)
+    if stale:
+        notes.append(f"{tk}: {label} 但 zone stale ({stale[0]}) — 暂不进组, 重画后自动接上")
         return
     # 台账漂移 **只播报不拦**(二次定版起)。
     #
@@ -231,9 +239,10 @@ def _admit(tk: str, card: dict, today: str,
 
 
 def desired_members(positions_doc: dict, watchlist_doc: dict, today: str,
-                    option_plans: Optional[dict] = None) -> Tuple[Dict[str, str], List[str]]:
-    """授权白名单(纯函数, 可测): 当前所处 regime 给 cap 且未被锁/过期/行使的卡。
-    → ({ticker: 授权描述}, 拦下说明)。
+                    option_plans: Optional[dict] = None,
+                    bars_of=None) -> Tuple[Dict[str, str], List[str]]:
+    """授权白名单(纯函数, 可测): 当前所处 regime 给 cap 且未被锁/stale/行使的卡。
+    → ({ticker: 授权描述}, 拦下说明)。bars_of 可注入 (staleness 价格腿的 K 线源)。
 
     option_plans = entry_guard 落的 state/option_plans.json 的 plans 段
     (用户): 授权正股成员有选约且合约未过期 → **合约 code 一并进组**
@@ -246,13 +255,13 @@ def desired_members(positions_doc: dict, watchlist_doc: dict, today: str,
 
     for tk in sorted(live):
         _admit(tk, (positions_doc.get("tickers") or {}).get(tk) or {},
-               today, members, notes)
+               today, members, notes, bars_of=bars_of)
     for tk, card in sorted((watchlist_doc.get("tickers") or {}).items()):
         if not _is_stock(tk) or tk in live:
             continue
         if str(card.get("status")) != "watching" or card.get("moomoo_listed") is False:
             continue
-        _admit(tk, card, today, members, notes)
+        _admit(tk, card, today, members, notes, bars_of=bars_of)
     for und, plan in sorted((option_plans or {}).items()):
         if und not in members:
             continue                      # 正股无授权 → 合约不进 (选约文件可能滞后一晚)

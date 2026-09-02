@@ -54,7 +54,10 @@ GROSS_CAP = 1.10
 # 才轮到 ⑤); 真咬点在**持仓侧**(棘轮抬升后 mark−stop 变宽 /
 # 期权保费) — 检查在 portfolio_brief.at_risk_breach_signal。
 AT_RISK_CAP_FRAC = 0.05
-OPTION_ATRISK_LOSS_FRAC = 0.25
+# S1 −25 → −20 (用户 裁「收到 20%」, gate1 期权入场同日开放) ⇒ 本系数
+# 随 pin 跟到 0.20。⚠️ 已知低估: 跳空日止损线 ≠ 损失 (GOOGL 390C 8/05 收盘 −24.7% /
+# NVDA 220C 8/28 单日 −20%), 0.20 是「S1 被执行且无跳空」的名义 loss/unit, 实证会更大。
+OPTION_ATRISK_LOSS_FRAC = 0.20
 
 # 熔断：受管书**单日损失**
 # ≥ SHOCK_BREAKER_MULT × SHOCK_BUDGET × NAV (= 22.5% NAV,「比 30 年样本里最坏的
@@ -84,13 +87,23 @@ SHOCK_BREAKER_MULT = 1.5
 # 见 design §4) —— T 名义 5% 打满 ≈ 实证 7.0% NAV, 用户 知情选择顶格。
 GATE_RISK_CAPS = (0.025, 0.040, 0.050)
 
-# ── 期权 gate 资格闸 (用户 :「期权要到 r2 才能进 目前由于期权样本较少
-# 需要更高确定性 因此严禁在 r1 入场」) ──
-# 08-10「期权 R1-only」**整个反转**: 旧 = 首档用期权、之后一律正股; 新 = 第一个
-# gate 严禁期权 (正股先验证), gate2 起可期权。保费上限用**本档新增**risk ÷ S1
-# loss 0.25 (用户 同日裁: 期权**不跟结转**—— 那条理由是关于期权样本量的先验,
-# 不是关于预算解锁的): gate2 = 1.5%/0.25 = 6% NAV, gate3 = 4% NAV。
-OPTION_MIN_GATE = 2
+# ── 期权 gate 资格闸 ──
+# 当前配置 = 第一个**给 cap 的** gate 起即可用 long call, 但资格与正股**同一套**:
+#   ① 见底条件 = 系统里第一个给 cap 的 gate (收复线/止跌线 ×N 日确认 + 相对量腿,
+#      `structure_repair_veto` 放行) ⇒ OPTION_MIN_GATE = 1。「可以用期权」不等于
+#      「可以随意开仓」—— 没有那道 gate 就没有资格, 与正股一致。
+#   ② IV 硬门槛 (long_call_iv_gate): 见底点往往同时是 IV 峰值, 长 DTE call 会在
+#      正股上涨时被 vega crush 吃掉, 所以第一个 gate 只把 call 给 IV 友好的标的,
+#      其余走正股。
+#   ③ 保费上限的分母 = |S1| (OPTION_ATRISK_LOSS_FRAC, 与 exit_guard 的保费硬 stop
+#      同一个数, 由 pins 测试钉相等)。
+# 历史配置对照 (先后两版都实跑过): 「首档用期权、之后一律正股」与「第一个 gate 严禁
+# 期权、gate2 起可用」。改这个常量前先想清楚翻案依据是**工具属性**还是样本量 ——
+# 样本量在本仓从来不够裁决。保费上限恒按**本档新增** risk ÷ |S1| (不跟累计结转):
+# gate1 = 2.5%/0.20 = 12.5% NAV, gate2 = 7.5%, gate3 = 5%。
+# ⚠️ 小账户上这条常常算出 0 张 (单张 Δ0.7 长 DTE 保费 > 上限) —— 0 张的菜单是
+# 「正股或 veto」, 不是降 delta 去凑 cap。
+OPTION_MIN_GATE = 1
 
 
 def gate_risk_cap_frac(gate_no: int) -> float:
@@ -116,8 +129,9 @@ def gate_step_frac(gate_no: int) -> float:
 
 
 def option_premium_cap_frac(gate_no: int) -> float:
-    """期权保费上限占 NAV (本档新增 risk ÷ S1 loss 0.25)。**第一个 gate = 0.0
-    严禁**(OPTION_MIN_GATE, 用户); 超 3 个 gate = 0.0。"""
+    """期权保费上限占 NAV = 本档**新增** risk ÷ |S1| (OPTION_ATRISK_LOSS_FRAC)。
+    gate1 12.5% / gate2 7.5% / gate3 5% NAV;
+    gate_no < OPTION_MIN_GATE (=1) 或超 3 个 gate = 0.0。"""
     if gate_no < OPTION_MIN_GATE:
         return 0.0
     return gate_step_frac(gate_no) / OPTION_ATRISK_LOSS_FRAC
@@ -291,6 +305,66 @@ def gate_count(card: Optional[dict]) -> int:
             and str(h.get("date") or "")[:10] > anchor
             and _granted_cap_positive(h))
     return max(1, min(n, len(GATE_RISK_CAPS)))
+
+
+def granting_gate_level(card: Optional[dict]) -> Optional[float]:
+    """把这张卡送进**当前授权**的那道 gate 的价位 → float | None。
+
+    = 参与流起点之后最近一条 `direction == "up"` 且给了 cap 的转移的 `level`
+    (与 `gate_count` 数的是同一批条目, 取最后一条)。None = 常规参与卡 (没爬过线,
+    授权由建卡派生) / 参与流已被 down 转移或平仓打断 / 条目无 level。
+
+    消费者 = 期权退出栈 S5g (用户, META 553 案:「站上 553 的时候进场就
+    非常对了, 然后如果跌破 553 就果断离场 —— 虽然是以 gate 作为退出条件, 但这是含
+    杠杆的期权, 所以可以接受稍高的止损率」): 期权的正股退出线 = 这条 gate 本身,
+    不是正股用的 bfloor_buf (gate − 0.5N, round-2b 唯一合格变体 —— 正股照旧,
+    期权知情取紧)。
+    """
+    anchor = _participation_anchor(card)
+    hist = ((card or {}).get("agent") or {}).get("regime_history") or []
+    for h in reversed(hist):
+        if str(h.get("direction")) == "up" and str(h.get("date") or "")[:10] > anchor \
+                and _granted_cap_positive(h):
+            return coerce_float(h.get("level"))
+    return None
+
+
+# ── 期权 IV 硬门槛 (用户 裁「硬门槛」) ──────────────────
+#
+# long call 同时买方向 (delta) 和波动 (vega)。见底点 (gate1) 的 delta 腿最便宜,
+# vega 腿却最贵 —— 三对可对上 IV 记录的转移 gate1→gate2 IV 全部回落 (AAOI 149→112 /
+# LITE 114→91 / MU 93→67), Δ0.7 270DTE call 在正股 +4.4~8.8% 时仍 −6~−21%。
+# 所以 gate1 用 call 只限 IV 友好的票: percentile < 40 (序列 ≥60 天才可信,
+# iv_logger.percentile 的 reliable), 序列不足时用绝对 ATM IV < 50% 兜底
+# (mega-cap 常态 25-45% / 半导体 & 光模块 70-150%, 07-21 LEAPS 质量倾斜同一条线)。
+# ⚠️ 已知形状: percentile 口径下一只 IV 88% 的票只要处于自身低分位就会放行 ——
+# 绝对上限没有单独裁, 要加是另一条裁决。无 IV 数据 = 不放行 (与 today_group
+# 「无 K 线→不 grant」同一 fail-closed 哲学)。
+LONG_CALL_IV_PCT_MAX = 40.0    # IV percentile 上限 (含 = 不放行)
+LONG_CALL_IV_ABS_MAX = 50.0    # 绝对 ATM IV % 上限, 仅 percentile 不可信时兜底
+
+
+def long_call_iv_gate(pct: Optional[float], reliable: bool,
+                      abs_iv: Optional[float]) -> dict:
+    """单腿 long call 的 IV 硬门槛 → {"allowed", "basis", "reason"}。
+
+    basis ∈ {"pct", "abs", "none"}: pct = percentile 可信 (≥60 样本) 用 percentile;
+    abs = 样本不足回落绝对 ATM IV; none = 无数据 → 不放行。reason 是播报原文。
+    """
+    p = coerce_float(pct)
+    a = coerce_float(abs_iv)
+    if reliable and p is not None:
+        ok = p < LONG_CALL_IV_PCT_MAX
+        return {"allowed": ok, "basis": "pct",
+                "reason": (f"IV percentile {p:g} {'<' if ok else '≥'} {LONG_CALL_IV_PCT_MAX:g}"
+                           + (f" (ATM IV {a:g}%)" if a is not None else ""))}
+    if a is not None:
+        ok = a < LONG_CALL_IV_ABS_MAX
+        return {"allowed": ok, "basis": "abs",
+                "reason": (f"ATM IV {a:g}% {'<' if ok else '≥'} {LONG_CALL_IV_ABS_MAX:g}%"
+                           " (序列 <60 天, percentile 不可信 → 绝对值兜底)")}
+    return {"allowed": False, "basis": "none",
+            "reason": "无 IV 数据 → 不放行 (先跑 iv_logger --tickers <T>)"}
 
 
 def at_risk_nominal_cap(nav: Optional[float], price: Optional[float],

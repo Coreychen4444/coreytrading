@@ -29,6 +29,7 @@ from quant.core.holdings import (
     UNMANAGED_ROLES, flat_with_lots, is_managed, is_reference_role, live_tickers,
     lot_gap, lot_qty, managed_tickers, underlying_cards_missing_zones)
 from quant.core.io_json import atomic_write_json, iter_jsonl
+from quant.core.occ import is_option_ticker
 from quant.core.num import coerce_float as normalize_num
 from quant.core.occ import parse_occ
 from quant.core.paths import (
@@ -50,15 +51,15 @@ TOP_MOVERS_COUNT = 3
 # Edge-triggered alerts: first occurrence fires; persisting condition re-confirms
 # at most every 24h (was: re-fired every 4h, contradicting heartbeat.md 边沿触发)
 REALERT_SECONDS = 24 * 60 * 60
-# zone-maintenance staleness 口径 —— entry_guard 同名常量的有意重复
-# (历史各自实现), 相等由 tests/test_constant_pins.py 钉死 (BACKLOG §3.5):
-# 改口径两处同改。语义:
+# zone-maintenance staleness 口径 —— 判别式手搓孪生保留 (历史有意重复),
+# 常量本身 re-export core.structure (单一真源, entry_guard 同源);
+# 三方恒等由 tests/test_constant_pins.py 钉死。语义:
 #   breakout (上行) 连续 ×2 确认 | breakdown (破 z2 下沿) **当日**即 stale
 #   (带内挂单语义反转, 多等一天没有意义) | 波动 stale = |单日收收| > 2×ATR14
 #   (per-ticker 尺, 固定 10% 从未进代码且"没有意义"; 校准 2,490 票日触发率 1.5%)
-STALE_CONFIRM_DAYS = 2
-STALE_BREAKDOWN_DAYS = 1
-STALE_VOL_ATR_MULT = 2.0
+STALE_CONFIRM_DAYS = structure.STALE_CONFIRM_DAYS
+STALE_BREAKDOWN_DAYS = structure.STALE_BREAKDOWN_DAYS
+STALE_VOL_ATR_MULT = structure.STALE_VOL_ATR_MULT
 
 
 def _load_state_doc(path: Path) -> Dict:
@@ -1373,6 +1374,9 @@ def stop_status(ticker: str, item: Dict, cfg: Optional[Dict],
             "dte_days": premium_proj.dte_of(ticker, today or et_today()),
             "iv_pct": normalize_num(item.get("iv_pct")),
             "delta": normalize_num(item.get("delta")),
+            # 期权 S5g gate 线 (用户): exit_guard 已算好写在 guard 上, 只读
+            "gate_level": normalize_num(((guard or {}).get("opt_gate_stop") or {}).get("level")),
+            "gate_days": int(normalize_num(((guard or {}).get("opt_gate_stop") or {}).get("days")) or 1),
         }
     st = premium_proj.binding_stop(
         is_option=is_opt, card_stop=card, card_days=days,
@@ -1627,6 +1631,23 @@ def iv_signal(ticker: str) -> Optional[str]:
     return None
 
 
+def valuation_fyi_map(pos_doc: Optional[dict], wl_doc: Optional[dict]) -> Dict[str, str]:
+    """卡片机器区 `agent.valuation.fyi` → {ticker: 一行}。判断层零授权效力: 简报只把这一行**原样**
+    挂在该票依据行尾 (📐[FYI]), 不进动作判定、不进预算、不进任何告警。来源 = valuation_sync 镜像的
+    valuations.jsonl 最新行 ( 用户: 「估值结果在哪里呈现」→ 卡片是简报读的地方)。
+    positions 只取 active 正股卡, watchlist 只取 watching; 期权卡归 underlying。"""
+    out: Dict[str, str] = {}
+    for doc, want in ((pos_doc, "active"), (wl_doc, "watching")):
+        for tk, card in ((doc or {}).get("tickers") or {}).items():
+            if is_option_ticker(tk) or str((card or {}).get("status")) != want:
+                continue
+            v = ((card or {}).get("agent") or {}).get("valuation") or {}
+            line = str(v.get("fyi") or "").strip()
+            if line and tk not in out:
+                out[str(tk).upper()] = line
+    return out
+
+
 def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True) -> Dict:
     """mutate_state=False (--read-only): 报告当前条件但不消耗告警冷却、不写
     heartbeat-state — 手动/session 内查看用,否则会吃掉真 heartbeat 的提醒窗口。"""
@@ -1817,6 +1838,12 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             continue
         lo = z2[0] if z2 else z1[0]
         if not (lo <= px <= z1[1]):
+            continue
+        # 机械 stale 卡不发触碰告警 ( 用户, MU 案: entry_guard 判 STALE
+        # 拒绝给计划, 本告警却带 cap $7,460 邀请按旧图入场)。触碰的语义 = "回踩进
+        # 参与带", 图作废后带已不是参与带; today_group/z1 备注同轮接同判别式。
+        # 防守向的 z2_breach_buy_freeze **有意不 skip** — stale 卡更该冻结 BUY。
+        if zone_staleness(wt, zcfg):
             continue
         trigger_type = "wl_zone_touch"
         active_keys.add(alert_key(wt, trigger_type))
@@ -2138,8 +2165,10 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             alerts.append("⚠️ 财报已落地但卡未重画 (v3 重画 SLA): "
                           + "; ".join(stale_print)
                           + " → 用**反应日收盘**那根 bar 全重画 (盘前照 print 画 = "
-                            "未完成 bar 当收盘 + 提前画白画率 40%); 授权不受影响, "
-                            "财报只压 T+0 size 不压参与")
+                            "未完成 bar 当收盘 + 提前画白画率 40%); **全重画含 thesis "
+                            "情报腿** (print 事实读 ai_news 归档 [FYI] — zones-only "
+                            "只消音本判据, thesis 仍停在 print 前, MRVL 9/01 案); "
+                            "授权不受影响, 财报只压 T+0 size 不压参与")
             triggers.append({"ticker": "INFRA", "type": "card_stale_earnings",
                              "value": len(stale_print)})
 
@@ -2303,6 +2332,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
 
     return {
         "source": source,
+        "valuation_fyi": valuation_fyi_map(pos_doc_infra, _load_state_doc(STATE_WATCHLIST_PATH)),
         "quote_time": latest_quote_time,
         "top_movers": movers,
         "watchlist": watch,

@@ -29,7 +29,7 @@ def env(tmp_path, monkeypatch):
                             encoding="utf-8")
         monkeypatch.setattr(kc, "KLINE_CACHE_DIR", kdir)
         monkeypatch.setattr(kc, "_et_hhmm", lambda: now_hhmm)
-        monkeypatch.setattr(kc, "_yahoo_daily", lambda sym, start: bars)
+        monkeypatch.setattr(kc, "_yahoo_daily", lambda sym, start, **kw: bars)
         monkeypatch.setattr(kc, "get_kline",
                             lambda t, ktype, start, end: bars)
         return path
@@ -95,6 +95,19 @@ def test_historical_bars_pass_at_any_hour(env):
                cached=[_bar("2026-08-03", 15.86)])
     assert kc.update_ticker("VIX", 365) == 1
     assert _dates(path) == ["2026-08-03", "2026-08-04"]
+
+
+# ── 情报层收拢退役棘轮 (, 用户: 本仓只做技术分析+风控) ──
+
+
+def test_macro_observation_tickers_stay_retired():
+    """宏观三票 (TNX/DXY/BTC, 加) 随情报层收拢 ai-news-radar
+    整体退役 — 宏观读数不再由本仓采集, UTC 日历守卫 YH_UTC_DATED 随 BTC 一并删除。
+    回到 INDEX_YH = 有人在把宏观情报职能加回本仓, 先读
+    intel-consolidation directive (strategy/proposals/) 再动。"""
+    assert not {"TNX", "DXY", "BTC"} & set(kc.INDEX_YH)
+    assert not hasattr(kc, "YH_UTC_DATED")
+    assert "DXY" not in kc.YH_CUTOFF
 
 
 # ── default_universe: 活仓期权合约进刷新集 () ─────────────

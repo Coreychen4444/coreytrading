@@ -344,6 +344,72 @@ def anchor_date(agent: Optional[dict]) -> Optional[str]:
     return str(lr)[:10] or None
 
 
+# ── 机械 zone staleness (单一真源, 下沉) ────────────────
+#
+# zone-maintenance 机械触发的判别式内核, 原生于 entry_guard.zone_staleness
+# (portfolio_brief 手搓孪生保留, 常量三方由 tests/test_constant_pins.py 钉死)。
+# 下沉动机 = MU 一张卡四个数: entry_guard 判 STALE 拒绝给计划,
+# 而 today_group 白名单照常授权 $7,460、moomoo z1 备注画 950 (40%:7.5k)、
+# brief 还发 📥 触碰告警 —— today_group._admit 的「zones 未过期」只查
+# valid_until, 机械三腿 (breakout/breakdown/volatility) 只活在 entry_guard。
+# 消费者: entry_guard (委托) / today_group_sync._admit (白名单 ⇒ z1 预算
+# 备注经 z1_budgets 同拍跟随) / portfolio_brief wl_zone_touch (skip stale)。
+STALE_CONFIRM_DAYS = 2      # breakout (上行) 连续 ×2 确认 — 挂单只是不成交, 无执行危害
+STALE_BREAKDOWN_DAYS = 1    # breakdown 当日口径 (用户) — 带内挂单语义已反转
+STALE_VOL_ATR_MULT = 2.0    # |单日收收| > 2×ATR14 (per-ticker 尺, 固定 10% 废除)
+STALE_DAYS_REVIEWED = 14    # last_reviewed 距今 >14d = 怀疑过期 (zone-maintenance 时间触发)
+
+
+def zone_mech_stale(zones: Optional[dict], thesis: Optional[dict],
+                    rows: List[dict], today: str) -> List[str]:
+    """机械 staleness 触发清单 (zone-maintenance 时间/价格触发的机械子集)。空 = fresh。
+
+    输入宽容两种键名: 原始卡片 zones (accumulation_zone_2/trim_zone) 与
+    zone_bands 产物 (z2/trim) 都认 —— entry_guard 手里是后者, sync 层是前者,
+    强行统一会在委托边界多一次逆映射。event-stale (宏观) 仍归 LLM, 不在此。
+    价格带缺失 (prose-only 卡) → 价格带腿沉默; ATR 算不出 → vol 腿沉默,
+    其余腿照常 —— 判不了的腿不拦, 判得了的腿不放。
+    """
+    zones = zones or {}
+    out: List[str] = []
+    vu = zones.get("valid_until")
+    if vu and str(vu) < today:
+        out.append(f"valid_until {vu} 已过期")
+    lr = str((thesis or {}).get("last_reviewed") or "")[:10]
+    if lr:
+        try:
+            gap = (date.fromisoformat(today) - date.fromisoformat(lr)).days
+            if gap > STALE_DAYS_REVIEWED:
+                out.append(f"last_reviewed {lr} 距今 {gap}d > {STALE_DAYS_REVIEWED}d")
+        except ValueError:
+            pass
+    closes = [(str(r.get("time", ""))[:10], coerce_float(r.get("close")))
+              for r in rows[-(STALE_CONFIRM_DAYS + 1):]]
+    closes = [(t, c) for t, c in closes if c]
+    trim = zones.get("trim") if "trim" in zones else zones.get("trim_zone")
+    if len(closes) >= STALE_CONFIRM_DAYS:
+        last = closes[-STALE_CONFIRM_DAYS:]
+        if isinstance(trim, list) and len(trim) == 2 and all(c > trim[1] for _, c in last):
+            out.append(f"连续 {STALE_CONFIRM_DAYS} 日收盘 > trim 上沿 (breakout stale)")
+    # 破位 stale = 当日口径 (STALE_BREAKDOWN_DAYS=1, 用户): 收盘已在
+    # z2 下沿之下, 旧图带内挂 BUY = 立即市价成交在破位区 —— 不等第二个收盘。
+    z2 = zones.get("z2") if "z2" in zones else zones.get("accumulation_zone_2")
+    if closes and isinstance(z2, list) and len(z2) == 2 and z2[0] and closes[-1][1] < float(z2[0]):
+        out.append(f"收盘 {closes[-1][1]:g} < zone2 下沿 {float(z2[0]):g} "
+                   "(breakdown stale, 当日口径 2026-08-20 — 带内挂单语义已反转)")
+    # 波动 stale = |单日收收| > 2×ATR14 (per-ticker 尺, 首次接线 ——
+    # 固定 10% 只活过文档)。ATR 算不出 (序列不足) → 本腿沉默, 其余腿照常。
+    from .technical import atr as _atr  # 函数内 import — 与 book.py 同款, 避免顶层环
+    a14 = (_atr(rows, 14) or [None])[-1] if rows else None
+    cl2 = [coerce_float(r.get("close")) for r in rows[-2:]]
+    if a14 and len(cl2) == 2 and cl2[0] and cl2[1]:
+        chg, thr = abs(cl2[1] / cl2[0] - 1), STALE_VOL_ATR_MULT * a14 / cl2[0]
+        if chg > thr:
+            out.append(f"单日 {chg * 100:.1f}% > {STALE_VOL_ATR_MULT:g}×ATR14 "
+                       f"({thr * 100:.1f}%) (volatility stale)")
+    return out
+
+
 def gate_staleness(agent: Optional[dict], today: str,
                    zone_stale_reasons: Optional[List[str]] = None) -> List[str]:
     """gate 的**硬**staleness (会导致 STALE verdict)。空 = fresh。

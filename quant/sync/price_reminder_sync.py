@@ -116,7 +116,7 @@ MAX_PER_TICKER = 6
 # 超宽) 才回退让位。优先级决定谁当 head (head 段 = 排序与所有权前缀的锚)。已知撞点:
 # gate == no_chase / no_chase == trim 下沿 / no_chase == z1 上沿 / stop == gate。
 PRIORITY = {"stop": 0, "trim": 1, "gate": 2, "z1": 3, "nochase": 4, "g01": 5, "oz1": 6}
-STOP_SRC_PRI = {"card": 0, "lock": 1, "trail": 2}   # 同价并列时的稳定序: 静态源优先
+STOP_SRC_PRI = {"card": 0, "gate": 1, "lock": 2, "trail": 3}   # 同价并列时的稳定序: 静态源优先 (gate = 期权 S5g,)
 G01_GAINS = (1.0, 2.0, 3.0)                 # 镜像 exit_guard PARAMS["g01_levels"] 的增益列
 GUARDS_STALE_DAYS = 3                       # exit_guards as_of 超此天数 → 报出来 (仍用值: 只升不降 ⇒ 陈旧=偏低)
 
@@ -306,16 +306,21 @@ def exit_floor_map(guards_doc: Optional[dict], positions_doc: dict) -> Dict[str,
     (单一真源 = exit_guard; 不越价约束/armed 口径/HWM/parabolic 分支全在那边算完)。
 
     lock = ratchet.floor, basis = 自身 mark (正股=股价, 期权=期权价);
-    trail = trail.trail, basis 恒 = underlying 收盘。guards 里可能有已平仓残留
-    (state 清理归 exit_guard), 本层按 live_tickers 过滤。"""
+    trail = trail.trail, basis 恒 = underlying 收盘;
+    gate = opt_gate_stop.level (期权 S5g, 用户: 授予 cap 的 gate 本身),
+    basis = underlying 收盘, 只在期权 guard 上出现 (key 缺席 = 无此线)。
+    guards 里可能有已平仓残留 (state 清理归 exit_guard), 本层按 live_tickers 过滤。"""
     out: Dict[str, Dict] = {}
     gpos = (guards_doc or {}).get("positions") or {}
     for t in live_tickers(positions_doc):
         g = gpos.get(t) or {}
         lock = coerce_float((g.get("ratchet") or {}).get("floor"))
         trail = coerce_float((g.get("trail") or {}).get("trail"))
-        if lock is not None or trail is not None:
+        gate = coerce_float((g.get("opt_gate_stop") or {}).get("level"))
+        if lock is not None or trail is not None or gate is not None:
             out[t] = {"lock": lock, "trail": trail}
+            if gate is not None:
+                out[t]["gate"] = gate
     return out
 
 
@@ -378,6 +383,8 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
                 und_cands.setdefault(und, []).append((stop, "card"))
         if fl.get("trail") is not None:                # trail 恒 underlying 基
             und_cands.setdefault(und, []).append((float(fl["trail"]), "trail"))
+        if fl.get("gate") is not None:                 # 期权 S5g gate 线, underlying 基 ()
+            und_cands.setdefault(und, []).append((float(fl["gate"]), "gate"))
         if fl.get("lock") is not None:                 # 棘轮地板 basis = 自身 mark
             (contract_cands if occ else und_cands.setdefault(und, [])) \
                 .append((float(fl["lock"]), "lock"))

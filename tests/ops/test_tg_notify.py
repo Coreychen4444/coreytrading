@@ -38,3 +38,20 @@ def test_length_is_counted_in_utf16_units_not_characters():
     assert tg._tg_len("🚨") == 2 and len("🚨") == 1
     parts = tg.split_message("🚨" * (tg.TG_LIMIT // 2 + 5))
     assert all(tg._tg_len(p) <= tg.TG_LIMIT for p in parts)
+
+
+def test_load_bot_token_prefers_the_primary_config_path(tmp_path, monkeypatch):
+    neutral = tmp_path / "neutral.env"
+    legacy = tmp_path / "legacy.env"
+    neutral.write_text("TELEGRAM_BOT_TOKEN=neutral-token\n", encoding="utf-8")
+    legacy.write_text("TELEGRAM_BOT_TOKEN=legacy-token\n", encoding="utf-8")
+    monkeypatch.setattr(tg, "TOKEN_ENV_PATHS", (str(neutral), str(legacy)))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "environment-token")
+    assert tg.load_bot_token() == "neutral-token"
+
+
+def test_load_bot_token_falls_back_to_environment(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.env"
+    monkeypatch.setattr(tg, "TOKEN_ENV_PATHS", (str(missing),))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "environment-token")
+    assert tg.load_bot_token() == "environment-token"

@@ -78,10 +78,14 @@ def binding_stop(*, is_option: bool,
                  mark: Optional[float] = None, spot: Optional[float] = None,
                  strike: Optional[float] = None, dte_days: Optional[float] = None,
                  iv_pct: Optional[float] = None,
-                 delta: Optional[float] = None) -> Optional[dict]:
+                 delta: Optional[float] = None,
+                 gate_level: Optional[float] = None,
+                 gate_days: int = 1) -> Optional[dict]:
     """止损显示合同的单一装配点 (用户: 内部算不同基的 max, 只显示一个值)。
 
-    来源词表与 price_reminder 同源: card | lock | trail (+期权原生 s1)。
+    来源词表与 price_reminder 同源: card | lock | trail | gate (+期权原生 s1)。
+    gate = 期权 S5g (用户): 授予 cap 的那道 gate 本身, underlying 基,
+    只在期权分支投影 —— 正股的 stop 仍是 bfloor_buf, 传了也不读。
     正股: card / lock(棘轮地板) / trail(趋势死亡线) 同一价格空间, 直接 max。
     期权: card / trail 是 **underlying 基**→ 先投影进保费空间; lock(保费棘轮) 与
     S1(保费地板) 原生; 再 max。混基直接比 = 量纲错 (期权 mark 比正股价位,
@@ -115,10 +119,17 @@ def binding_stop(*, is_option: bool,
                 bases.append(("trail", pj["premium"],
                               f"正股 {trail:g} 投影({pj['method']})"
                               + (" BROKEN" if trail_broken else "")))
+        if gate_level is not None:
+            pj = project_call_premium(gate_level, mark=mark, spot=spot, strike=strike,
+                                      dte_days=dte_days, iv_pct=iv_pct, delta=delta)
+            if pj:
+                span = f"×{gate_days}日" if gate_days > 1 else ""
+                bases.append(("gate", pj["premium"],
+                              f"正股 gate {gate_level:g}{span} 投影({pj['method']})"))
         if lock_floor is not None:
             bases.append(("lock", lock_floor, f"保费棘轮[{lock_stage or '?'}]"))
         if s1_floor is not None:
-            bases.append(("s1", s1_floor, "保费地板 成本×0.75"))
+            bases.append(("s1", s1_floor, "保费地板 S1"))
     if not bases:
         return None
     source, value, note = max(bases, key=lambda b: b[1])

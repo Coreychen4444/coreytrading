@@ -202,6 +202,8 @@ stop         最先约束的结构/ratchet/trend line
 
 计划必须报告 binding constraint。名义 regime cap 只是 ceiling，不是 allowance。同一个 sizing function 同时服务 entry plan、authorization list 和运营报告，避免它们静默产生不同数字。
 
+期权分开算。`OPTION_MIN_GATE = 1`：long call 可在**第一个给 cap 的 gate**（系统的见底条件，与正股入场同一套资格）入场，但必须过 **IV 硬门槛**（percentile 低于 40；序列不足以排位时看绝对 ATM IV 低于 50%；无数据不放行）——见底点往往正是 IV 峰值。保费上限按**本档新增** risk ÷ |S1| = gate1 12.5% / gate2 7.5% / gate3 5% NAV，**不跟累计**。期权的正股退出线 = **授予 cap 的那道 gate 本身**（收盘确认），不是正股的 `gate − 0.5N` 地板。「保费」与「标的名义」是两种钱，换算走 `notional_to_premium_cap`，不可直接取小。
+
 ### 八、gate 的结构身份
 
 `quant/core/episodes.py` 的四分类决定 gate 属于哪条结构路径：

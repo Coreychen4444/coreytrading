@@ -225,18 +225,22 @@ def test_latest_iv_skips_zero_rows(tmp_path, monkeypatch):
         '{"date": "2026-07-20", "atm_iv_pct": 0.0}\n'
 )
     monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(entry_guard.iv_logger, "IV_HISTORY_DIR", tmp_path)
     row = entry_guard.latest_iv("MRVL")
     assert row["date"] == "2026-07-17"
     assert "93.2" in entry_guard.iv_gate_line("MRVL")
-    assert "禁单腿" in entry_guard.iv_gate_line("MRVL")
+    # 硬门槛: 样本 1 (<60) → 绝对 ATM IV 93.2% ≥ 50% → VETO 单腿 long call
+    assert "VETO" in entry_guard.iv_gate_line("MRVL")
 
 
 def test_latest_iv_all_invalid_reads_none(tmp_path, monkeypatch):
     p = tmp_path / "X.jsonl"
     p.write_text('{"date": "2026-07-20", "atm_iv_pct": 0.0}\n')
     monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(entry_guard.iv_logger, "IV_HISTORY_DIR", tmp_path)
     assert entry_guard.latest_iv("X") is None
     assert "未入库" in entry_guard.iv_gate_line("X")
+    assert not entry_guard.option_iv_gate("X")["allowed"]      # 无数据 = 不放行
 
 
 # ── next_regime: gate = 状态转移锚点 () ──────────────
@@ -405,7 +409,7 @@ def test_cap0_veto_still_renders_repair_map(monkeypatch):
     assert "98" in joined
 
 
-# ── 期权轮资格闸: R2 起, 严禁 R1 (用户 ;  R1-only 反转) ──
+# ── 期权资格闸: gate1 起 + IV 硬门槛 (用户; 翻 08-13「R2 起」) ──
 
 def _vehicle_card(cap_pct: float) -> dict:
     """干净候选卡, close 落 zone1 内 → PLAN。"""
@@ -429,29 +433,60 @@ def _vehicle_rows() -> list:
             for d in range(1, 29)]
 
 
-def test_option_vehicle_is_blocked_at_r1(monkeypatch):
-    """entry_guard 域恒 R1 ⇒ vehicle=leaps 卡的期权计划**永不生成**(期权 R2 起,
-    严禁 R1 — 用户 「期权样本较少 需要更高确定性」), 且渲染不得给
-    「手动跑 option_plan」话术 (那是教人绕闸); R2+ 的指路在 reasons 里。"""
+def test_option_vehicle_iv_hard_gate_blocks_plan_and_says_so(monkeypatch):
+    """gate1 可期权 (), 但 IV 硬门槛不过 = 不选约: 无 IV 数据 / 高 IV 都
+    走 ⛔ 原文进 reasons 与渲染 (静默是本仓的病), option_plan.build 一次不调。"""
     from quant.decision import entry_guard as eg
+    from quant.options import option_plan as op
+    called = []
+    monkeypatch.setattr(op, "build", lambda *a, **k: called.append(1) or {})
     monkeypatch.setattr(eg, "_rows", lambda tk: _vehicle_rows())
     monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    monkeypatch.setattr(eg, "option_iv_gate", lambda tk: {
+        "allowed": False, "basis": "abs", "reason": "ATM IV 88% ≥ 50%", "samples": 51})
     r = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
     assert r["verdict"] == "PLAN"
-    assert "option_plan" not in r, "轮资格闸被绕过: R1 生成了期权计划"
-    assert any("gate1 严禁" in x for x in r["reasons"])
-    assert any("gate2" in x for x in r["reasons"])        # 指路 (够 gate 之后) 而非静默
+    assert "option_plan" not in r and called == [], "IV 硬门槛被绕过"
+    assert any("IV 硬门槛 VETO" in x and "ATM IV 88%" in x for x in r["reasons"])
     txt = eg.render([r], nav=22000.0, today="2026-08-05")
-    assert "gate 资格闸" in txt and "第一档正股 only" in txt
+    assert "IV 硬门槛 VETO" in txt and "本档正股执行" in txt
+
+
+def test_option_vehicle_past_iv_gate_builds_contract_plan_at_gate1(monkeypatch):
+    """过了 IV 门的 gate1 vehicle 卡 → 当场翻成合约级计划 (08-13 前形状回归), 保费
+    预算 = gate1 12.5% NAV, at-risk 保费上限 = 5%/0.20 = 25% NAV, stop 传正股
+    max(卡 stop, 授予 cap 的 gate)。"""
+    from quant.decision import entry_guard as eg
+    from quant.options import option_plan as op
+    seen = {}
+
+    def fake_build(tk, ladder, cap, **kw):
+        seen.update({"tk": tk, "cap": cap, **kw})
+        return {"ticker": tk, "error": "链数据不可得 (测试)", "iv": {}, "gate": {"verdict": "?", "note": ""}}
+    monkeypatch.setattr(op, "build", fake_build)
+    monkeypatch.setattr(eg, "_rows", lambda tk: _vehicle_rows())
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    monkeypatch.setattr(eg, "option_iv_gate", lambda tk: {
+        "allowed": True, "basis": "abs", "reason": "ATM IV 39% < 50%", "samples": 8})
+    card = _vehicle_card(0.40)
+    card["agent"]["regime_history"] = [{"date": "2026-08-04", "direction": "up",
+                                        "level": 85.0, "cap_pct_nav": 0.40}]
+    r = eg.evaluate_ticker("TST", card, "2026-08-05", nav=22000.0)
+    assert r["verdict"] == "PLAN" and "option_plan" in r
+    assert seen["tk"] == "TST" and seen["cap"] == pytest.approx(0.125 * 22000.0)
+    assert seen["at_risk_premium_cap"] == pytest.approx(0.05 * 22000.0 / 0.20)
+    assert seen["target_dte"] == 270 and seen["min_dte"] == 270
+    assert seen["stop"] == 85.0, "期权正股退出线 = max(卡 stop 78, 授予 cap 的 gate 85)"
+    assert any("期权 gate1 可用" in x and "12.5%" in x for x in r["reasons"])
 
 
 def test_option_premium_cap_is_gate_scheduled():
-    """保费上限随档 (sizing 单源, 用**本档新增**不用累计): gate1 = 0 (严禁) /
-    gate2 = 6% / gate3 = 4% NAV。"""
+    """保费上限随档 (sizing 单源, 用**本档新增**不用累计): gate1 = 12.5% /
+    gate2 = 7.5% / gate3 = 5% NAV (|S1| 0.20,)。"""
     from quant.core.sizing import option_premium_cap_frac
-    assert option_premium_cap_frac(1) == 0.0
-    assert option_premium_cap_frac(2) == pytest.approx(0.06)
-    assert option_premium_cap_frac(3) == pytest.approx(0.04)
+    assert option_premium_cap_frac(1) == pytest.approx(0.125)
+    assert option_premium_cap_frac(2) == pytest.approx(0.075)
+    assert option_premium_cap_frac(3) == pytest.approx(0.05)
 
 
 # ── 选约落库 write_option_plans (用户  Today/画线真源) ──
@@ -622,10 +657,9 @@ def test_log_decisions_only_on_change(tmp_path, monkeypatch):
     assert len(lines) == 2
 
 
-def test_entry_guard_never_calls_option_plan(monkeypatch):
-    """期权 R1 严禁 (2026-08-13) ⇒ entry_guard 恒 R1 域**不再有任何路径**调
-    option_plan.build。§13.2 的 DTE 语义 (target 270 / min 270) 归 option_plan
-    模块自持, R2+ 手动跑时生效。"""
+def test_entry_guard_calls_option_plan_only_past_the_iv_gate(monkeypatch):
+    """ 起 gate1 可期权, 但 option_plan.build 的**唯一**入口在 IV 硬门槛之后:
+    无 IV 数据 (测试环境 TST 无 iv_history) = 不放行 = 不调。"""
     from quant.decision import entry_guard as eg
     from quant.options import option_plan as op
     called = []
@@ -634,7 +668,8 @@ def test_entry_guard_never_calls_option_plan(monkeypatch):
     monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
     r = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
     assert r["verdict"] == "PLAN"
-    assert called == [], "R1 域调了 option_plan.build — 轮资格闸被绕过"
+    assert called == [], "无 IV 数据仍调了 option_plan.build — 硬门槛被绕过"
+    assert r["option_iv_gate"]["basis"] == "none"
 
 
 # ── 当前 regime 的 no_chase 无条件印 (用户) ───────────

@@ -41,5 +41,9 @@ trade/**
 !trade/**/README.md
 !trade/**/*.example.*
 
+# Optional user-owned intelligence layer (news/macro). Trading code may read it;
+# this repository never ships its contents.
+ai_news/
+
 # Optional nested knowledge vault
 investment/

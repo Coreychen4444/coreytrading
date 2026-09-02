@@ -29,6 +29,7 @@ LAYERS = {
     "decision": 4,    # 机械闸门
     "journal": 5,     # 账本写入
     "report": 5,      # 读时报告
+    "valuation": 5,   # 估值 (判断层: 读 core/data/sync 的事实, 写自己的账本, 零授权效力)
     "ops": 6,         # 编排 / 通知
     "research": 7,    # 验证层旁路：可以看任何层，谁也不该看它
 }

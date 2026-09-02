@@ -348,3 +348,64 @@ def test_book_scan_skips_closed_option_and_zoneless_cards():
         "D": _desync_card(instrument={"type": "stock", "role": "commemorative_hold"}),
     }}
     assert cards_with_gate_anchor_desync(doc) == []
+
+
+# ── zone_mech_stale (机械 staleness 单一真源, 下沉) ──────
+#
+# 源案例 MU: entry_guard 判 STALE (breakdown 当日口径) 拒绝给计划,
+# 而 today_group 白名单照常授权 $7,460、moomoo z1 备注画 950 (40%:7.5k)、brief
+# 还发 📥 触碰告警 —— 同一张卡四个数。判别式此前只活在 entry_guard, 下沉后
+# entry_guard 委托、today_group/_admit 与 brief wl_zone_touch 读同一份。
+
+def _mech_rows(closes, start_day=1):
+    return [{"time": f"2026-07-{start_day + i:02d}", "close": c,
+             "high": c + 1, "low": c - 1} for i, c in enumerate(closes)]
+
+
+def test_mech_stale_accepts_both_key_shapes():
+    """原始卡片键名 (accumulation_zone_2/trim_zone) 与 zone_bands 产物 (z2/trim)
+    结论必须一致 —— entry_guard 手里是后者, sync 层是前者, 委托边界不做逆映射。"""
+    from quant.core.structure import zone_mech_stale
+    rows = _mech_rows([112, 111, 108])          # 最后收盘 108 < z2 下沿 110
+    raw = {"accumulation_zone_1": [110, 115], "accumulation_zone_2": [100, 110],
+           "trim_zone": [150, 160], "valid_until": "2099-01-01"}
+    zb = {"z1": [110.0, 115.0], "z2": [100.0, 110.0], "trim": [150, 160],
+          "valid_until": "2099-01-01"}
+    # 两种键名同判 fresh… 等等 — 108 > z2 下沿 100, fresh ✓
+    assert zone_mech_stale(raw, {}, rows, "2026-07-04") == \
+        zone_mech_stale(zb, {}, rows, "2026-07-04") == []
+    rows_bd = _mech_rows([112, 111, 99])        # 收盘 99 < z2 下沿 100 = breakdown
+    r1 = zone_mech_stale(raw, {}, rows_bd, "2026-07-04")
+    r2 = zone_mech_stale(zb, {}, rows_bd, "2026-07-04")
+    assert r1 == r2 and any("breakdown stale" in x for x in r1)
+
+
+def test_mech_stale_breakdown_is_same_day_not_confirmed():
+    """破位当日口径 (用户): 收盘 < z2 下沿**当日**即 stale, 不等 ×2。"""
+    from quant.core.structure import zone_mech_stale
+    zones = {"accumulation_zone_1": [940.5, 950.0], "accumulation_zone_2": [921.5, 940.5],
+             "trim_zone": [990.0, 1008.0], "valid_until": "2026-08-28"}
+    rows = _mech_rows([966.78, 910.43])         # MU 8/21 → 8/24 实况: 单日破 z2 下沿
+    hits = zone_mech_stale(zones, {}, rows, "2026-08-25")
+    assert any("breakdown stale" in h for h in hits)
+
+
+def test_mech_stale_breakout_needs_two_closes():
+    from quant.core.structure import zone_mech_stale
+    zones = {"accumulation_zone_1": [110, 115], "accumulation_zone_2": [100, 110],
+             "trim_zone": [150, 160], "valid_until": "2099-01-01"}
+    one = _mech_rows([140, 161])                # 只 1 日 > trim 上沿
+    assert not any("breakout" in h for h in zone_mech_stale(zones, {}, one, "2026-07-04"))
+    two = _mech_rows([161, 162])                # 连续 2 日
+    assert any("breakout stale" in h for h in zone_mech_stale(zones, {}, two, "2026-07-04"))
+
+
+def test_mech_stale_quiet_legs_on_missing_inputs():
+    """判不了的腿不拦: prose-only 卡 (无价格带) 只剩时间腿; 无 K 线只剩时间腿;
+    全 fresh = 空清单。"""
+    from quant.core.structure import zone_mech_stale
+    assert zone_mech_stale(None, None, [], "2026-08-25") == []
+    assert zone_mech_stale({"valid_until": "2026-08-01"}, {}, [], "2026-08-25") == \
+        ["valid_until 2026-08-01 已过期"]
+    hits = zone_mech_stale({}, {"last_reviewed": "2026-08-01"}, [], "2026-08-25")
+    assert hits and "last_reviewed" in hits[0]

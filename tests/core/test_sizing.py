@@ -52,20 +52,57 @@ def test_constraint_lines_flag_dead_window_fields():
                                      "touch_protocol": "C_60m_first_bar"}, "2026-08-09"))
 
 
-# ── 期权轮资格闸 (用户 : 期权 R2 起, 严禁 R1) ─────────
+# ── 期权资格闸 (用户: gate1 起可期权, 翻 08-13「期权 R2 起」) ─────────
 
-def test_option_min_gate_is_two_and_first_gate_premium_cap_is_zero():
-    """08-10「期权 R1-only」整个反转: 第一档严禁 (正股先验证), gate2 起可期权。"""
-    assert sizing.OPTION_MIN_GATE == 2
-    assert sizing.option_premium_cap_frac(1) == 0.0
+def test_option_min_gate_is_one_and_first_gate_has_premium_cap():
+    """用户:「不再限制 gate2 才允许期权入场 …… 依然需要等见底条件」——
+    见底条件 = 第一个给 cap 的 gate, 与正股同一套资格 ⇒ gate1 就有保费上限。"""
+    assert sizing.OPTION_MIN_GATE == 1
+    assert sizing.option_premium_cap_frac(1) == pytest.approx(0.125)
+    assert sizing.option_premium_cap_frac(0) == 0.0
 
 
 def test_option_premium_cap_uses_the_step_not_the_cumulative_cap():
-    """保费上限 = **本档新增**risk ÷ S1 loss 0.25: gate2 6% / gate3 4% NAV。
-    用户  明确期权**不跟结转**—— 跟了就是 16%/20%。超 3 档 = 0。"""
-    assert sizing.option_premium_cap_frac(2) == pytest.approx(0.06)
-    assert sizing.option_premium_cap_frac(3) == pytest.approx(0.04)
+    """保费上限 = **本档新增** risk ÷ |S1| 0.20: gate1 12.5% / gate2 7.5% / gate3 5% NAV。
+    08-13「不跟结转」未动 —— 跟了就是 20%/25%。超 3 档 = 0。"""
+    assert sizing.OPTION_ATRISK_LOSS_FRAC == pytest.approx(0.20)
+    assert sizing.option_premium_cap_frac(2) == pytest.approx(0.075)
+    assert sizing.option_premium_cap_frac(3) == pytest.approx(0.05)
     assert sizing.option_premium_cap_frac(4) == 0.0
+
+
+def test_long_call_iv_gate_percentile_when_reliable_else_absolute():
+    """IV 硬门槛 (用户): 可信 percentile <40 放行; 序列不足回落绝对
+    ATM IV <50%; 无数据不放行 (fail-closed)。"""
+    g = sizing.long_call_iv_gate(12.0, True, 88.0)
+    assert g["allowed"] and g["basis"] == "pct"          # 自身低分位放行 (已知形状, 文档标明)
+    g = sizing.long_call_iv_gate(40.0, True, 30.0)
+    assert not g["allowed"] and g["basis"] == "pct"       # 含 40 = 不放行
+    g = sizing.long_call_iv_gate(3.0, False, 67.0)
+    assert not g["allowed"] and g["basis"] == "abs"       # 样本不足 → 绝对值兜底: MU 67% ≥ 50
+    g = sizing.long_call_iv_gate(None, False, 39.0)
+    assert g["allowed"] and g["basis"] == "abs"           # NVDA 39%
+    g = sizing.long_call_iv_gate(None, False, None)
+    assert not g["allowed"] and g["basis"] == "none"
+    assert sizing.LONG_CALL_IV_PCT_MAX == 40.0 and sizing.LONG_CALL_IV_ABS_MAX == 50.0
+
+
+def test_granting_gate_level_is_the_last_cap_granting_up_since_the_break():
+    """期权 S5g 退出线 = 授予当前 cap 的那道 gate 本身 (META 553 案)。与 gate_count 数
+    同一批条目; down 转移 / 平仓打断参与流后 = None (退回卡 stop)。"""
+    up = lambda d, lvl, cap=0.40: {"date": d, "direction": "up", "level": lvl, "cap_pct_nav": cap}  # noqa: E731
+    down = lambda d, lvl: {"date": d, "direction": "down", "level": lvl, "cap_pct_nav": 0}  # noqa: E731
+    assert sizing.granting_gate_level(None) is None
+    assert sizing.granting_gate_level({"agent": {}}) is None            # 常规参与卡: 没爬过线
+    meta = {"agent": {"regime_history": [down("2026-08-19", 553.0), up("2026-08-26", 553.0)]}}
+    assert sizing.granting_gate_level(meta) == 553.0
+    two = {"agent": {"regime_history": [up("2026-08-05", 945.0), up("2026-08-14", 971.0)]}}
+    assert sizing.granting_gate_level(two) == 971.0                     # 最近一道
+    assert sizing.granting_gate_level({"agent": {"regime_history": [
+        up("2026-08-05", 204.0), down("2026-08-24", 200.0)]}}) is None  # 破位后参与流断
+    assert sizing.granting_gate_level({"agent": {"regime_history": [
+        up("2026-08-05", 204.0, cap=0.0)]}}) is None                      # 不授权的中间站不算
+    assert sizing.granting_gate_level({**two, "exit_info": {"closed_at": "2026-08-20T10:00:00-04:00"}}) is None
 
 
 # ── 整股档位分配 ──────────────────────────────────────────────────

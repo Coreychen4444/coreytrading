@@ -4,7 +4,7 @@
 为什么存在: P4 回测 (zone hit rate / ladder 实证) 需要可重复的本地历史;
 OpenD 每次现拉既慢又不可复现。增量: 只补 last cached date 之后的 bar。
 
-Universe: positions.json 全部 ticker (期权取 underlying) + watchlist + QQQ/SPY。
+Universe: positions.json 全部 ticker (期权取 underlying) + watchlist + BENCHMARKS/指数硬名单。
 
 CLI:
     .venv/moomoo/bin/python3 quant/data/kline_cache.py                # incremental update
@@ -32,20 +32,28 @@ from quant.core.timeutil import et_today  # noqa: E402
 
 from quant.data.market_data import get_kline  # noqa: E402
 
-BENCHMARKS = ["QQQ", "SPY", "SMH"]   # SMH  加: 半导体板块量能 gauge (gate_ladder_report 板块行)
+BENCHMARKS = ["QQQ", "SPY", "SMH", "SOXX"]   # SMH/SOXX: 半导体板块量能 gauge (gate_ladder_report 板块行)
+# 基准名单是**硬名单**: 参考票不再靠 watchlist 成员资格被顺带拉到 K 线 ——
+# 数据层与 watchlist membership 解耦 (watchlist 恒为正股入场候选)。
 
 # 指数 gauge (用户 : 大盘每日涨跌读数)。指数不可交易、被 watchlist_sync
 # 跳过不建卡 — 只进数据层 + 报表表头。
 # ⚠️ 数据源考古 (三连探针): OpenD request_history_kline / get_market_snapshot
 # 对美股指数一律 "US stock indices are not supported"; Stooq CSV 端点返回反爬 HTML。
 # 最终源 = Yahoo chart JSON (结构化端点, 四指数全覆盖, 收盘后即有当日终值; SPX 用 ^GSPC)。
+# (宏观三票 TNX/DXY/BTC 曾入列, 随情报层收拢 ai-news-radar 摘除 —
+# 用户: 本仓只做技术分析+风控, 宏观读数不再采集; UTC 日历守卫 YH_UTC_DATED 随 BTC 一并退役。)
 INDEX_YH = {"NDX": "^NDX", "SPX": "^GSPC", "SOX": "^SOX", "VIX": "^VIX"}
 
+# 定型时刻特例 (ET wall-clock, 缺省 16:05)。VIX 16:15 结算取 16:20 ( 案)。
+YH_CUTOFF = {"VIX": "16:20"}
 
-def _yahoo_daily(sym: str, start: str) -> list[dict]:
+
+def _yahoo_daily(sym: str, start: str, tz_name: str = "America/New_York") -> list[dict]:
     """Yahoo chart API 日线 → bar dicts (与 OpenD kline 同形)。失败抛异常, 由 main 的
     per-ticker try 隔离 — 断网不影响正股更新。盘中的当日进行中 bar 由 update_ticker
-    的 et_session_open 守卫统一丢弃 (与正股同一契约: 缓存只含已完成日线)。"""
+    的定型时刻守卫统一丢弃 (与正股同一契约: 缓存只含已完成日线)。
+    tz_name: bar 日期标注时区, 美股日历票用 ET (缺省)。"""
     import urllib.parse
     import urllib.request
     from datetime import datetime
@@ -58,7 +66,7 @@ def _yahoo_daily(sym: str, start: str) -> list[dict]:
     res = payload["chart"]["result"][0]
     ts = res.get("timestamp") or []
     q = (res.get("indicators") or {}).get("quote", [{}])[0]
-    et = ZoneInfo("America/New_York")
+    et = ZoneInfo(tz_name)
     out = []
     for i, t in enumerate(ts):
         c = (q.get("close") or [None])[i] if i < len(q.get("close") or []) else None
@@ -138,8 +146,9 @@ def update_ticker(ticker: str, backfill_days: int) -> int:
     # 判据改为**定型时刻**: ET 时刻 < cutoff → 丢一切当日 bar, 与处在哪个 session
     # 无关。VIX 16:15 ET 结算取 16:20; 其余 16:05 —— postclose (16:10 ET) 依赖
     # 当日正股收盘, 不能一刀切 16:20, 代价是 VIX 当日 bar 次晨 briefing 轮才入库。
-    cutoff = "16:20" if ticker == "VIX" else "16:05"
-    if _et_hhmm() < cutoff:
+    # 特例表 YH_CUTOFF (VIX 16:20)。
+    if _et_hhmm() < YH_CUTOFF.get(ticker, "16:05"):
+        cutoff = YH_CUTOFF.get(ticker, "16:05")
         today = et_today()
         dropped = [b for b in new if str(b.get("time", ""))[:10] >= today]
         if dropped:

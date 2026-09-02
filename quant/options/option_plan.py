@@ -48,7 +48,9 @@ from typing import Dict, List, Optional, Tuple
 
 add_openapi_path()  # openapi skill scripts (`common`) 上 sys.path
 from quant.core.num import coerce_float  # noqa: E402
-from quant.core.sizing import notional_to_premium_cap, share_ladder  # noqa: E402
+from quant.core.sizing import (  # noqa: E402
+    AT_RISK_CAP_FRAC, OPTION_ATRISK_LOSS_FRAC, long_call_iv_gate,
+    notional_to_premium_cap, share_ladder)
 from quant.core.timeutil import et_today  # noqa: E402
 from quant.data import iv_logger  # noqa: E402
 from quant.options.strike_compare import bs_call, _norm_cdf  # noqa: E402
@@ -301,6 +303,16 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     iv_pct = ivp.get("iv_percentile") if not ivp.get("error") else None
     reliable = bool(ivp.get("reliable"))
     gate = iv_gate(iv_pct, reliable)
+    # 硬门槛 (用户): 单腿 long call 只给 IV 友好的票, 不过门 = 不选约不拉链
+    # (见底点是 IV 峰值, sizing.long_call_iv_gate 有数据)。上面的 iv_gate 仍是情报层
+    # 分档 (canonical §六), 两者并存: 一个说"该不该", 一个说"能不能"。
+    hard = long_call_iv_gate(iv_pct, reliable,
+                             ivp.get("latest_iv_pct") if not ivp.get("error") else None)
+    if not hard["allowed"]:
+        return {"ticker": ticker, "iv": {**ivp, "reliable": reliable}, "gate": gate,
+                "hard_gate": hard,
+                "error": (f"IV 硬门槛 VETO ({hard['reason']}) → 本档正股执行, 不选约 "
+                          "(用户 2026-09-02)")}
 
     chain = fetch_chain(ticker, target_dte, option_type, min_dte=min_dte)
     if not chain:
@@ -311,7 +323,7 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     sel = pick_strike(strikes, iv_pct)
     out = {"ticker": ticker, "spot": chain["spot"], "expiry": chain["expiry"],
            "dte": chain["dte"], "type": option_type,
-           "iv": {**ivp, "reliable": reliable}, "gate": gate,
+           "iv": {**ivp, "reliable": reliable}, "gate": gate, "hard_gate": hard,
            "delta_band": sel["delta_band"], "chosen": sel["chosen"],
            "eligible_count": len(sel["eligible"]),
            "rejected_sample": sel["rejected"][:6], "ladder": ladder, "stop_underlying": stop}
@@ -339,7 +351,8 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     if at_risk_premium_cap is not None and (eff_cap is None or at_risk_premium_cap < eff_cap):
         eff_cap = at_risk_premium_cap
         out["cap_note"] = (f"单笔 at-risk 天花板 binding → 保费预算 ${at_risk_premium_cap:,.0f} "
-                          f"(5% NAV ÷ S1 loss 0.25; 分类 cap ${cap:,.0f})" if cap else
+                          f"({AT_RISK_CAP_FRAC:.0%} NAV ÷ |S1| {OPTION_ATRISK_LOSS_FRAC:g}; "
+                          f"gate 保费上限 ${cap:,.0f})" if cap else
                           f"单笔 at-risk 天花板 → 保费预算 ${at_risk_premium_cap:,.0f}")
     out["cap_deployment"] = cap
     out["cap_notional"] = notional_cap
@@ -369,6 +382,10 @@ def render(p: Dict) -> str:
               if not iv.get("error") else f"⚠️ {iv['error']}")
     L.append(f"   IV 闸门: {ivline} → **{g['verdict']}**")
     L.append(f"      {g['note']}")
+    hg = p.get("hard_gate")
+    if hg:
+        L.append(f"   IV 硬门槛 (单腿 long call): "
+                 f"{'✓ 放行' if hg.get('allowed') else '⛔ VETO → 正股'} — {hg.get('reason')}")
     if p.get("error"):
         L.append(f"   ⛔ {p['error']}")
         for s, why in p.get("rejected_sample", []):

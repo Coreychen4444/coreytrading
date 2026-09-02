@@ -202,6 +202,8 @@ stop         the first binding structural/ratchet/trend line
 
 The plan must report the binding constraint. A nominal regime cap is a ceiling, not an allowance. The same sizing function feeds the entry plan, authorization list and operational reporting so they cannot silently disagree.
 
+Options are sized separately. `OPTION_MIN_GATE = 1`: a long call may enter at the **first cap-granting gate** — the system's bottoming condition, the same qualification a stock entry needs — but only past a **hard IV gate** (percentile below 40, or absolute ATM IV below 50% while the series is too short to rank; no data means no entry), because the bottom is usually where implied volatility peaks. The premium ceiling uses the **incremental** risk of the current tranche ÷ |S1| = 12.5% of NAV at gate 1, 7.5% at gate 2, 5% at gate 3, and does **not** accumulate. The option's underlying exit line is **the granting gate itself** on a confirmed close, not the stock's `gate − 0.5N` floor. Premium and underlying notional are different kinds of money: convert through `notional_to_premium_cap` and never take the minimum of the two directly.
+
 ### 8. A gate's structural identity
 
 The four-way classifier in `quant/core/episodes.py` determines which structural path a gate belongs to:

@@ -373,10 +373,24 @@ def test_option_stop_folds_in_premium_space_not_mixed_bases():
     st = pb.stop_status("GOOGL270115C390000", item, cfg, guard,
                         und_spot=355.60, today="2026-08-10")
 
-    assert st["source"] == "s1"                       # 26.25 > card 投影 (~21.6) > trail 投影
-    assert st["value"] == pytest.approx(35.0 * 0.75)
+    assert st["source"] == "s1"                       # 28.0 > card 投影 (~21.6) > trail 投影
+    assert st["value"] == pytest.approx(35.0 * 0.80)  # S1 −20 ()
     assert st["breached"]                             # mark 20.48 已在线下
     assert abs(st["dist_pct"]) < 100, "保费空间距离, 不是 +1500% 的混基读数"
+
+
+def test_option_gate_line_from_guard_projects_and_can_bind():
+    """S5g (): guard 上的 opt_gate_stop (授予 cap 的 gate, underlying 基)
+    投影进保费空间参与 max; gate 高于卡 stop 时它就是 binding 那条。"""
+    item = {"qty": 1.0, "is_option": True, "synthetic": False, "avg_cost": 35.0,
+            "current_price": 20.48, "ticker": "GOOGL270115C390000",
+            "strike": 390.0, "delta": 0.405, "iv_pct": 34.1}
+    cfg = {"stop_level": 340.0, "stop_level_days": 1, "stop_level_basis": "underlying"}
+    guard = {"trail": {}, "opt_gate_stop": {"level": 380.0, "days": 1}}
+    st = pb.stop_status("GOOGL270115C390000", item, cfg, guard,
+                        und_spot=355.60, today="2026-08-10")
+    assert st["source"] == "gate" and "gate 380" in st["note"]
+    assert st["value"] > 35.0 * 0.80                  # 380 投影 > S1 地板 28.0 → gate binding
 
 
 def test_option_trim_projects_underlying_band_into_premium():

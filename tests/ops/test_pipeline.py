@@ -49,6 +49,29 @@ def test_heartbeat_is_a_subset_of_briefing():
     assert set(keys(pipeline.HEARTBEAT)) <= set(keys(pipeline.BRIEFING))
 
 
+def test_intel_layer_stages_stay_retired():
+    """情报层 收拢 ai-news-radar (用户: 本仓只做技术分析+风控):
+    pipeline 不得有宏观/新闻采集步 (`klines_macro` 已随 macro_lines 退役)。
+    想加回去先读 intel-consolidation directive。"""
+    assert all(s.key != "klines_macro" for s in pipeline.STAGES)
+
+
+def test_push_brief_alerts_pushes_only_when_alerts_exist(monkeypatch):
+    """无告警不推 (HEARTBEAT_OK 的安静保持); 有告警推卡片+alerts 原文。
+    (宏观观察行 随情报层收拢 ai-news-radar 移除 — 本仓只做技术+风控,
+    简报不再携带宏观读数。)"""
+    sent = []
+    monkeypatch.setattr(pipeline, "notify", lambda msg: sent.append(msg) or True)
+    assert pipeline.push_brief_alerts({"alerts": [], "fired_cards": []}) == "no_alerts"
+    assert sent == []
+
+    data = {"alerts": ["AAOI 🚨 STOP"], "fired_cards": ["card"]}
+    assert pipeline.push_brief_alerts(data) is True
+    assert len(sent) == 1
+    assert "AAOI 🚨 STOP" in sent[0]
+    assert sent[0].index("card") < sent[0].index("AAOI 🚨 STOP"), "卡片在前, alerts 在后"
+
+
 def test_postclose_is_lean_close_layer_only():
     """The close-dependent chain evaluates exits before applying transitions."""
     kp = keys(pipeline.POSTCLOSE)
@@ -166,6 +189,8 @@ def test_read_only_downgrades_state_writers_to_dry_run(monkeypatch):
     assert "--dry-run" in seen["reconcile"]
     assert "--dry-run" in seen["lots"]
     assert "--dry-run" in seen["autopaint"]
+    # 第四个 (): exit_score 写 scores.jsonl — 预览不落评分
+    assert "--dry-run" in seen["exit_score"]
 
 
 def test_postclose_refuses_mid_session_and_alerts(monkeypatch):
@@ -543,3 +568,16 @@ def test_brief_alerts_not_pushed_in_read_only(monkeypatch):
 
     pipeline.main(["--mode", "heartbeat", "--read-only", "--json"])
     assert not any("tg_notify.py" in c for c in calls), "read-only 不消耗告警通道"
+
+
+def test_exit_score_after_reconcile_before_watchlist_sync():
+    """结构性退出自动评分 (): 判据是 close_reconcile 落的 exit_info →
+    必须在 reconcile 之后; watchlist_sync 之前 —— 促升会覆盖 closed 卡,
+    覆盖前评完 (同一轮内 exit_info 不会先丢)。postclose 不跑它: 盘后卖出
+    (COHR 18:03 / NBIS 20:02 ET) 发生在 postclose (≈16:10 ET) 之后, 次日
+    heartbeat/briefing 的 reconcile→exit_score 链才是抓它的那一轮。"""
+    for mode in (pipeline.HEARTBEAT, pipeline.BRIEFING):
+        k = keys(mode)
+        assert k.index("exit_score") > k.index("reconcile"), mode
+        assert k.index("exit_score") < k.index("watchlist_sync"), mode
+    assert "exit_score" not in keys(pipeline.POSTCLOSE)
