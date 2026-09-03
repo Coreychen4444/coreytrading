@@ -128,6 +128,29 @@ def managed_tickers(doc: dict) -> set[str]:
     return {t for t in live_tickers(doc) if is_managed(tickers.get(t) or {})}
 
 
+def is_candidate(body: dict) -> bool:
+    """watchlist 卡是不是**当前入场候选** —— 判据 status=watching **且** moomoo_listed≠false。
+
+    membership 的真源在券商侧的候选分组。`watchlist_sync` 见到分组里没有了 **不删卡**
+    (thesis/zones 是资产), 只把 `moomoo_listed` 翻成 false —— 所以移出分组时卡片的
+    `status` **不变**, 仍然是 "watching"。只读 status 的消费者会把已移出的墓碑卡当活
+    候选: 一张早就退出候选分组的卡, 可以连着几周继续被覆盖范围、报表与提醒列出来,
+    而 `moomoo_listed` 那一半从来没有人查过。
+
+    这条判据在消费端被反复手抄 (`grep moomoo_listed quant/`), 抄漏一处就是上面那个
+    形状 —— 同一个概念存在多份判别式是本仓的老病。这里是它的名字: 新消费者读它,
+    不要再抄一份。
+    """
+    body = body or {}
+    return (str(body.get("status") or "") == "watching"
+            and body.get("moomoo_listed") is not False)
+
+
+def watchlist_candidates(doc: dict) -> set[str]:
+    """watchlist.json 里现在真的是候选的 ticker 集合 (`is_candidate` 的 doc 级)。"""
+    return {t for t, body in ((doc or {}).get("tickers") or {}).items() if is_candidate(body)}
+
+
 def stamping_cards(positions_doc: dict, watchlist_doc: dict) -> dict:
     """Merge cards used to stamp fill authorization and later annotations.
 
@@ -229,8 +252,7 @@ def cardless_tickers(positions_doc: dict, watchlist_doc: dict) -> list[str]:
             if live is not None:
                 if ticker not in live:
                     continue
-            elif (str(body.get("status") or "") != "watching"
-                  or body.get("moomoo_listed") is False):
+            elif not is_candidate(body):
                 continue
             if not is_managed(body) or not is_traded(body):
                 continue
@@ -265,3 +287,78 @@ def underlying_cards_missing_zones(doc: dict) -> list[str]:
         if not ((card or {}).get("agent") or {}).get("zones"):
             out.add(und)
     return sorted(out)
+
+
+def intel_universe(positions_doc: dict, watchlist_doc: dict) -> dict:
+    """外部情报 / 研究工作区的**动态投资范围** —— 单一真源。
+
+    → {"active": [正股…], "watchlist": [ticker…],
+       "excluded": {"positions": {ticker: 原因}, "watchlist": {ticker: 原因}}}  (全部排序)
+
+      active     `held_bare` (broker.qty≠0), 期权映射回 underlying 正股 (卡片
+                 `agent.linked_underlying` 优先, 否则 OCC 解析); 结构豁免层
+                 `is_managed` ("不进任何 task 输出") 与参考票 `is_traded` 不进
+      watchlist  `is_candidate` 且 `is_traded`; 已在 active 的不重复列 (在持期权的
+                 underlying 仍留在候选分组里 —— 那是 `held_bare` 语义, 这里只是去重)
+      excluded   只列**会误导的**行: positions 里 status=active 但 qty=0 (期权已平 /
+                 清仓残卡) + 角色排除; watchlist 里 moomoo_listed=false 的墓碑 +
+                 status≠watching + 去重。平仓归档卡 (status=closed) 不列, 那是常态
+
+    为什么要有它: 外部研究 agent 此前按自己的提示词解读这两个 state 文件 ——
+    "positions 只取 active 持仓" "watchlist 取 watching 标的" —— 两条读的都是
+    `status`, 而 `status` 在本仓是手工字段 (本模块顶部: 两个方向都出过事)。于是
+    结构豁免仓、期权已平的残卡与已移出候选分组的墓碑一起被当成覆盖范围, 而
+    `grep moomoo_listed quant/` 永远看不见提示词里的那一份判别式。修法 = 判别式
+    进代码, 消费者只抄输出。出口 = `quant/ops/ainews_universe.py --json`。
+
+    纯函数, 不读文件 (core 不读 state)。零授权效力: 输出只有名字, 没有价格、仓位或 cap。
+    """
+    pos = (positions_doc or {}).get("tickers") or {}
+    wl = (watchlist_doc or {}).get("tickers") or {}
+    active: set[str] = set()
+    ex_pos: dict[str, str] = {}
+    ex_wl: dict[str, str] = {}
+
+    for t in held_bare(positions_doc or {}):
+        body = pos.get(t) or {}
+        role = (body.get("instrument") or {}).get("role")
+        if not is_managed(body):
+            ex_pos[t] = f"结构豁免层 instrument.role={role} — 不进任何 task 输出"
+            continue
+        if not is_traded(body):
+            ex_pos[t] = f"参考票 instrument.role={role} — 不交易"
+            continue
+        occ = parse_occ(t)
+        und = ((body.get("agent") or {}).get("linked_underlying")
+               or (occ["underlying"] if occ else t))
+        active.add(und)
+
+    for t, body in pos.items():
+        if t in active or t in ex_pos or not t.isalpha():
+            continue
+        if str(body.get("status") or "") == "active" and not _qty(body):
+            ex_pos[t] = "status=active 但 broker.qty=0 (期权已平/清仓残卡) — status 不是持仓判据"
+
+    candidates: set[str] = set()
+    for t, body in wl.items():
+        if not t.isalpha():
+            continue
+        if t in active:
+            ex_wl[t] = "已在 active (在持期权的 underlying) — 不重复列"
+            continue
+        if not is_candidate(body):
+            ex_wl[t] = ("moomoo_listed=false — 已移出券商侧候选分组, 卡只是墓碑"
+                        if body.get("moomoo_listed") is False
+                        else f"status={body.get('status')!r} ≠ watching")
+            continue
+        if not is_traded(body):
+            ex_wl[t] = f"参考票 instrument.role={(body.get('instrument') or {}).get('role')} — 不交易"
+            continue
+        candidates.add(t)
+
+    return {
+        "active": sorted(active),
+        "watchlist": sorted(candidates),
+        "excluded": {"positions": dict(sorted(ex_pos.items())),
+                     "watchlist": dict(sorted(ex_wl.items()))},
+    }

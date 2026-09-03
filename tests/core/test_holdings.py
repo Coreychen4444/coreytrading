@@ -5,8 +5,8 @@
   qty==0 + status="active"  NBIS  平仓后当上次日简报的头号异动
 """
 from quant.core.holdings import (
-    flat_with_lots, held_bare, held_incl_option_underlyings, live_tickers, lot_gap,
-    lot_qty, underlying_cards_missing_zones)
+    flat_with_lots, held_bare, held_incl_option_underlyings, intel_universe, is_candidate,
+    live_tickers, lot_gap, lot_qty, underlying_cards_missing_zones, watchlist_candidates)
 
 
 def _doc(**tickers):
@@ -180,3 +180,81 @@ def test_unmanaged_option_stays_out():
         GOOGL270115C390000=_t(qty=1.0, role="commemorative_hold"),
 )
     assert underlying_cards_missing_zones(doc) == []
+
+
+# ── 谁算候选: 读分组 membership, 不读 status ────────────────────────────────
+
+def _wl(status="watching", **over):
+    body = {"status": status, "agent": {"zones": None}}
+    body.update(over)
+    return body
+
+
+def test_candidate_predicate_reads_group_membership_not_status():
+    """移出券商侧候选分组只翻 moomoo_listed, 卡的 status 仍是 watching —— 一张退出
+    候选很久的墓碑卡照样被只读 status 的消费者列出来, 就是这个形状。"""
+    assert is_candidate(_wl(moomoo_listed=True))
+    assert is_candidate(_wl())                                  # 没这个字段 = 从没被移出过
+    assert not is_candidate(_wl(moomoo_listed=False))           # 墓碑
+    assert not is_candidate(_wl(status="passed", moomoo_listed=True))
+    assert not is_candidate({}) and not is_candidate(None)
+
+
+def test_watchlist_candidates_is_the_doc_level_of_the_same_predicate():
+    doc = _doc(GONE=_wl(moomoo_listed=False), CAND=_wl(moomoo_listed=True), FRESH=_wl(),
+               OLD=_wl(status="passed"))
+    assert watchlist_candidates(doc) == {"CAND", "FRESH"}
+
+
+# ── 情报层动态范围: 消费者只抄它, 提示词里不再有第二份判别式 ─────────────────
+
+POS_LIVE = _doc(
+    KEEP=_t(qty=1.0, role="commemorative_hold"),                 # 结构豁免层: 不进任何 task 输出
+    BBB=_t(qty=20.0),
+    AAA=_t(synthetic=True),                                      # 在持期权的 underlying 行
+    AAA270115C001000=_t(qty=1.0),
+    FLATA=_t(qty=0.0, status="active"),                          # 期权已平, status 没人改
+    FLATB=_t(qty=0.0, status="active"),
+    ARCH=_t(qty=0.0, status="closed"),                           # 平仓归档: 常态, 不列
+)
+WL_LIVE = _doc(
+    GONEA=_wl(moomoo_listed=False), GONEB=_wl(moomoo_listed=False),
+    CAND=_wl(moomoo_listed=True), FLATA=_wl(moomoo_listed=True), FLATB=_wl(moomoo_listed=True),
+    AAA=_wl(moomoo_listed=True), FRESH=_wl(),
+    REF=_wl(moomoo_listed=True, instrument={"role": "volume_reference"}),
+)
+
+
+def test_intel_universe_active_is_qty_based_with_options_mapped_to_underlying():
+    """真持仓只有 BBB 与一张 AAA call; 结构豁免层不进, qty=0 的残卡不是持仓 ——
+    读 status 会把这三类一起当成覆盖范围。"""
+    u = intel_universe(POS_LIVE, WL_LIVE)
+    assert u["active"] == ["AAA", "BBB"]
+    assert "KEEP" in u["excluded"]["positions"]
+    assert "commemorative_hold" in u["excluded"]["positions"]["KEEP"]
+    assert set(u["excluded"]["positions"]) == {"KEEP", "FLATA", "FLATB"}  # ARCH (closed) 不列
+    assert "qty=0" in u["excluded"]["positions"]["FLATA"]
+
+
+def test_intel_universe_watchlist_drops_tombstones_and_dedupes_active():
+    u = intel_universe(POS_LIVE, WL_LIVE)
+    assert u["watchlist"] == ["CAND", "FLATA", "FLATB", "FRESH"]
+    assert "GONEA" not in u["watchlist"] and "GONEB" not in u["watchlist"]
+    assert "moomoo_listed=false" in u["excluded"]["watchlist"]["GONEA"]
+    assert "AAA" in u["excluded"]["watchlist"]                   # 已在 active, 不重复
+    assert "volume_reference" in u["excluded"]["watchlist"]["REF"]
+
+
+def test_intel_universe_honours_linked_underlying_and_empty_docs():
+    doc = _doc(XYZ270115C001000=_t(qty=1.0, linked="XYZW"))
+    assert intel_universe(doc, _doc())["active"] == ["XYZW"]
+    assert intel_universe({}, {}) == {"active": [], "watchlist": [],
+                                      "excluded": {"positions": {}, "watchlist": {}}}
+
+
+def test_intel_universe_carries_no_trading_authority():
+    """输出只有名字: 没有价格、仓位、cap —— 情报层零授权效力。"""
+    u = intel_universe(POS_LIVE, WL_LIVE)
+    flat = str(u)
+    for forbidden in ("cap", "qty", "price", "stop", "zone"):
+        assert forbidden not in flat.replace("qty=0", "").replace("broker.qty", ""), forbidden

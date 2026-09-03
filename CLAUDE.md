@@ -49,6 +49,7 @@ The public repository contains the complete reusable operating model while exclu
 - `trade/us_stock/holding/state/option_plans.json` is generated option-planning state.
 - `trade/us_stock/valuation/inputs.json` is the valuation layer's hand-written region; `valuations.jsonl` and `calibration.jsonl` are its append-only prediction and reconciliation ledgers.
 - `ai_news/` is an optional, user-owned intelligence workspace outside this repository. Trading code may read the macro snapshot and the valuation overlay ledger from it, must degrade gracefully when they are missing, and must never write there or treat their contents as authorization.
+- `quant/ops/ainews_universe.py` is the only export in the other direction: a read-only command that prints the current coverage universe derived from local state, so an external research workspace never re-derives it from its own copy of the predicate. It writes nothing and emits names only — no price, position, cap or authorization.
 - Canonical path constants live in `quant/core/paths.py`. Business modules must import paths from there rather than derive repository roots themselves.
 - State writers use the atomic JSON helpers and shared state lock from `quant/core/io_json.py`.
 
@@ -212,6 +213,8 @@ held_bare ⊆ live_tickers ⊆ held_incl_option_underlyings
 - Do not “simplify” these sets into one predicate; watchlist membership, reports and option-underlying promotion have different semantics.
 - `is_managed()` is independent of whether an asset is held. Structurally exempt roles remain in account totals but not in trading-management output.
 - `underlying_cards_missing_zones()` scans the document directly so a zero-quantity synthetic underlying cannot disappear from infrastructure warnings.
+- `is_candidate()` is the named entry-candidate predicate: `status == "watching"` **and** the broker-group membership flag is not false. Removing a card from the broker-side candidate group flips only that flag; the card and its `status` survive, so a status-only reader keeps treating a tombstone as a live candidate. Read the predicate; do not re-copy its two halves.
+- `intel_universe()` is the single source of truth for the coverage universe handed to an external research or intelligence workspace: held bare quantities with options mapped back to their underlying, plus entry candidates, minus structurally exempt and reference instruments, with an audit reason recorded for every exclusion. It is a pure function and carries zero authorization effect.
 
 ## Sync layer: broker truth and reconciliation
 

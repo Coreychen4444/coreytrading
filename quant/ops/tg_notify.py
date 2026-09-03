@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 quant/<层>/<模块>.py` 时让 `quant.*` 可 import
 
 import argparse
+import html
 import json
 import os
 import time
@@ -61,6 +62,54 @@ TG_LIMIT = 4096      # sendMessage 单条上限，按 **UTF-16 码元**算（不
 def _tg_len(s: str) -> int:
     """Telegram 数的是 UTF-16 码元 —— emoji 一个算两个。用 len() 会低估。"""
     return len(s.encode("utf-16-le")) // 2
+
+
+def markdown_subset_to_html(text: str) -> str:
+    """Render our tiny report Markdown subset as Telegram-safe HTML.
+
+    The source format intentionally supports only ``*bold*`` and
+    ``[label](URL)``.  Everything else is HTML-escaped, so identifiers such as
+    ``mixed_transition`` remain literal text instead of accidentally opening a
+    Markdown entity.  Link URLs may contain balanced parentheses.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "*":
+            end = text.find("*", i + 1)
+            newline = text.find("\n", i + 1)
+            if end > i + 1 and (newline == -1 or end < newline):
+                out.append("<b>" + html.escape(text[i + 1:end]) + "</b>")
+                i = end + 1
+                continue
+
+        if text[i] == "[":
+            label_end = text.find("](", i + 1)
+            newline = text.find("\n", i + 1)
+            if label_end > i + 1 and (newline == -1 or label_end < newline):
+                url_start = label_end + 2
+                depth = 0
+                url_end = -1
+                j = url_start
+                while j < len(text) and text[j] != "\n":
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        if depth == 0:
+                            url_end = j
+                            break
+                        depth -= 1
+                    j += 1
+                if url_end > url_start:
+                    label = html.escape(text[i + 1:label_end])
+                    url = html.escape(text[url_start:url_end], quote=True)
+                    out.append(f'<a href="{url}">{label}</a>')
+                    i = url_end + 1
+                    continue
+
+        out.append(html.escape(text[i]))
+        i += 1
+    return "".join(out)
 
 
 def split_message(text: str, limit: int = TG_LIMIT) -> list[str]:
@@ -129,8 +178,10 @@ def send_message(text: str, parse_mode: str = "Markdown", retries: int = 3) -> d
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             if e.code == 400 and "parse" in body.lower() and mode is not None:
-                # Markdown entity parse failure — retry immediately as plain text
-                print("[tg_notify] markdown parse failed, falling back to plain text", file=sys.stderr)
+                # Entity parse failure — retry immediately as plain text. Keep the
+                # API description/offset in stderr so the next failure is diagnosable.
+                print(f"[tg_notify] {mode} parse failed: {body}; falling back to plain text",
+                      file=sys.stderr)
                 mode = None
                 continue
             if 400 <= e.code < 500:

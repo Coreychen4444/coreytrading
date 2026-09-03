@@ -40,6 +40,21 @@ def test_length_is_counted_in_utf16_units_not_characters():
     assert all(tg._tg_len(p) <= tg.TG_LIMIT for p in parts)
 
 
+def test_markdown_subset_to_html_keeps_identifiers_literal():
+    rendered = tg.markdown_subset_to_html(
+        "*阶段* mixed_transition / termination_warning\n"
+        "[来源](https://example.com/a_(b)?x=1&y=2)"
+    )
+    assert rendered == (
+        "<b>阶段</b> mixed_transition / termination_warning\n"
+        '<a href="https://example.com/a_(b)?x=1&amp;y=2">来源</a>'
+    )
+
+
+def test_markdown_subset_to_html_escapes_untrusted_html():
+    assert tg.markdown_subset_to_html("A < B & C > D") == "A &lt; B &amp; C &gt; D"
+
+
 def test_load_bot_token_prefers_the_primary_config_path(tmp_path, monkeypatch):
     neutral = tmp_path / "neutral.env"
     legacy = tmp_path / "legacy.env"
