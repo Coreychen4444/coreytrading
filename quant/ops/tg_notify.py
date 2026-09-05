@@ -195,14 +195,14 @@ def _post_method(token: str, method: str, body: dict, timeout: int = 10) -> dict
 
 
 def _post(token: str, text: str, parse_mode: str | None) -> dict:
-    body = {"chat_id": CHAT_ID, "text": text}
+    body = {"chat_id": load_chat_id(), "text": text}
     if parse_mode:
         body["parse_mode"] = parse_mode
     return _post_method(token, "sendMessage", body)
 
 
 def _post_rich(token: str, blocks: list[dict]) -> dict:
-    body = {"chat_id": CHAT_ID, "rich_message": tg_rich.to_payload(blocks)}
+    body = {"chat_id": load_chat_id(), "rich_message": tg_rich.to_payload(blocks)}
     return _post_method(token, "sendRichMessage", body, timeout=20)
 
 
@@ -339,7 +339,7 @@ def main(argv: list[str] | None = None):
             return
         res = send_rich(text, motto=not args.no_motto)
         tag = "rich" if res["mode"] == "rich" else f"legacy fallback from part {res['fallback_from']}"
-        print(f"Sent to chat {CHAT_ID} [{tag}]" + (f" ({res['parts']} parts)" if res["parts"] > 1 else ""))
+        print(f"Sent to chat {load_chat_id()} [{tag}]" + (f" ({res['parts']} parts)" if res["parts"] > 1 else ""))
         return
 
     mode = None if args.plain else "Markdown"

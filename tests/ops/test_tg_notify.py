@@ -161,3 +161,16 @@ def test_no_footer_configured_means_nothing_is_appended(monkeypatch):
     monkeypatch.setattr(motto, "MOTTO_LINE", "")
     assert [b["type"] for b in tg.rich_parts("x")[0]] == ["paragraph"]
     assert tg.append_motto(["a", "b"]) == ["a", "b"] and tg.append_motto([]) == []
+
+
+def test_every_send_path_reads_the_chat_id_from_credentials(monkeypatch):
+    """The chat id is loaded like the token (environment or credential file); no module constant."""
+    monkeypatch.setattr(tg, "load_chat_id", lambda: "42")
+    monkeypatch.setattr(tg, "load_bot_token", lambda: "token")
+    seen = []
+    monkeypatch.setattr(tg, "_post_method",
+                        lambda token, method, body, timeout=10: seen.append((method, body)) or {"ok": True})
+    tg.send_message("hi", parse_mode=None)
+    tg.send_rich_message([tg.tg_rich.paragraph("x")])
+    assert [(m, b["chat_id"]) for m, b in seen] == [("sendMessage", "42"), ("sendRichMessage", "42")]
+    assert not hasattr(tg, "CHAT_ID")
