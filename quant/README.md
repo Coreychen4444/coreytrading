@@ -9,10 +9,15 @@
 
 ```
   ops          编排 / 通知 / 运维
-   │           pipeline · card_autopaint · tg_notify
+   │           pipeline · card_autopaint · tg_notify · tg_rich（报告文本 → Rich Message blocks 编译器）
+   │           agent_runtime / agent_runners / agent_workflow（角色与模型解耦，研究与提交分离）
+   │           agent_jobs / agent_inputs / agent_dependency（生产入口、冻结证据与角色视图、同 session 上游屏障）
+   │           agent_snapshots / agent_submit / agent_doctor / agent_health（快照、受控写卡、任务元数据盘点、健康与租约）
+   │           agent_evidence（显式冻结组合输入 → 既有机械 sizing 收据，零取数/写入）
    ├── report  报告层（读时计算，不产生新状态）
    │           portfolio_brief · perf_report · gate_ladder_report · gate_audit
    │           chart_read（每日收盘判读，**判读层零授权效力**）
+   │           nav_report（NAV 区间变动剔除外部现金流，周复盘 NAV 变动的唯一口径）
    ├── journal 账本写入层（prose-only 不算落库）
    │           annotate_event · decision_log
    ├── valuation 估值层（**判断层零授权效力**：读三表/快照/K 线/宏观快照，写自己的账本）
@@ -21,6 +26,7 @@
    │           model（FCFF-DCF · EPS×PE · 反向隐含 · 情景 · 久期，纯函数）
    │           valuate（CLI 编排/渲染/valuations.jsonl 账本）
    │           overlays（新闻→驱动契约: 校验/生效筛选/CLI append）· calibrate（财报后对账 + 当时重估回测）
+   │           universe（估值层默认范围 = 持仓 ∪ 候选，只有名字，零授权效力）
    ├── decision 决策层（机械闸门）
    │           entry_guard · exit_guard · regime_transition · regime_score
    │           structure_drift · level_map · catalyst_check · tape_check
@@ -35,11 +41,14 @@
    ├── data    把外部世界读进本地
    │           market_data · macro_fetch · earnings_calendar
    │           kline_cache · iv_logger · nav_snapshot · skhy_premium
+   │           cash_flow_sync（券商资金流水 → 外部现金流账本，只收出入金）
    └── core    纯共享库 · 单一真源 · 无副作用
                paths · env · io_json · timeutil · num · occ · schema · ledger
                sizing · structure · drift · technical · holdings
                episodes · book · earnings · sectors · patterns（形态判别式，Lo 2000 工序）
                dow（短期道氏四步状态机，提供趋势终止观察与结构排序）
+               market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
+               agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· motto（可选尾行，未配置即空）
 
   research     验证层（可复用机械件/合成脚手架）—— 旁路，不参与实时决策
 ```
@@ -61,6 +70,10 @@
 | `research/` | 公开研究机械件与合成脚手架 | 只产出统计，不保存私人数据、结果或裁决 |
 
 ## 约定
+
+**领域 Agent**——职责定义在 `agents/`，运行方式见 `agents/README.md`。角色不拥有文件/券商写权限；
+`ops` 控制器选择 Claude/Codex runner，验证冻结输入与研究结果；技术提案仅经现有 writer 和 revision 检查落卡。
+现有 `decision/risk/sync` 的机械规则不迁入模型 prompt。`card_autopaint` 与 `agent_jobs` 只在跨模型复核通过后申请受控写卡；金额、退出、CAS 与最终开关均由宿主检查。
 
 **运行**——每个模块既能 import 也能直接跑：
 
@@ -114,10 +127,15 @@ git show b98a42e:scripts/migrate_to_state_v2.py
 `tests/` 镜像同一套分层——找某模块的测试就去同名子目录：
 
 ```bash
-.venv/moomoo/bin/python3 -m pytest -q             # 全量
+.venv/moomoo/bin/python3 -m pytest -q             # 默认跳过需显式授权的数据/宿主审计
 .venv/moomoo/bin/python3 -m pytest tests/core -q  # 只跑共享库
 .venv/moomoo/bin/python3 -m pytest --collect-only -q | tail -1  # 现查总数
 ```
+
+会读真实持仓等私有数据的审计标记为 `live_data`，只有显式传 `--live-data` 才运行；
+读取本机已安装任务的 `host_state` 审计需 `--host-state`。默认跳过不代表这些审计已经通过。
+收集阶段不加载真实 `.env`；测试 fixture 将 writer、共享锁、临时 Git 仓等依赖指向测试数据。
+涉及本地进程/代理的 runner 测试没有真实模型调用，仍需要对应平台的本地集成环境。
 
 **tests/ 为什么不放进 quant/**：测试要横着 import 每一层，放进包里就成了一个「可以任意方向
 import」的成员，上面那条依赖规则当场要开例外；而且它是三级深度，破坏 `parents[2]` bootstrap。

@@ -390,6 +390,7 @@ Degrees-of-freedom audit 与 `UNTESTED` 是棘轮，不是文档数字。应读�
 1. 先修改 repo prompt，再更新经过授权的本地 task copy。
 2. 写入 prompt file 不等于注册任务；必须检查 runtime registry。
 3. Schedule 必须复核 timezone、exchange calendar 和 daylight-saving change。
+4. 每份 prompt 先跑交易日历门（`quant/ops/agent_jobs.py due --kind <kind>`）；窗口之外的唤醒槽在采集任何东西之前就停止，盘后任务还要等同 session 的回执再读转移后的状态。
 
 本地 task-copy reconciliation 通过 `tests/test_repo_references.py` 中说明的环境变量显式启用。公开 CI 永远不能依赖某个用户的 task registry。
 
@@ -411,7 +412,7 @@ flowchart TD
     end
     subgraph S3["3. Close-dependent"]
         direction LR
-        P7["kline cache<br/>完成 bar"] --> P8["regime transition<br/>gate 触发"] --> P9["NAV snapshot<br/>budget denominator"]
+        P7["kline cache<br/>完成 bar"] --> P8["regime transition<br/>gate 触发"] --> P9["NAV snapshot<br/>budget denominator"] --> P9b["领域 Agent<br/>冻结证据 · 复核后重画"]
     end
     subgraph S4["4. 授权界面"]
         direction LR
@@ -435,8 +436,8 @@ flowchart TD
 | Mode | 角色 |
 |---|---|
 | `heartbeat` | Broker refresh、reconciliation、reminder、whitelist 与 exit patrol |
-| `briefing` | 完整运行，包括完成 bar、transition、snapshot、drift 和 entry plan |
-| `postclose` | 为盘后状态准备的精简 completed-bar chain |
+| `briefing` | 完整运行，包括完成 bar、transition、snapshot、drift、四角色研究和 entry plan |
+| `postclose` | 精简 completed-bar chain：退出评估、transition、技术/风控研究、复核后重画、效果层 |
 
 ### 常驻基础设施告警
 
@@ -452,6 +453,25 @@ Brief 会显式报告容易静默失效的类别，包括：
 - OpenD 不可用。
 
 多个 operations mode 共享 cooldown state，保证同一条件全局去重。
+
+---
+
+## 领域 Agent 与模型路由
+
+研究按四个领域角色划分，角色与执行它们的运行器、模型解耦。把某个角色从一个 CLI 换到另一个只是路由改动，角色契约与交易规则不动。
+
+| 角色 | 默认运行器 | 独立复核运行器 | 职责 |
+|---|---|---|---|
+| 宏观 | Codex CLI | Claude Code | 解读既有宏观证据与相位，提供环境先验 |
+| 技术分析 | Claude Code | Codex CLI | 判读价格结构、gate 与 zone，提出单卡更新提案 |
+| 风控与仓位 | Claude Code | Codex CLI | 解释机械 sizing、敞口、购买力与退出收据 |
+| 估值 | Codex CLI | Claude Code | 解读财务报表、估值账本、情景与隐含预期 |
+
+`agents/routing.json` 是配置真源。模型 profile 固定运行器、首选模型、次选模型与 effort；每个角色引用一个主用 profile 和另一运行器上的复核 profile。只有运行失败、超时或契约不合规才使用次选模型；有效弃权与复核拒绝都不会换模型重问。回执分别记录请求的模型与 CLI 实际报告的模型。
+
+Worker 只消费冻结证据并返回结构化 JSON，没有工作区、券商、shell、消息或下单权限。只有技术角色可以提案，而且只能通过现有卡片 writer 的参数。单卡任务先捕获证据、再提案、由另一运行器独立复核、在 writer 锁内检查政策、时效、参数白名单与卡片版本，然后才写入。只有 `status == "applied"` 的回执证明卡片已写入；`needs_review`、`partial`、`applying` 各有文档化的恢复路径，绝不盲重试。
+
+`quant/ops/agent_jobs.py` 是生产入口：`due --kind` 是每份定时 prompt 先跑的交易日历门，`run --kind` 执行 briefing、postclose、weekly、chart 任务，pipeline 以 agents 阶段调用它。单次 workflow 与全局的调用额度、进程租约和持久化健康告警在 `quant/ops/agent_health.py`；`quant/ops/agent_doctor.py --json` 只读盘点调度元数据与运行器二进制解析，不执行任何东西。运行手册见 [`agents/README.md`](agents/README.md)，模型维护规则见 [`agents/MODEL_POLICY.md`](agents/MODEL_POLICY.md)。
 
 ---
 

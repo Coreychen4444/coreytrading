@@ -5,7 +5,7 @@
   1. 原料   `fundamentals.load_bundle` (缺/过期 → `--refresh` 从 OpenD 重拉)
   2. 原型   `archetypes.resolve` (人工区 inputs.json: 商业模式 + 覆盖 + 增量新闻 overlay)
   3. 市场   rf = ai_news 宏观快照的 US10Y (FRED DGS10, 只读; 情报层收拢后本仓不自拉宏观),
-            ERP 参数 (声明) + 宏观风险环境机械加点 (current.json), β 从 K 线缓存对 SPY 回归
+            ERP 显式参数与有效 overlay；current.json 风险标签只作上下文，β 从 K 线缓存对 SPY 回归
   3b. 新闻  `ai_news/valuation/overlays.jsonl` (雷达经 overlays.py add 写) + inputs.json 手写条目
             → `overlays.active_overlays` 按票/到期/可靠度筛出当时有效的, 交给模型分四段应用;
             应用了哪些、忽略了哪些 (可靠度不够/到期) 逐条进输出与账本
@@ -19,7 +19,8 @@
 
 CLI:
     .venv/moomoo/bin/python3 quant/valuation/valuate.py --tickers GOOGL MU [--refresh] [--json] [--write]
-    .venv/moomoo/bin/python3 quant/valuation/valuate.py --all            # inputs.json 里的全部
+    .venv/moomoo/bin/python3 quant/valuation/valuate.py --all            # 持仓 ∪ 候选 (holdings.coverage_universe; 墓碑卡/纪念仓不进)
+    .venv/moomoo/bin/python3 quant/valuation/valuate.py --all-inputs     # inputs.json 全表 (含已移出自选/已平仓的票; 人工审视用, 周复盘不用)
     参数: --rf 0.0475 (缺省读宏观快照) --erp 0.045 --max-age-hours 24
 """
 from __future__ import annotations
@@ -38,6 +39,7 @@ from quant.core.paths import (KLINE_CACHE_DIR, MACRO_CURRENT_PATH, MACRO_SNAPSHO
                               VALUATION_OVERLAYS_PATH, VALUATIONS_PATH)
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
 from quant.valuation import archetypes, fundamentals, model, overlays  # noqa: E402
+from quant.valuation.universe import coverage_tickers  # noqa: E402  (--all 的范围 = 持仓 ∪ 候选)
 
 DEFAULT_ERP = 0.0423         # 股权风险溢价 = Damodaran 美股隐含 ERP 4.23% (ERP 2026 Edition, SSRN 6361419)
 FALLBACK_RF = 0.045          # 宏观快照缺失时的兜底 (必须播报)
@@ -214,8 +216,12 @@ def render(res: dict) -> str:
     return "\n".join(lines)
 
 
+DIGEST_HEADER = ("| 票 | 判定 | 置信 | 公允 vs 现价 | 反向隐含 | 新闻 |", "|---|---|:-:|---|---|:-:|")
+
+
 def digest(results: list[dict], *, rf: dict | None = None, erp: float | None = None, macro: dict | None = None) -> str:
-    """周复盘 / Telegram 一览: 一票一行, 按 现价/公允 由低到高 (最便宜的在前 = 选股侧视角)。
+    """周复盘 / Telegram 一览: 一票一行 (GFM 表, tg_notify --rich 渲染成原生表格; ),
+    按 现价/公允 由低到高 (最便宜的在前 = 选股侧视角)。
     只有判断层字段: 判定·置信·公允 vs 现价·反向隐含·生效新闻数; 不出股数/金额/cap, 尾行钉零授权。"""
     live = [r for r in results if not r.get("skipped") and r.get("fair_value")]
     live.sort(key=lambda r: (r["verdict"]["ratio"] if r["verdict"]["ratio"] is not None else 1e9))
@@ -229,22 +235,23 @@ def digest(results: list[dict], *, rf: dict | None = None, erp: float | None = N
     if mc.get("risk_level"):
         ctx.append(f"宏观 {mc['risk_level']}")
     lines = [head + (" · " + " · ".join(ctx) if ctx else "")]
+    lines.extend(DIGEST_HEADER)
     for r in live:
         v, cf, imp = r["verdict"], r["confidence"], r["implied"]
         n_news = len((r.get("news") or {}).get("applied") or [])
         st = (r.get("base") or {}).get("street")
-        parts = [f"{r['ticker']} {v['label']} {_pct(v['ratio'],0)} · 置信{cf['tier']}",
-                 f"公允 {_px(r['fair_value'])} vs {_px(r['price'])}"
-                 + (f" (DCF {_px((r['base'] or {}).get('dcf', {}).get('per_share'))} / 街 {_px(st['per_share'])})" if st else "")]
+        fair = (f"公允 {_px(r['fair_value'])} vs {_px(r['price'])}"
+                + (f" (DCF {_px((r['base'] or {}).get('dcf', {}).get('per_share'))} / 街 {_px(st['per_share'])})" if st else ""))
+        implied = []
         if imp.get("growth_creates_value") is False:
-            parts.append("增长不创造价值, 看利润率")
+            implied.append("增长不创造价值, 看利润率")
         elif imp.get("cagr") is not None:
-            parts.append(f"要求年2起 CAGR {_pct(imp['cagr'],0)} (基准 {_pct(imp['base_cagr'],0)})")
+            implied.append(f"要求年2起 CAGR {_pct(imp['cagr'],0)} (基准 {_pct(imp['base_cagr'],0)})")
         if imp.get("cagr_at_current_margin") is not None and abs(r["target_margin"] - r["spec"]["margin_start"]) > 0.02:
-            parts.append(f"峰值不回归需 {_pct(imp['cagr_at_current_margin'],0)}")
-        if n_news:
-            parts.append(f"新闻 {n_news} 条")
-        lines.append(" · ".join(parts))
+            implied.append(f"峰值不回归需 {_pct(imp['cagr_at_current_margin'],0)}")
+        cells = [r["ticker"], f"{v['label']} {_pct(v['ratio'],0)}", f"置信{cf['tier']}", fair,
+                 " · ".join(implied) or "—", str(n_news) if n_news else "—"]
+        lines.append("| " + " | ".join(str(c).replace("|", "\\|") for c in cells) + " |")
     skipped = [r["ticker"] for r in results if r.get("skipped")]
     if skipped:
         lines.append("不适用: " + ", ".join(skipped))
@@ -310,7 +317,8 @@ def run(tickers: list[str], *, inputs: dict, refresh: bool = False, max_age_hour
         try:
             r = archetypes.resolve(t, inputs)
         except KeyError as e:
-            errors[t] = f"KeyError: {e}"
+            # 范围内没归原型 = 人工区待补, 报错不跑 (不是静默跳过, 也不是崩整轮)
+            errors[t] = str(e.args[0]) if e.args else f"KeyError: {e}"
             continue
         if r["archetype"] == "not_applicable":
             results.append({"ticker": t, "archetype": "not_applicable", "skipped": True, "reason": r["provenance"][0]})
@@ -349,7 +357,11 @@ def run(tickers: list[str], *, inputs: dict, refresh: bool = False, max_age_hour
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="估值: FCF-DCF + EPS×PE → 公允价 / 隐含增速 / 高估低估 (零授权效力)")
     ap.add_argument("--tickers", nargs="*", default=[])
-    ap.add_argument("--all", action="store_true", help="inputs.json 里的全部 ticker")
+    ap.add_argument("--all", action="store_true",
+                    help="持仓 ∪ 候选 (holdings.coverage_universe): 已移出自选的墓碑卡与纪念仓不进; "
+                         "范围内没归原型的票报错不跑 (2026-09-05 周复盘幽灵标的案)")
+    ap.add_argument("--all-inputs", action="store_true",
+                    help="inputs.json 全表 (含已移出自选/已平仓的票): 人工审视与校准用, 周复盘不用")
     ap.add_argument("--refresh", action="store_true", help="强制从 OpenD 重拉基本面")
     ap.add_argument("--max-age-hours", type=float, default=DEFAULT_MAX_AGE_HOURS)
     ap.add_argument("--rf", type=float, help="无风险利率 (小数); 缺省读 ai_news 宏观快照 US10Y")
@@ -362,9 +374,11 @@ def main(argv: list[str] | None = None) -> int:
     inputs = archetypes.load_inputs()
     tickers = [t.upper() for t in a.tickers]
     if a.all:
+        tickers = sorted(set(tickers) | set(coverage_tickers()))
+    if a.all_inputs:
         tickers = sorted(set(tickers) | set(inputs.get("tickers") or {}))
     if not tickers:
-        ap.error("给 --tickers 或 --all")
+        ap.error("给 --tickers / --all / --all-inputs")
     out = run(tickers, inputs=inputs, refresh=a.refresh, max_age_hours=a.max_age_hours, rf=a.rf, erp=a.erp, write=a.write)
     if a.digest:
         print(digest(out["results"], rf=out["rf"], erp=out["erp"], macro=out.get("macro_context")))

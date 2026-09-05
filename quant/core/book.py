@@ -89,8 +89,8 @@ def latest_account() -> Dict:
     return last or {}
 
 
-def power_room(today: Optional[str] = None, events_dir=None) -> Dict:
-    """**真实购买力余额**—— 冲击预算/gross 之外的第⑥条臂 (用户  Q2)。
+def power_room(today: Optional[str] = None, events_dir=None, *, account=None, events=None) -> Dict:
+    """**真实购买力余额** —— 冲击预算/gross 之外的第⑥条臂。
 
     「零杠杆现金户里 110% NAV 是够不着的线, 理论上真 binding 的是现金。」实测
     : power $17,780 vs gross 臂 $19,503 —— ④比现实松 $1,723, 是当下
@@ -107,7 +107,9 @@ def power_room(today: Optional[str] = None, events_dir=None) -> Dict:
     就随之变宽。`leveraged` = power > 1.2 ×(total − market_val) 时置位, 调用方
     必须播报 —— 静默变宽正是本仓反复出的那种失效 (A4)。
     """
-    acct = latest_account()
+    # Explicit frozen inputs let research callers reuse this exact calculator
+    # without reading mutable defaults between portfolio capture steps.
+    acct = account if account is not None else latest_account()
     power = coerce_float(acct.get("power"))
     total, mv = coerce_float(acct.get("total_assets")), coerce_float(acct.get("market_val"))
     implied_cash = (total - mv) if (total is not None and mv is not None) else None
@@ -118,7 +120,7 @@ def power_room(today: Optional[str] = None, events_dir=None) -> Dict:
         return out
     day = str(today or et_today())[:10]
     spent = 0.0
-    for e in iter_events(events_dir):
+    for e in (events if events is not None else iter_events(events_dir)):
         if str(e.get("timestamp") or "")[:10] != day:
             continue
         if e.get("event_type") != "fill" or str(e.get("side") or "").upper() != "BUY":

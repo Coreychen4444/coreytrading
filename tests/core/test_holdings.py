@@ -5,7 +5,8 @@
   qty==0 + status="active"  NBIS  平仓后当上次日简报的头号异动
 """
 from quant.core.holdings import (
-    flat_with_lots, held_bare, held_incl_option_underlyings, intel_universe, is_candidate,
+    cards_missing_archetype, coverage_universe, flat_with_lots, held_bare, held_incl_option_underlyings, intel_universe, is_candidate,
+    is_scannable_card,
     live_tickers, lot_gap, lot_qty, underlying_cards_missing_zones, watchlist_candidates)
 
 
@@ -99,7 +100,7 @@ def test_flat_with_lots_finds_unfinished_close_cleanup():
 # 下一个人"顺手对齐"两边时必须先弄红这几条。
 
 def test_the_three_held_predicates_are_deliberately_different():
-    """GOOGL LEAPS 在持, GOOGL 正股是 qty=0 的 synthetic 行 (2026-08 实况)。"""
+    """GOOGL LEAPS 在持, GOOGL 正股是 qty=0 的 synthetic 行 ( 实况)。"""
     doc = _doc(GOOGL=_t(synthetic=True), GOOGL270115C390000=_t(qty=1.0))
 
     assert held_bare(doc) == {"GOOGL270115C390000"}                # 裸: 正股不算
@@ -134,7 +135,7 @@ def test_held_predicate_chain_is_an_invariant():
 # ── 期权 underlying 的正股卡不许是空的 ───────────────────────────────
 
 def test_missing_underlying_zones_is_visible_although_qty_is_zero():
-    """GOOGL 2026-08-06: 正股卡 zones 被 stub 清空, 而它 qty==0 (synthetic 行)
+    """GOOGL : 正股卡 zones 被 stub 清空, 而它 qty==0 (synthetic 行)
     → 进不了 load_rows_from_state → 简报 6 天一声没响。
     **不是"检查不会触发", 是"被检查的对象进不了数据链"**—— 判据必须直扫 doc。"""
     doc = _doc(
@@ -258,3 +259,42 @@ def test_intel_universe_carries_no_trading_authority():
     flat = str(u)
     for forbidden in ("cap", "qty", "price", "stop", "zone"):
         assert forbidden not in flat.replace("qty=0", "").replace("broker.qty", ""), forbidden
+
+
+def test_coverage_universe_is_active_plus_candidates_flat_and_sorted():
+    """「全量扫一遍」型任务 (估值一览) 曾按 inputs.json 全表跑, 把墓碑卡与纪念仓一起列了 —— 范围 = 持仓 ∪ 候选, 从这里抄, 不由各消费端自己解读 state。"""
+    u = intel_universe(POS_LIVE, WL_LIVE)
+    cov = coverage_universe(POS_LIVE, WL_LIVE)
+    assert cov == sorted(set(u["active"]) | set(u["watchlist"]))
+    assert {"AAA", "BBB", "CAND", "FRESH"} <= set(cov)
+    assert {"FLATA", "FLATB"} <= set(cov)          # qty=0 但仍在自选分组 = 候选, 不是幽灵
+    for ghost in ("KEEP", "GONEA", "GONEB", "REF", "ARCH"):
+        assert ghost not in cov, ghost
+    assert coverage_universe({}, {}) == []
+
+
+def test_scannable_card_drops_watchlist_tombstones_and_keeps_position_semantics():
+    """INFRA 卡片体检点名了已移出分组的墓碑 (status 仍 watching)。"""
+    assert is_scannable_card({"status": "watching"})
+    assert not is_scannable_card({"status": "watching", "moomoo_listed": False})
+    assert not is_scannable_card({"status": "passed", "moomoo_listed": True})     # 非候选
+    assert is_scannable_card({"status": "active"}) and is_scannable_card({})
+    assert not is_scannable_card({"status": "closed"})
+
+
+def test_cards_missing_archetype_flags_painted_cards_only():
+    """新候选卡画完一周, 估值人工区没有它们。空 stub / 墓碑 / 纪念仓 / 期权都不进。"""
+    zones = {"agent": {"zones": {"accumulation_zone_1": [1.0, 2.0]}}}
+    pos = _doc(BBB={**_t(qty=20.0), **zones},
+               KEEP={**_t(qty=1.0, role="commemorative_hold"), **zones},
+               AAA270319C220000=_t(qty=1.0),
+               AAA={**_t(synthetic=True), **zones},
+               FLATA={**_t(qty=0.0, status="active"), **zones})
+    wl = _doc(CAND={**_wl(moomoo_listed=True), **zones}, FRESH={**_wl(), **zones},
+              GONEA={**_wl(moomoo_listed=False), **zones},
+              STUB=_wl(),                                                  # 空 stub → autopaint 会一并归
+              REF={**_wl(instrument={"role": "volume_reference"}), **zones})
+    inputs = {"tickers": {"BBB": {"archetype": "ai_infra_capex"}, "aaa": {}}}
+    assert cards_missing_archetype(pos, wl, inputs) == ["CAND", "FRESH"]
+    assert cards_missing_archetype(pos, wl, {}) == ["AAA", "BBB", "CAND", "FRESH"]
+    assert cards_missing_archetype({}, {}, {}) == []

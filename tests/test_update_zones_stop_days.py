@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from quant.core import io_json, paths
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".claude/skills/trading-analysis/scripts/update_position_zones.py"
 
@@ -35,6 +37,8 @@ def _card():
 
 @pytest.fixture
 def upz(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     spec = importlib.util.spec_from_file_location("upz_stop_days_test", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setattr(sys, "argv", ["upz"])
@@ -45,6 +49,8 @@ def upz(monkeypatch, tmp_path):
     pos.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
     monkeypatch.setattr(mod, "WATCHLIST_PATH", wl)
     monkeypatch.setattr(mod, "POSITIONS_PATH", pos)
+    monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
+    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
     return mod, wl
 
 

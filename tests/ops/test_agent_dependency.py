@@ -1,0 +1,125 @@
+"""Synthetic dependency receipts; no pipeline, model, network or live state."""
+import json
+
+import pytest
+
+from quant.ops import agent_dependency as dependency
+
+
+SESSION = "2026-09-04"
+
+
+class Clock:
+    def __init__(self, hook=None):
+        self.elapsed, self.hook = 0, hook
+
+    def now(self):
+        return self.elapsed
+
+    def sleep(self, seconds):
+        self.elapsed += seconds
+        if self.hook:
+            self.hook(self.elapsed)
+
+
+def receipt(root, *, identity="a", status="running", session=SESSION, kind="postclose", **kwargs):
+    folder = root / "task-jobs"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{identity * 32}.json"
+    doc = {"job_id": identity * 32, "job_kind": kind, "session": session,
+           "status": status, "started_at": "2026-09-04T21:00:00+00:00", **kwargs}
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def wait(root, clock=None, timeout=10, **kwargs):
+    clock = clock or Clock()
+    return dependency.wait_for_job(root, "postclose", SESSION, timeout_s=timeout,
+                                   monotonic=clock.now, sleep=clock.sleep,
+                                   wall_time=lambda: 1000, poll_s=1, **kwargs)
+
+
+@pytest.mark.parametrize("status", ["completed", "partial"])
+def test_only_finished_same_session_job_settles_dependency(tmp_path, status):
+    receipt(tmp_path, status=status, finished_at="2026-09-04T22:00:00+00:00",
+            reports={"secret": "payload"}, error="private diagnostic")
+    out = wait(tmp_path)
+    assert out["status"] == "settled" and out["upstream_status"] == status
+    assert out["elapsed_s"] == 0 and "secret" not in json.dumps(out)
+    assert "private" not in json.dumps(out)
+
+
+def test_completed_research_does_not_release_barrier_while_repaint_is_active(tmp_path):
+    receipt(tmp_path, status="completed", stage="reviewed_repaint")
+    assert wait(tmp_path)["status"] == "timeout"
+
+
+def test_missing_job_keeps_waiting_until_upstream_finishes(tmp_path):
+    def progress(elapsed):
+        if elapsed == 2:
+            receipt(tmp_path, status="running")
+        if elapsed == 4:
+            receipt(tmp_path, status="partial", finished_at="2026-09-04T22:00:00+00:00")
+    out = wait(tmp_path, Clock(progress))
+    assert out["status"] == "settled" and out["elapsed_s"] == 4
+
+
+def test_missing_dependency_times_out_without_creating_any_files(tmp_path):
+    out = wait(tmp_path)
+    assert out["status"] == "timeout" and out["reason"] == "upstream_not_started"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_old_session_or_other_kind_success_never_satisfies_current_dependency(tmp_path):
+    receipt(tmp_path, identity="a", status="completed", session="2026-09-03",
+            finished_at="2026-09-03T22:00:00+00:00")
+    receipt(tmp_path, identity="b", status="completed", kind="weekly",
+            finished_at="2026-09-04T22:00:00+00:00")
+    assert wait(tmp_path)["reason"] == "upstream_not_started"
+
+
+def test_latest_same_session_attempt_controls_barrier(tmp_path):
+    receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00")
+    receipt(tmp_path, identity="b", status="running", started_at="2026-09-04T22:10:00+00:00")
+    assert wait(tmp_path)["status"] == "timeout"
+
+
+def test_newer_capture_without_session_blocks_an_old_completed_receipt(tmp_path):
+    receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00")
+    receipt(tmp_path, identity="b", session=None, status="running",
+            started_at="2026-09-04T22:10:00+00:00")
+    assert wait(tmp_path)["status"] == "timeout"
+
+
+def test_unscoped_completed_receipt_cannot_authorize_a_session(tmp_path):
+    receipt(tmp_path, status="completed", session=None, finished_at="2026-09-04T22:00:00+00:00")
+    assert wait(tmp_path)["status"] == "timeout"
+
+
+@pytest.mark.parametrize("status", ["failed", "timeout", "needs_review", "expired", "superseded"])
+def test_upstream_failure_halts_dependent_work(tmp_path, status):
+    receipt(tmp_path, status=status, error="private diagnostic")
+    out = wait(tmp_path)
+    assert out["status"] == "failure" and out["reason"] == "upstream_" + status
+    assert out["elapsed_s"] == 0
+
+
+def test_expired_running_lease_returns_without_waiting(tmp_path):
+    receipt(tmp_path, lease_until=999)
+    assert wait(tmp_path)["reason"] == "upstream_lease_expired"
+
+
+def test_unreadable_receipt_cannot_hide_an_inflight_writer(tmp_path):
+    path = receipt(tmp_path)
+    path.write_text("secret invalid metadata")
+    out = wait(tmp_path)
+    assert out["status"] == "failure" and "secret" not in json.dumps(out)
+
+
+def test_cli_exit_code_prevents_followup_when_no_job_finished(tmp_path, capsys):
+    assert dependency.main(["--run-dir", str(tmp_path), "--kind", "postclose",
+                            "--session", SESSION, "--timeout-s", "0"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "timeout"
+    receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00")
+    assert dependency.main(["--run-dir", str(tmp_path), "--kind", "postclose",
+                            "--session", SESSION, "--timeout-s", "0"]) == 0

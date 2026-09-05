@@ -266,6 +266,8 @@ OpenD 不存在时，“离线开发”仍是有效的完成模式。应报告 b
 
 不能自动注册全部任务，也不能推断 prompt file 已安装到用户的 task runner。
 
+每份交易 prompt 都先跑交易日历门（`python3 quant/ops/agent_jobs.py due --kind <kind>`），它依赖 `pyproject.toml` 声明的固定版本 `exchange-calendars` XNYS 日历；注册 cadence 之前先确认这道门能正常回答。可选的领域 Agent 控制器（`agents/README.md`）另外需要本机安装并登录 Claude Code 和／或 Codex CLI，它的私有运行产物、租约与备份放在被忽略的 `var/` 目录下，卡片更新只在跨运行器独立复核后才写入。改动某个角色使用的运行器或模型前，先读 `agents/routing.json` 与 `agents/MODEL_POLICY.md`。
+
 ### CI
 
 CI 只安装声明的开发依赖并运行离线验证门槛。它不能获得 broker 凭证、访问私有 `trade/` 运行文件、启动 OpenD、注册任务、发送通知或执行订单脚本。CI 配置属于独立仓库改动，必须正常 review。

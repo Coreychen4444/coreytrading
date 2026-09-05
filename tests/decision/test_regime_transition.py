@@ -23,11 +23,15 @@ from quant.core.sizing import NOTIONAL_CAP as _CONF   #  分类轴退役: cap �
 
 
 @pytest.fixture(autouse=True)
-def _no_bench(monkeypatch):
-    """量腿基准隔离: fixture 日期是真实 2026-07 日 — 不隔离会读到 live 缓存的
+def _no_bench(monkeypatch, tmp_path):
+    """量腿基准隔离: fixture 日期是真实  日 — 不隔离会读到 live 缓存的
     SMH/QQQ 真数据, 测试随缓存漂移。默认置 None = 绝对量比兜底 (老口径);
     相对口径的用例各自显式注入。"""
     monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: None)
+    from quant.core import io_json
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
+    monkeypatch.setattr(rt, "KLINE_CACHE_DIR", tmp_path / "klines")
+    monkeypatch.setattr(rt, "KLINE_DEEP_DIR", tmp_path / "deep")
 
 
 def _bars(closes, start_day=1):
@@ -162,7 +166,7 @@ def test_up_transition_rolls_the_window():
 
 def test_up_transition_writes_bfloor_buf_stop():
     """bfloor_buf 写入强制点 (ledger A3): 上行转移后的地板 = 收复线 − 0.5×ATR20
-    (转移日), 收盘 ×1 日 — round-2b (2026-07-30) 批的约定, 此前只活在文档里,
+    (转移日), 收盘 ×1 日 — round-2b () 批的约定, 此前只活在文档里,
     转移机原样搬画卡旧 stop (NEXT 写 960, 与约定差多少全看画卡的人)。"""
     from quant.core import technical
     card = _card(next_regime=NEXT)
@@ -404,8 +408,7 @@ def test_schema_caps_next_regime_at_the_confirmed_ceiling():
     assert any("cap_pct_nav must be numeric in" in e for e in errors)
 
 
-@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
-                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.live_data
 def test_live_last_regime_blocks_carry_cap_zero_and_a_coherent_gate():
     """活跃持仓的 `last_regime` = 下行分支: **cap 恒 0**+ 一条不与 stop 倒挂的修复 gate。
 
@@ -441,8 +444,7 @@ def test_live_last_regime_blocks_carry_cap_zero_and_a_coherent_gate():
     assert checked, "一张带 last_regime 的活跃卡都没有 — 判据可能挑错了 (检查静默为空)"
 
 
-@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
-                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.live_data
 def test_live_current_regime_caps_are_binary():
     """cap 二值不变量 (分类轴退役 + D7 存量迁移): 全书活跃卡的
     current_regime.cap_pct_nav ∈ {0, NOTIONAL_CAP} —— 出现第三个值 = 有人在

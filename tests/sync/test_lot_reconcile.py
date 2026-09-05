@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from quant.core import io_json
 from quant.sync import lot_reconcile as lr
 
 ZONES = {
@@ -179,7 +180,7 @@ def test_second_pass_adds_nothing():
 
 
 def test_order_id_written_in_prose_notes_counts_as_accounted():
-    """2026-08-06 之前手写的 lot 把 order id 写在 notes 散文里。只认结构化字段
+    """ 之前手写的 lot 把 order id 写在 notes 散文里。只认结构化字段
     的话, 第一次跑就会把那些 fill 再加一遍 = 台账翻倍。"""
     hand = {"base": [], "position": [
         {"qty": 2, "avg_cost": 98.7, "notes": "order OID_A; 计划内 ladder 首档"}]}
@@ -270,6 +271,7 @@ def test_flat_card_is_left_to_close_reconcile():
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     path = tmp_path / "positions.json"
     path.write_text(json.dumps(_doc()), encoding="utf-8")
     monkeypatch.setattr(lr.state_io, "read_positions", lambda **_: json.loads(path.read_text()))

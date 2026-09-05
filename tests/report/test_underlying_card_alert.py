@@ -11,6 +11,8 @@
 而不是挂在 rows 上; 端到端那条测试钉的就是这一点 (形状#17:
 **一个不会触发的具体检查, 比没有这条检查更危险**)。
 """
+import json
+
 import pytest
 
 from quant.report import portfolio_brief as pb
@@ -18,14 +20,39 @@ from quant.sync import watchlist_migrate as wm
 
 
 @pytest.fixture(autouse=True)
-def quiet_neighbours(monkeypatch):
+def quiet_neighbours(monkeypatch, tmp_path, request):
     """别让隔壁 INFRA 告警的真实状态混进断言。"""
+    if request.node.get_closest_marker("live_data"):
+        return
+    positions = tmp_path / "positions.json"
+    watchlist = tmp_path / "watchlist.json"
+    for path in (positions, watchlist):
+        path.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
+    nav = tmp_path / "nav_history.jsonl"
+    nav.write_text("", encoding="utf-8")
+    klines = tmp_path / "klines"
+    klines.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
+    monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", positions)
+    monkeypatch.setattr(pb, "STATE_WATCHLIST_PATH", watchlist)
+    monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+    monkeypatch.setattr(pb, "KLINE_CACHE_DIR", klines)
+    monkeypatch.setattr(pb, "EVENTS_DIR", events)
+    monkeypatch.setattr(pb, "STATE_PATH", tmp_path / "heartbeat-state.json")
+    monkeypatch.setattr(pb.book, "POSITIONS_PATH", positions)
+    monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
+    monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", klines)
     monkeypatch.setattr(pb, "lot_drift", lambda *a, **k: [])
     # 财报日历也要钉 —— build_brief 会读它 (缩仓 + INFRA:earnings_calendar_stale +
-    # INFRA:card_stale_earnings), 那是本模块最后一处 live 读 (立规)。
+    # INFRA:card_stale_earnings)，不能让财报季改变本模块的告警断言。
     monkeypatch.setattr(pb.earnings, "load_calendar",
                         lambda *a, **k: {"as_of": pb.et_today(), "tickers": {}})
     monkeypatch.setattr(pb, "untagged_fills", lambda *a, **k: [])
+    from quant.decision import exit_guard
+    monkeypatch.setattr(exit_guard, "run_checks", lambda **k: {
+        "summary_lines": [], "account": None, "guards": {},
+        "one_shot": [], "persistent": []})
 
 
 def _brief():
@@ -60,10 +87,11 @@ def test_healthy_book_is_quiet(monkeypatch):
                 if "underlying 正股卡缺 zones" in a]
 
 
+@pytest.mark.live_data
 def test_live_state_is_clean():
     """真账本上这条不该响 —— 响了就是现在有一张空的 underlying 卡。
 
-    (它是安全网, 不是常态噪音; 2026-08-11 GOOGL 建卡后应恒为空。)"""
+    (它是安全网, 不是常态噪音;  GOOGL 建卡后应恒为空。)"""
     from quant.core.holdings import underlying_cards_missing_zones
     doc = pb._load_state_doc(pb.STATE_POSITIONS_PATH)
     assert underlying_cards_missing_zones(doc) == []
@@ -132,7 +160,7 @@ def test_all_cards_have_an_axis_is_quiet(monkeypatch):
 # 卡锚停在 8/06 过了四个交易日, 每轮 heartbeat 与 briefing 都一声没有。
 
 def test_stale_after_print_reaches_the_brief(monkeypatch):
-    """端到端: 检测器有输出 ≠ 告警会响 (2026-08-05 形状#17)。"""
+    """端到端: 检测器有输出 ≠ 告警会响 ( 形状#17)。"""
     monkeypatch.setattr(pb, "underlying_cards_missing_zones", lambda *a, **k: [])
     monkeypatch.setattr(pb.earnings, "cards_stale_after_print",
                         lambda *a, **k: ["LITE print 2026-08-11 AMC → 反应日 "

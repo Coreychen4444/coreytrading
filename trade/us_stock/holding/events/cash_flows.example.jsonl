@@ -1,0 +1,1 @@
+{"date":"2099-01-05","key":"2099-01-05:SYNTHETIC_FLOW","cashflow_id":"SYNTHETIC_FLOW","settlement_date":"2099-01-05","currency":"USD","type":"Bank Transfer Deposits","direction":"IN","amount":1000.0,"usd_amount":1000.0,"usd_basis":"USD 原币","remark":"","source":"broker_cash_flow","synced_at":"2099-01-05T00:00:00Z","synthetic":true}

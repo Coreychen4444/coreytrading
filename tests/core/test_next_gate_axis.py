@@ -13,8 +13,6 @@
 而写 next_regime 的两处都在 `regime_transition.apply_transition` 里 —— 机器只在
 转移发生时写。建卡不写, 就真的没有人会补。这是「缺字段静默」的又一例。
 """
-import os
-
 import pytest
 
 from quant.core.structure import cards_missing_next_gate, has_next_gate
@@ -109,10 +107,9 @@ def test_structurally_exempt_layer_is_out():
         _doc(SPCX=_card(gate=None, role="commemorative_hold"))) == []
 
 
-@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
-                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.live_data
 def test_live_book_is_scanned_not_asserted_clean():
-    """真账本上这条**允许**响 (2026-08-11 有 3 张缺) —— 这里只钉扫描不炸。"""
+    """真账本上这条**允许**响 ( 有 3 张缺) —— 这里只钉扫描不炸。"""
     import json
     from quant.core.paths import POSITIONS_PATH, WATCHLIST_PATH
     rows = cards_missing_next_gate(
@@ -120,3 +117,12 @@ def test_live_book_is_scanned_not_asserted_clean():
         json.loads(WATCHLIST_PATH.read_text(encoding="utf-8")))
     assert isinstance(rows, list)
     assert all(" — " in r for r in rows)
+
+
+def test_watchlist_tombstone_is_not_scanned():
+    """: 移出自选分组只翻 moomoo_listed, status 仍 watching —— 四个 INFRA 扫描都只看
+    status≠closed, 墓碑卡天天被点名。判据收进 holdings.is_scannable_card。"""
+    live = _card(gate=None, status="watching")
+    tomb = {**_card(gate=None, status="watching"), "moomoo_listed": False}
+    out = cards_missing_next_gate(_doc(MU=live, AMKR=tomb))
+    assert len(out) == 1 and out[0].startswith("MU")

@@ -28,6 +28,7 @@ CLI:
     .venv/moomoo/bin/python3 quant/valuation/calibrate.py backtest --tickers MU LITE [--years 4] [--horizon 4]
         [--variant actual|trend|both] [--json] [--write]
     .venv/moomoo/bin/python3 quant/valuation/calibrate.py reconcile [--tickers ...] [--refresh] [--json] [--write]
+    范围缺省 = 持仓 ∪ 候选 (universe.coverage_tickers; 墓碑卡不进); --all-inputs = inputs.json 全表
 """
 from __future__ import annotations
 
@@ -46,6 +47,7 @@ from quant.core.io_json import append_jsonl, iter_jsonl  # noqa: E402
 from quant.core.paths import VALUATION_CALIBRATION_PATH, VALUATIONS_PATH  # noqa: E402
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
 from quant.valuation import archetypes, fundamentals, model  # noqa: E402
+from quant.valuation.universe import coverage_tickers  # noqa: E402  (缺省范围 = 持仓 ∪ 候选)
 
 BACKTEST_RF = 0.045          # 回测常量 (声明): 校准的是基本面路径, 不是利率
 BACKTEST_ERP = 0.045
@@ -308,9 +310,14 @@ def write_rows(rows: list[dict], path: Path | None = None) -> int:
 # ── CLI ─────────────────────────────────────────────────────────────
 
 def _tickers(args, inputs: dict) -> list[str]:
+    """范围: --tickers 显式 > --all-inputs (inputs.json 全表) > 缺省 / --all = 持仓 ∪ 候选 ∩ 已归原型
+    (`universe.coverage_tickers`)。墓碑卡不进 —— 周复盘 §7 对账行「17 票全 ⏳」里的幽灵来源 ()。"""
     t = [x.upper() for x in (args.tickers or [])]
+    have = {k for k, e in (inputs.get("tickers") or {}).items() if e.get("archetype") != "not_applicable"}
+    if getattr(args, "all_inputs", False):
+        return sorted(have | set(t))
     if args.all or not t:
-        t = sorted(k for k, e in (inputs.get("tickers") or {}).items() if e.get("archetype") != "not_applicable")
+        return sorted((set(coverage_tickers()) & have) | set(t))
     return t
 
 
@@ -320,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("backtest", "reconcile"):
         sp = sub.add_parser(name)
         sp.add_argument("--tickers", nargs="*")
-        sp.add_argument("--all", action="store_true")
+        sp.add_argument("--all", action="store_true", help="持仓 ∪ 候选 (缺省即此; 墓碑卡不进)")
+        sp.add_argument("--all-inputs", action="store_true", help="inputs.json 全表 (含已移出自选/已平仓的票)")
         sp.add_argument("--json", action="store_true")
         sp.add_argument("--write", action="store_true")
         sp.add_argument("--refresh", action="store_true", help="先从 OpenD 重拉基本面")

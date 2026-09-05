@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from quant.core import sizing
+from quant.core import paths, sizing
+from quant.core.holdings import coverage_universe
 from quant.decision import entry_guard, exit_guard
 from quant.sync import today_group_sync
 from quant.valuation import archetypes, fundamentals, model, valuate
@@ -53,14 +54,23 @@ def test_risk_free_reads_latest_macro_snapshot_or_falls_back(tmp_path):
 
 
 @pytest.fixture
-def world(tmp_path, inputs_doc):
+def world(tmp_path, inputs_doc, monkeypatch):
     kdir = tmp_path / "klines"
     kdir.mkdir()
     tk, spy = make_klines(beta=1.3)
     for name, rows in (("SYN", tk), ("CYC", tk), ("SPY", spy)):
         (kdir / f"{name}.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    # 编排/CLI 的省略参数属于这个合成世界；专测 overlay 的用例仍可显式传自己的文件。
+    monkeypatch.setattr(valuate, "load_calendar", lambda: {"as_of": "2026-09-02", "tickers": {}})
+    monkeypatch.setattr(valuate, "et_today", lambda: "2026-09-02")
+    monkeypatch.setattr(valuate, "VALUATION_OVERLAYS_PATH", tmp_path / "overlays.jsonl")
+    monkeypatch.setattr(valuate, "MACRO_CURRENT_PATH", tmp_path / "current.json")
+    monkeypatch.setattr(paths, "KLINE_DEEP_DIR", tmp_path / "deep")
     return {"cache": tmp_path / "fund", "kdir": kdir, "snap": tmp_path / "snap", "ledger": tmp_path / "valuations.jsonl",
-            "inputs": inputs_doc}
+            "inputs": inputs_doc,
+            "positions": {"tickers": {"SYN": {"broker": {"qty": 2, "current_price": 50}}}},
+            "watchlist": {"tickers": {"NEWB": {"status": "watching", "moomoo_listed": True},
+                                      "CYC": {"status": "watching", "moomoo_listed": False}}}}
 
 
 def test_run_orchestrates_fetch_model_ledger_and_skips_not_applicable(world):
@@ -69,7 +79,7 @@ def test_run_orchestrates_fetch_model_ledger_and_skips_not_applicable(world):
                       kdir=world["kdir"], snapshots_dir=world["snap"], ledger_path=world["ledger"], write=True, rf=0.045)
     by = {r["ticker"]: r for r in out["results"]}
     assert set(by) == {"SYN", "CYC", "NA1"} and by["NA1"]["skipped"]
-    assert "UNKNOWN" in out["errors"] and "KeyError" in out["errors"]["UNKNOWN"]
+    assert "UNKNOWN" in out["errors"] and "inputs.json 没有归原型" in out["errors"]["UNKNOWN"]
     assert not any(c[1].endswith("NA1") for c in src.calls), "不适用的票不该去拉 OpenD"
     assert by["SYN"]["fair_value"] > 0 and by["SYN"]["cost_of_capital"]["beta"] == pytest.approx(1.30)   # 合成 K 线 13 个月 → 行业 β
     assert by["SYN"]["anchor"]["consensus_revenue"] and by["SYN"]["anchor"]["forward"]["forward_revenue"] == pytest.approx(50.0 * 100e6 / 4.0)
@@ -140,7 +150,7 @@ def test_macro_context_and_next_print_readers(tmp_path):
     assert valuate.next_print_day("SYN", {"tickers": {}}) is None and valuate.next_print_day("SYN", None) is None
 
 
-def test_run_applies_overlays_from_file_and_macro_tilt(world, tmp_path):
+def test_run_applies_overlays_from_file_and_preserves_macro_context(world, tmp_path):
     ovp = tmp_path / "overlays.jsonl"
     ovp.write_text("\n".join(json.dumps(r) for r in [
         {"id": "o1", "date": "2026-09-01", "ticker": "SYN", "source": "https://ir", "reliability": "company_official",
@@ -162,7 +172,8 @@ def test_run_applies_overlays_from_file_and_macro_tilt(world, tmp_path):
     ids = {o["id"] for o in r["news"]["applied"]}
     assert ids == {"o1", "o3"} and r["news"]["ignored"][0]["id"] == "o2"
     assert r["news"]["applied"][0]["resolved_until"] in ("2026-10-30", "2026-09-04")
-    assert r["cost_of_capital"]["erp_tilt"] == 0.005 and r["scenarios"]["probabilities"]["bear"] == pytest.approx(0.30)
+    assert r["cost_of_capital"]["erp_tilt"] == 0.0 and r["scenarios"]["probabilities"]["bear"] == pytest.approx(0.30)
+    assert r["cost_of_capital"]["erp"] == pytest.approx(r0["cost_of_capital"]["erp"])
     assert r["fair_value"] != r0["fair_value"] and r0["news"]["applied"] == []
     txt = valuate.render(r)
     assert "增量新闻: 2 条生效" in txt and "o2: 可靠度 rumor 不应用" in txt and "宏观→PE" in txt
@@ -177,9 +188,10 @@ def test_digest_is_one_line_per_ticker_cheapest_first_and_authority_free(world):
     txt = valuate.digest(out["results"], rf=out["rf"], erp=out["erp"], macro={"risk_level": "adverse"})
     lines = txt.splitlines()
     assert lines[0].startswith("📐 估值一览") and "rf 4.50%" in lines[0] and "宏观 adverse" in lines[0]
-    body = [l for l in lines[1:] if not l.startswith(("不适用", "零授权"))]
-    assert len(body) == 2 and all(("公允" in l and "置信" in l) for l in body)
-    ratios = [next(r for r in out["results"] if r["ticker"] == l.split()[0])["verdict"]["ratio"] for l in body]
+    assert lines[1:3] == list(valuate.DIGEST_HEADER)        # GFM 表: tg_notify --rich 渲染成原生表格
+    body = [l for l in lines[3:] if not l.startswith(("不适用", "零授权"))]
+    assert len(body) == 2 and all(l.startswith("| ") and "公允" in l and "置信" in l for l in body)
+    ratios = [next(r for r in out["results"] if r["ticker"] == l.split("|")[1].strip())["verdict"]["ratio"] for l in body]
     assert ratios == sorted(ratios), "最便宜的在前"
     assert "不适用: NA1" in txt and lines[-1].startswith("零授权")
     for banned in (r"\bcap\b", "股数", "挂单", r"\bGO\b(?!.*≠)", r"PLAN\(", r"\$[0-9,]+k"):
@@ -196,3 +208,24 @@ def test_cli_digest_flag(world, monkeypatch, capsys):
     assert valuate.main(["--tickers", "SYN", "--rf", "0.045", "--digest"]) == 0
     out = capsys.readouterr().out
     assert out.startswith("📐 估值一览") and "SYN" in out and "零授权" in out
+
+
+def test_cli_all_is_coverage_universe_not_the_inputs_table(world, monkeypatch, capsys):
+    """ 周复盘 §7: --all 按 inputs.json 全表跑, 列了墓碑 AAOI/AMKR/COHR/MSTR 与纪念仓 SPCX。
+    --all = 持仓 ∪ 候选; inputs 里多出来的票不进; 范围内没归原型的票报错 (人工区待补) 不跑;
+    --all-inputs 才是全表。"""
+    valuate.run(["SYN", "CYC"], inputs=world["inputs"], source=FakeSource(), cache_dir=world["cache"],
+                kdir=world["kdir"], snapshots_dir=world["snap"], rf=0.045)
+    monkeypatch.setattr(fundamentals, "FUNDAMENTALS_DIR", world["cache"])
+    monkeypatch.setattr(valuate, "KLINE_CACHE_DIR", world["kdir"])
+    monkeypatch.setattr(valuate, "MACRO_SNAPSHOTS_DIR", world["snap"])
+    monkeypatch.setattr(valuate.archetypes, "load_inputs", lambda path=None: world["inputs"])
+    monkeypatch.setattr(valuate, "coverage_tickers",
+                        lambda: coverage_universe(world["positions"], world["watchlist"]))
+    assert valuate.main(["--all", "--rf", "0.045", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [r["ticker"] for r in doc["results"]] == ["SYN"], "CYC/NA1 在 inputs 里但不在范围"
+    assert "NEWB" in doc["errors"] and "inputs.json 没有归原型" in doc["errors"]["NEWB"]
+    assert valuate.main(["--all-inputs", "--rf", "0.045", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert {r["ticker"] for r in doc["results"]} == {"SYN", "CYC", "NA1"}

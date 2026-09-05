@@ -37,6 +37,8 @@ def brief(tmp_path, monkeypatch):
         path = tmp_path / "positions.json"
         path.write_text(json.dumps({"tickers": positions or {}}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", path)
+        # 预算/敞口使用同一份合成账本，不能回读 book 的默认私有路径。
+        monkeypatch.setattr(pb.book, "POSITIONS_PATH", path)
         wl = tmp_path / "watchlist.json"
         wl.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_WATCHLIST_PATH", wl)
@@ -62,6 +64,7 @@ def brief(tmp_path, monkeypatch):
         nav = tmp_path / "nav_history.jsonl"
         nav.write_text("", encoding="utf-8")
         monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+        monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
         kdir = tmp_path / "klines"
         kdir.mkdir(exist_ok=True)
         for tk, bars in (closes or {}).items():
@@ -69,6 +72,7 @@ def brief(tmp_path, monkeypatch):
                 "\n".join(json.dumps({"time": d, "close": c}) for d, c in bars),
                 encoding="utf-8")
         monkeypatch.setattr(pb, "KLINE_CACHE_DIR", kdir)
+        monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", kdir)
 
         rows, col = pb.load_rows_from_state(path)
         return pb.build_brief(rows, col, mutate_state=False)

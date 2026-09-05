@@ -1,5 +1,6 @@
 """Recent buy fills without the era-appropriate authorization tag must alert."""
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -36,8 +37,29 @@ def events(monkeypatch, tmp_path):
     month.mkdir()
     (month / "trades.jsonl").touch()
     monkeypatch.setattr(pb, "EVENTS_DIR", tmp_path)
-    monkeypatch.setattr(pb, "iter_jsonl", lambda p: list(rows))
-    # Calendar state is an external input and must not change this test's result.
+    monkeypatch.setattr(pb, "iter_jsonl", lambda p: list(rows) if p.name == "trades.jsonl" else [])
+    positions = tmp_path / "positions.json"
+    watchlist = tmp_path / "watchlist.json"
+    for path in (positions, watchlist):
+        path.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
+    nav = tmp_path / "nav_history.jsonl"
+    nav.write_text("", encoding="utf-8")
+    klines = tmp_path / "klines"
+    klines.mkdir()
+    monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", positions)
+    monkeypatch.setattr(pb, "STATE_WATCHLIST_PATH", watchlist)
+    monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+    monkeypatch.setattr(pb, "KLINE_CACHE_DIR", klines)
+    monkeypatch.setattr(pb, "STATE_PATH", tmp_path / "heartbeat-state.json")
+    monkeypatch.setattr(pb.book, "POSITIONS_PATH", positions)
+    monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
+    monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", klines)
+    monkeypatch.setattr(pb, "lot_drift", lambda *a, **k: [])
+    from quant.decision import exit_guard
+    monkeypatch.setattr(exit_guard, "run_checks", lambda **k: {
+        "summary_lines": [], "account": None, "guards": {},
+        "one_shot": [], "persistent": []})
+    # 同上: build_brief 读真日历 = 断言跟着财报季红绿 ( 立规)。
     monkeypatch.setattr(pb.earnings, "load_calendar",
                         lambda *a, **k: {"as_of": pb.et_today(), "tickers": {}})
     return rows
@@ -92,15 +114,40 @@ def test_alert_reaches_the_brief_not_just_the_helper(events, monkeypatch):
     assert any(t.get("type") == "fill_untagged" for t in out.get("triggers") or [])
 
 
-def test_price_breach_fill_is_named_even_with_auth(events):
-    events.append({
-        **_fill(auth={"cap_pct_nav": 0.4, "gate_no": 1}),
-        "price_flags": ["above_no_chase", "in_trim_zone"],
-    })
-    lines = pb.price_breach_fills()
-    assert len(lines) == 1
-    assert "TEST" in lines[0]
-    assert "above_no_chase+in_trim_zone" in lines[0]
+def test_scored_fill_is_quiet_even_without_auth(events, monkeypatch):
+    """cap 0 的成交按 schema 不能盖 auth 章 → 「注解 + 评分」是它唯一的判定形状。
+    cap 0 regime 里买回的规则外成交裁「直接评 C, 不再点名」: 此前告警文案写着「判定后 annotate_event 补注 + 落评分」, 但判据只认
+    auth 章 —— 评完分照样响到 14 天窗口滑出。评分行 (ref = order_id) 收口。
+    """
+    events.append(_fill())                                       # order_id "X", 无 auth
+    monkeypatch.setattr(pb, "scored_fill_refs", lambda: {"X"})
+    assert pb.untagged_fills() == []
+    monkeypatch.setattr(pb, "scored_fill_refs", lambda: {"OTHER"})
+    assert len(pb.untagged_fills()) == 1, "别的成交的评分不能替这一笔收口"
+
+
+def test_scored_fill_refs_reads_ref_column(monkeypatch):
+    rows = [{"ticker": "NBIS", "score": "C", "ref": "FS1D09"},
+            {"ticker": "MRVL", "score": "B", "ref": "FS1D03"},
+            {"ticker": "X", "score": "A"}]                       # 无 ref 的行不算
+    monkeypatch.setattr(pb, "iter_jsonl", lambda p: list(rows))
+    assert pb.scored_fill_refs() == {"FS1D09", "FS1D03"}
+    monkeypatch.setattr(pb, "iter_jsonl", lambda p: (_ for _ in ()).throw(OSError("gone")))
+    assert pb.scored_fill_refs() == set(), "账本读不到 = 没人判过, 照常点名 (不是崩)"
+
+
+# ── INFRA:fill_price_breach (INFRA-5(b)) ─────────
+#
+# fill_untagged 只点名**没章的** —— 带 auth 章的价位违规此前完全静默
+# (一笔带合规章的成交踩了 no_chase+trim 双线)。flags 由同步层落库即盖,
+# 这里只读不重算 (重算 = 用今天的卡评历史的价, 正是盖章要冻结的漂移)。
+
+def test_price_breach_fill_is_named_even_with_auth_tag(events):
+    events.append({**_fill(auth={"cap_pct_nav": 0.4, "gate_no": 1}),
+                   "price_flags": ["above_no_chase", "in_trim_zone"]})
+    out = pb.price_breach_fills()
+    assert len(out) == 1
+    assert "TEST" in out[0] and "above_no_chase+in_trim_zone" in out[0]
 
 
 def test_price_breach_marks_cross_day_stamp(events):

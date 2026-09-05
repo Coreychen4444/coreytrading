@@ -60,6 +60,9 @@ def test_card_tickers_skips_closed_cards_and_volume_references(tmp_path, monkeyp
         "SPY": {"broker": None, "status": "watching",
                 "instrument": {"role": "volume_reference"}},  # 不交易, 无财报语义
         "OLD": {"broker": None, "status": "closed"},
+        # : 移出自选分组只翻 moomoo_listed, status 仍 watching —— 墓碑卡不排财报
+        "AMKR": {"broker": {"qty": 0, "current_price": 47.7}, "status": "watching",
+                 "moomoo_listed": False},
         #  起 watchlist 卡携带报价快照 (broker block, qty 恒 0)。
         # 旧判据 `broker is None` 会把这类卡整个排除 —— 快照功能上线当天日历
         # 只剩 positions, COHR  print 前夜被 用户 抓漏。回归钉:

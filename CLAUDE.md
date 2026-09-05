@@ -14,6 +14,7 @@ The public repository contains the complete reusable operating model while exclu
 - `.claude/skills/` contains task-specific workflows. Read the relevant `SKILL.md` before using one.
 - `tasks/` is the source of truth for optional scheduled-task prompts.
 - `quant/README.md` is the source of truth for package layering and dependency direction.
+- `agents/` defines the four domain roles (macro, technical, risk, valuation), their evidence contracts and the model routing in `agents/routing.json`; `agents/README.md` is the operating manual for the host controller.
 - Executable formulas and schemas win over prose when they disagree. Repair the stale prose and add a regression test rather than creating a second implementation.
 
 ## Identity and communication style
@@ -149,6 +150,11 @@ Rules enforced by architecture tests:
 - `quant/core/timeutil.py`: market-time normalization, completed-session checks and daylight-saving-safe date logic.
 - `quant/core/occ.py`: option-symbol parsing. Do not duplicate OCC parsing in consumers.
 - `quant/core/ledger.py`: shared ledger helpers.
+- `quant/core/market_sessions.py`: the pinned XNYS exchange calendar behind every session gate (holidays, half days, daylight-saving-safe closes); it fails closed outside its supported range or without its dependency, never falling back to a weekday guess.
+- `quant/core/quote_times.py`: quote timestamp normalization.
+- `quant/core/nav.py`: NAV change of a window net of external cash flows, as a pure function.
+- `quant/core/agent_contracts.py`: JSON result contracts, permissions and evidence binding for the domain roles.
+- `quant/core/motto.py`: the optional operator-configured closing line for notifications; unset means no footer.
 
 ### Sizing and portfolio math
 
@@ -247,6 +253,7 @@ Only `quant/sync/` writes broker blocks in positions/watchlist state.
 - `kline_cache.py`: incremental completed-bar cache. It must reject an incomplete daily bar during the session.
 - `iv_logger.py`: ATM IV history used by IV gates and calibration.
 - `nav_snapshot.py`: NAV and benchmark snapshot used by portfolio math.
+- `cash_flow_sync.py`: broker fund flows into the external cash-flow ledger, bank transfers only, queried by clearing date and deduplicated by flow identity. Deposits and withdrawals are not performance.
 - `earnings_calendar.py`: forward earnings/reaction-day cache consumed offline by sizing and reports.
 - `macro_fetch.py`: dated informational context; never an authorization source.
 - `skhy_premium.py`: instrument-specific premium history where enabled.
@@ -312,6 +319,7 @@ Exit mechanics do not accept a narrative or macro exception. A process score may
 - `valuate.py` orchestrates a run, renders it and appends one ledger line per valuation, carrying the input snapshot so the estimate stays auditable.
 - `overlays.py` is the only way news reaches the model: a structured, validated, append-only record naming the instrument, channel, driver, magnitude, reliability and expiry. Low-reliability records are recorded and visibly ignored rather than applied. The model never reads prose.
 - `calibrate.py` reconciles ledger predictions against realized results and re-runs point-in-time valuations for backtesting. Decision rules are pre-registered before the numbers are read.
+- `universe.py` defines the layer's default scope: positions and entry candidates, never the whole hand-written input file, so removed candidates and unmanaged lots do not reappear in digests. An instrument in scope without an archetype is an error, not a silent skip.
 
 Layer rules:
 
@@ -333,8 +341,23 @@ Layer rules:
 - Use `--read-only` for session inspection; the default alerting mode may consume cooldown state.
 - Reports must preserve binding constraints and original warnings from their deterministic sources. Do not paraphrase away severity.
 - `perf_report.py` provides tier/gate performance and process-versus-outcome review.
+- `nav_report.py` renders the NAV change of a window net of external cash flows and warns when the ledger does not cover the window. It is the only reading for a weekly NAV change; the cap denominator still reads the latest NAV row.
 - `gate_ladder_report.py`, `gate_audit.py`, `anchor_receipts.py` and `chart_read.py` expose specific audits without creating authorization.
 - Chart reading reports current structure, short-horizon Dow phase, confirmation line, invalidation line, distance and evidence quality. A Dow termination is a discretionary review point, not an exit instruction. Chart reading does not write state, size positions or unlock cap zero.
+
+## Domain agents and model routing
+
+Research is organized as four domain roles, and the roles are separated from the runtimes and models that execute them.
+
+- Roles: `macro`, `technical`, `risk` and `valuation`, defined by `agents/roles.json`, one Markdown method file each and the contracts in `quant/core/agent_contracts.py`.
+- Runtimes: the Claude Code CLI and the Codex CLI, driven by `quant/ops/agent_runners.py`. A worker receives frozen evidence in its prompt and returns JSON; it has no workspace, broker, shell, messaging or order access. Claude runs tool-free; Codex runs with an isolated configuration, an OS sandbox and a proxy limited to model endpoints.
+- Routing: `agents/routing.json` names model profiles (runtime, primary model, fallback models, effort) and assigns each role a primary profile and a reviewer profile on the other runtime. Fallback happens only on runtime failure, timeout or contract violation, never after a valid abstention or a rejected review. Receipts record the requested model and effort separately from what the CLI reported; unreported or multiple reported models are recorded as such, never promoted to a confirmation.
+- Permissions: only `technical` may carry a proposal, and only as `zone_update` arguments for the existing writer. The other roles are analysis-only. Amounts, stops, caps and exits come from the mechanical modules; macro and valuation output is `[FYI]`; orders remain manual.
+- Inputs: `quant/ops/agent_inputs.py` freezes the existing state, completed bars, macro snapshot and valuation ledgers into a snapshot with an input hash, evidence references and an expiry. Capture is not refresh; missing and stale sources stay visible.
+- Workflow: macro, technical and valuation run in parallel, risk reads their reports plus its own inputs, and at most one round of targeted cross-role requests follows. Per-workflow and global call limits are enforced by `quant/ops/agent_health.py` together with process and business leases.
+- Reviewed card updates: a single-card job captures, proposes, obtains an independent review from the other runtime, checks policy, expiry, whitelist and card revision under the writer lock, and then applies through `.claude/skills/trading-analysis/scripts/update_position_zones.py`. The `autopaint` switches in the routing file gate detection, application and the review requirement. Only a submission receipt with `status == "applied"` is a written card; `needs_review`, `partial` and `applying` are handled by the documented recovery paths and are never retried blindly.
+- Production entry: `quant/ops/agent_jobs.py`. `due --kind` is the exchange-calendar gate every scheduled prompt runs first. `run --kind` executes the briefing, post-close, weekly and chart jobs; the pipeline invokes it as the `agents` stage. `quant/ops/agent_dependency.py` is the read-only barrier that makes the ladder and chart jobs wait for the same-session post-close receipt.
+- Health: `quant/ops/agent_health.py` scans run metadata and keeps a durable alert outbox that the pipeline delivers; `quant/ops/agent_doctor.py --json` inventories scheduler metadata and reports how the runner binaries resolve (`CLAUDE_BIN` / `CODEX_BIN`, then PATH, then known install locations) without executing anything. Registry entries, file presence and timestamps are not proof that a run succeeded.
 
 ## Ops pipeline and stage order
 
@@ -358,23 +381,27 @@ The dependency order is:
 14. structure-drift observation;
 15. portfolio brief after all producer stages and before any regime transition that can replace an exit boundary;
 16. regime transition after exit evaluation in close-dependent modes;
-17. broker reminder reconciliation from the post-transition card and same-run exit stack;
-18. entry-authorization group reconciliation from post-transition state;
-19. entry plan after current state, market data, NAV and transitions are complete.
+17. domain-agent stage: frozen-evidence research and reviewed card updates (at most two per run), after the transition and before any effector;
+18. broker reminder reconciliation from the post-transition card and same-run exit stack;
+19. entry-authorization group reconciliation from post-transition state;
+20. entry plan after current state, market data, NAV and transitions are complete.
 
 `card_autopaint.py` must return without waiting for analysis. It excludes reference
 instruments, unmanaged positions, option contracts and cards that already have zones.
-`pipeline --read-only` converts it to `--dry-run`, because a detached card agent is a
-state writer that cannot be recalled when the preview session exits. Scheduled use
-requires a Claude CLI (`CLAUDE_BIN` may override discovery). The wall-clock guard
-uses `timeout`/`gtimeout` when available, then a Perl `alarm` fallback; an
-unenforced launch must report `timeout_enforced: false` rather than failing silently.
+`pipeline --read-only` is an allowlist: only the cached brief runs, and the detector,
+the agents stage and every effector are skipped, because a detached card job is a
+state writer that cannot be recalled when the preview session exits. The detector
+launches the neutral controller (`quant/ops/agent_runtime.py card`), never a model
+binary directly; the controller enforces its own wall clock, leases and the routing
+policy. Runner binaries resolve through `CLAUDE_BIN` / `CODEX_BIN`, then PATH, then
+known install locations; an unresolved runner fails closed for every endpoint of its
+profile, which `agent_doctor.py --json` reports without executing anything.
 
 Mode semantics:
 
 - `heartbeat`: periodic broker/state reconciliation plus risk/exit reporting; no incomplete-close transitions.
 - `briefing`: full daily producer chain plus portfolio and entry plans.
-- `postclose`: refresh close inputs, evaluate and emit exits against the pre-transition card, apply completed-bar transitions, then refresh reminders and authorization state.
+- `postclose`: refresh close inputs, evaluate and emit exits against the pre-transition card, apply completed-bar transitions, run technical and risk research with up to two reviewed repaints, then refresh reminders and authorization state.
 
 Pipeline invariants:
 
@@ -386,6 +413,8 @@ Pipeline invariants:
 - NAV precedes reminders, reports and entry sizing.
 - Portfolio brief and exit evaluation precede regime transitions that may replace the breached stop.
 - Regime transitions precede reminders and authorization-group synchronization.
+- The agents stage runs between the transition and the effectors, so reminders and the authorization group render cards that already passed review.
+- A `partial` receipt from the agents stage (missing roles, cards not applied, pending targets) is recorded as `partial`, not `failed`; the receipt keeps the open work visible.
 - Portfolio brief runs after every state/data producer it consumes and before external reminder/group effectors. Its alert receipt prevents duplicate delivery by task wrappers.
 - A fatal producer failure stops dependent consumers rather than letting them read half-updated state.
 - OpenD-down and stale-heartbeat conditions are first-class infrastructure alerts.
@@ -404,6 +433,8 @@ Pipeline invariants:
 
 Task rules:
 
+- Every prompt starts with the exchange-calendar gate `python3 quant/ops/agent_jobs.py due --kind <kind>`; a non-session day or an out-of-window wake-up stops before any collection, and a calendar error is reported rather than guessed around.
+- Post-close prompts may be registered on several wake-up slots; only the slot inside the window (ten, twenty or thirty-five minutes after the actual close, until sixty minutes after it) runs. The ladder and chart prompts also wait for the same-session post-close receipt through `quant/ops/agent_dependency.py`.
 - The checked-in prompt is the source of truth. Register/copy it into a task runner explicitly.
 - Keep task ordering consistent with the pipeline.
 - Configure cadence in the operator's timezone and adjust for market daylight-saving changes.
@@ -503,7 +534,8 @@ For analysis and state writes:
 - Do not edit broker-owned blocks by hand.
 - Log a probability/EV worksheet through `quant/journal/decision_log.py` when the EV framework is used.
 - Record rule-external trade review through `quant/journal/annotate_event.py`, not prose alone.
-- Use `quant/report/portfolio_brief.py --read-only --json` for an in-session brief.
+- Use `quant/report/portfolio_brief.py --read-only --json` for an in-session brief, and `quant/ops/pipeline.py --mode briefing --read-only --json` for a cached pipeline preview; neither runs the agents stage.
+- Inspect the domain-agent configuration and metadata with `quant/ops/agent_runtime.py roles`, `quant/ops/agent_health.py` and `quant/ops/agent_doctor.py --json`; none of them calls a model.
 - Use `quant/report/perf_report.py` for process/outcome review.
 - If private files are missing, initialize only the required schemas through `trade/README.md`; do not fabricate a portfolio.
 
@@ -545,7 +577,8 @@ Required structural checks include:
 - `tests/test_repo_references.py`: repository path and task-prompt references;
 - `tests/test_live_data_isolation.py`: offline tests cannot consume live state;
 - `tests/test_trade_scaffold.py`: `trade/` permits README/example files only;
-- `tests/test_public_sanitization.py`: public identity/provenance sanitization.
+- `tests/test_public_sanitization.py`: public identity/provenance sanitization;
+- `tests/core/test_market_sessions.py`: the exchange-calendar gate behind scheduled tasks.
 
 Do not hard-code the test count in documentation. Collect or run the suite to obtain the current count.
 

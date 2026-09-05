@@ -39,6 +39,8 @@ def brief(tmp_path, monkeypatch):
         path = tmp_path / "positions.json"
         path.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", path)
+        # 预算/敞口使用同一份合成账本，不能回读 book 的默认私有路径。
+        monkeypatch.setattr(pb.book, "POSITIONS_PATH", path)
         wl = tmp_path / "watchlist.json"
         wl.write_text(json.dumps({"tickers": watchlist or {}}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_WATCHLIST_PATH", wl)
@@ -55,12 +57,14 @@ def brief(tmp_path, monkeypatch):
         nav = tmp_path / "nav_history.jsonl"
         nav.write_text("", encoding="utf-8")
         monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+        monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
         kdir = tmp_path / "klines"
         kdir.mkdir(exist_ok=True)
         for tk, rows in (klines or {}).items():
             (kdir / f"{tk}.jsonl").write_text(
                 "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
         monkeypatch.setattr(pb, "KLINE_CACHE_DIR", kdir)
+        monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", kdir)
 
         rows, col = pb.load_rows_from_state(path)
         return pb.build_brief(rows, col, mutate_state=False)
@@ -105,3 +109,17 @@ def test_valid_until_expiry_also_suppresses_touch(brief):
                                           valid_until="2026-01-01")},
                 klines={"MU": _KL_FRESH})
     assert _touches(out) == []
+
+
+def test_watchlist_stale_lists_candidates_only(brief):
+    """周复盘 §3「候选卡过期」此前由 agent 手扫 watchlist.json, 把墓碑卡一起列了。
+    出口 = brief.watchlist_stale (判据 is_candidate); 消费端抄输出, 不再自己扫文件。"""
+    stale = _wl_card([930.0, 945.0], [921.5, 930.0], cap=0.4, price=935.5, valid_until="2020-01-01")
+    tomb = dict(_wl_card([930.0, 945.0], [921.5, 930.0], cap=0.4, price=935.5, valid_until="2020-01-01"),
+                moomoo_listed=False)
+    fresh = _wl_card([930.0, 945.0], [921.5, 930.0], cap=0.4, price=935.5)
+    out = brief(watchlist={"MU": stale, "AMKR": tomb, "LITE": fresh})
+    assert [s["ticker"] for s in out["watchlist_stale"]] == ["MU"]
+    assert any("valid_until 2020-01-01 已过期" in r for r in out["watchlist_stale"][0]["reasons"])
+    assert "Watchlist stale" in out["text"] and "- MU: valid_until 2020-01-01 已过期" in out["text"]
+    assert "AMKR" not in out["text"]

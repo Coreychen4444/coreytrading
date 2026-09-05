@@ -31,6 +31,10 @@ Never manufacture a live quote, reuse a stale article as current data, or expose
 
 Use `.claude/skills/trading-analysis/scripts/update_position_zones.py` for controlled state updates. Preserve broker, lots and pending-order blocks. Every map requires an anchor date, methodology, update trigger and invalidation level. Writes to local live state require explicit user authorization; analysis alone is read-only.
 
+Assigning a valuation archetype is part of painting a card. After the first zone write for a new instrument, run `python3 quant/valuation/archetypes.py set <TICKER> --archetype <name> --rationale "<one sentence>"`, then refresh the valuation mirror with `quant/valuation/valuate.py --tickers <TICKER> --refresh --write` and `quant/sync/valuation_sync.py --tickers <TICKER>`. A missing archetype is reported (a writer warning and the brief's `INFRA:card_missing_archetype`) and never blocks a zone, gate or cap; the valuation layer has zero authorization effect.
+
+Scheduled repaints and missing-card detection go through the domain-agent controller described in `agents/README.md`: the host freezes evidence, the `technical` role proposes, another provider reviews, and the same writer applies the proposal under a revision check. Only `submission.status == "applied"` means a card was written; isolated workers never run the data refresh, write, valuation or notification steps of this skill themselves.
+
 ## Output
 
 Separate facts, hypotheses, mechanical verdicts and operator decisions. State clearly that the live pipeline does not place orders.

@@ -2,8 +2,8 @@
 
 v3 语义 (用户): 判据是**授权状态**(gate 达标 → current_regime.cap_pct_nav > 0),
 不是执行时点 —— v2 锚 entry_guard GO verdict, 有 cap 等回踩的票 (WAIT) 整晚不进组, 已废。
-2026-08-13 轮语义: 成交**不再**终止授权 (本轮可用 = 名义 − 本轮已投, 从 lots 算);
-2026-08-13 二次定版: 额度按**爬过几个给 cap 的 gate**给 (gate1 2.5%/gate2 4%/gate3 5%),
+ 轮语义: 成交**不再**终止授权 (本轮可用 = 名义 − 本轮已投, 从 lots 算);
+ 二次定版: 额度按**爬过几个给 cap 的 gate**给 (gate1 2.5%/gate2 4%/gate3 5%),
 判据 = 卡上的 regime_history 不是 lots; 扣减 = 当前敞口市值; 台账漂移只播报不拦。
 v3.1 的 fills 管道已删。"""
 import pytest
@@ -47,6 +47,11 @@ def no_earnings_today(monkeypatch):
     # 授权判据测试不读 live: 空 rows = 价格/vol 腿沉默, 时间腿 (valid_until/
     # last_reviewed) 照常可测。staleness 判别式本身钉在 tests/core/test_structure.py。
     monkeypatch.setattr(tgs.book, "bars", lambda *a, **k: [])
+    # 直接 grant 的默认 exposure 也须来自同一合成 POS；保留显式 doc 注入，
+    # 让 annotate_actual_caps 的在持扣减继续走真实的 core.exposure_of 数学。
+    exposure = tgs.book.exposure_of
+    monkeypatch.setattr(tgs.book, "exposure_of", lambda ticker, positions_doc=None:
+                        exposure(ticker, positions_doc=POS if positions_doc is None else positions_doc))
 
 POS = {"tickers": {
     "INTC": {"broker": {"qty": 4},          # qty ≡ lots 之和: 对不上是台账守卫的用例, 不是这里的
@@ -330,7 +335,7 @@ def test_entry_cap_exposure_reduces_the_budget_and_never_advances_the_gate():
 
 
 def test_no_fills_plumbing_left_in_the_authorization_path():
-    """源码棘轮: v3.1「成交即行使」的 fills 管道 2026-08-13 整条删除。
+    """源码棘轮: v3.1「成交即行使」的 fills 管道  整条删除。
 
     语义  就退役了, 但那套管道作为台账守卫的判据又多活了一天并制造了
     AAOI 那次误判 —— 死掉的语义留着活的实现, 下一个读代码的人会以为它还是规矩。

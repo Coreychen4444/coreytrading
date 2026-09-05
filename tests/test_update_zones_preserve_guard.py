@@ -45,6 +45,10 @@ def upz(monkeypatch, tmp_path):
     pos.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
     monkeypatch.setattr(mod, "WATCHLIST_PATH", wl)
     monkeypatch.setattr(mod, "POSITIONS_PATH", pos)
+    from quant.core import io_json
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
+    monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
+    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
     return mod, wl
 
 
@@ -96,7 +100,7 @@ def test_next_regime_wipe_aborts(upz, monkeypatch):
 
 
 def test_metadata_only_call_merges_instead_of_wiping_levels(upz):
-    """2026-08-06 发现的静默破坏: 只传 zone **元数据**(valid-until / reasoning /
+    """ 发现的静默破坏: 只传 zone **元数据**(valid-until / reasoning /
     update-trigger / anchored-on) 时, 旧判据让它走整块替换 → z1/z2/trim/no_chase/stop
     全部消失, 且 schema 合法照常落盘。价位判别式修掉这条路。"""
     mod, wl = upz
@@ -119,3 +123,85 @@ def test_explicit_zone_args_may_replace(upz):
                "--conviction", "medium"])
     card = json.loads(wl.read_text())["tickers"]["GOOGL"]
     assert card["agent"]["zones"]["accumulation_zone_1"] == [360.0, 370.0]
+
+
+def test_expected_revision_accepts_current_card_and_rejects_replay(upz):
+    mod, wl = upz
+    before = json.loads(wl.read_text())["tickers"]["GOOGL"]
+    args = ["--ticker", "GOOGL", "--bucket", "watchlist", "--key-risk", "reviewed",
+            "--expected-revision", mod.canonical_hash(before)]
+    assert mod.main(args) == 0
+    after = wl.read_bytes()
+    assert json.loads(after)["tickers"]["GOOGL"]["agent"]["key_risk"] == "reviewed"
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        mod.main(args)
+    assert wl.read_bytes() == after
+
+
+def test_expected_revision_is_checked_after_acquiring_lock(upz, monkeypatch):
+    """A broker/card writer wins the lock after analysis; its newer card must survive."""
+    from contextlib import contextmanager
+    mod, wl = upz
+    old_card = json.loads(wl.read_text())["tickers"]["GOOGL"]
+    real_lock = mod.state_lock
+    updated = []
+
+    @contextmanager
+    def interleaved_lock():
+        with real_lock():
+            doc = json.loads(wl.read_text())
+            doc["tickers"]["GOOGL"]["agent"]["key_risk"] = "newer independent update"
+            wl.write_text(json.dumps(doc))
+            updated.append(wl.read_bytes())
+            yield
+
+    monkeypatch.setattr(mod, "state_lock", interleaved_lock)
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        mod.main(["--ticker", "GOOGL", "--bucket", "watchlist", "--key-risk", "stale",
+                  "--expected-revision", mod.canonical_hash(old_card)])
+    assert wl.read_bytes() == updated[0]
+
+
+def test_revision_is_per_ticker_not_whole_document(upz):
+    mod, wl = upz
+    doc = json.loads(wl.read_text())
+    revision = mod.canonical_hash(doc["tickers"]["GOOGL"])
+    doc["generated_at"] = "2099-01-01T00:00:00Z"
+    doc["tickers"]["OTHER"] = json.loads(json.dumps(doc["tickers"]["GOOGL"]))
+    doc["tickers"]["OTHER"]["agent"]["key_risk"] = "other update"
+    wl.write_text(json.dumps(doc, sort_keys=True))
+    assert mod.main(["--ticker", "GOOGL", "--bucket", "watchlist", "--key-risk", "accepted",
+                     "--expected-revision", revision]) == 0
+    assert json.loads(wl.read_text())["tickers"]["OTHER"] == doc["tickers"]["OTHER"]
+
+
+def test_missing_card_uses_null_revision(upz):
+    mod, wl = upz
+    args = ["--ticker", "NEW", "--bucket", "watchlist", "--thesis", "synthetic",
+            "--expected-revision", mod.canonical_hash(None)]
+    assert mod.main(args) == 0
+    before = wl.read_bytes()
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        mod.main(args)
+    assert wl.read_bytes() == before
+
+
+def test_positions_revision_covers_broker_and_preserves_its_update(upz):
+    mod, wl = upz
+    card = json.loads(wl.read_text())["tickers"]["GOOGL"]
+    card.update(status="active", broker={"qty": 2, "current_price": 360},
+                lots={"base": [], "position": []}, position_summary={}, pending_orders=[])
+    revision = mod.canonical_hash(card)
+    card["broker"]["qty"] = 3
+    mod.POSITIONS_PATH.write_text(json.dumps({"tickers": {"GOOGL": card}}))
+    before = mod.POSITIONS_PATH.read_bytes()
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        mod.main(["--ticker", "GOOGL", "--bucket", "current", "--key-risk", "stale",
+                  "--expected-revision", revision])
+    assert mod.POSITIONS_PATH.read_bytes() == before
+    # A fresh proposal may update its own fields while retaining the broker fact.
+    assert mod.main(["--ticker", "GOOGL", "--bucket", "current", "--key-risk", "fresh",
+                     "--expected-revision", mod.canonical_hash(card)]) == 0
+    current = json.loads(mod.POSITIONS_PATH.read_text())["tickers"]["GOOGL"]
+    assert current["broker"] == card["broker"]
+    assert current["agent"]["key_risk"] == "fresh"

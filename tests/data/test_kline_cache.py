@@ -20,7 +20,7 @@ from quant.data import kline_cache as kc
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """隔离缓存目录 + 注入 bar 源与 ET 时刻。"""
-    def _apply(ticker, bars, now_hhmm, cached=()):
+    def _apply(ticker, bars, now_hhmm, cached=(), today="2026-08-05"):
         kdir = tmp_path / "klines"
         kdir.mkdir(exist_ok=True)
         path = kdir / f"{ticker}.jsonl"
@@ -29,6 +29,7 @@ def env(tmp_path, monkeypatch):
                             encoding="utf-8")
         monkeypatch.setattr(kc, "KLINE_CACHE_DIR", kdir)
         monkeypatch.setattr(kc, "_et_hhmm", lambda: now_hhmm)
+        monkeypatch.setattr(kc, "et_today", lambda: today)
         monkeypatch.setattr(kc, "_yahoo_daily", lambda sym, start, **kw: bars)
         monkeypatch.setattr(kc, "get_kline",
                             lambda t, ktype, start, end: bars)
@@ -45,7 +46,7 @@ def _dates(path):
     return [json.loads(l)["time"][:10] for l in path.read_text().splitlines() if l.strip()]
 
 
-TODAY = kc.et_today()
+TODAY = "2026-08-05"
 
 
 def test_premarket_drops_vix_partial_bar(env):
@@ -95,6 +96,35 @@ def test_historical_bars_pass_at_any_hour(env):
                cached=[_bar("2026-08-03", 15.86)])
     assert kc.update_ticker("VIX", 365) == 1
     assert _dates(path) == ["2026-08-03", "2026-08-04"]
+
+
+@pytest.mark.parametrize("day", ["2026-11-27", "2026-12-24", "2027-11-26"])
+@pytest.mark.parametrize("hhmm,expected", [("06:30", 0), ("12:59", 0),
+                                         ("13:00", 0), ("13:04", 0),
+                                         ("13:05", 1), ("13:10", 1)])
+def test_half_day_equity_bar_waits_until_close_plus_existing_buffer(env, day, hhmm, expected):
+    path = env("TEST", [_bar(day, 100)], hhmm, today=day)
+    assert kc.update_ticker("TEST", 365) == expected
+    assert not expected or _dates(path) == [day]
+
+
+@pytest.mark.parametrize("ticker,cutoff", [("VIX", "16:20"), ("TEST270115C100000", "16:05")])
+def test_cash_half_day_does_not_infer_vix_or_option_finality(env, ticker, cutoff):
+    day = "2026-11-27"
+    path = env(ticker, [_bar(day, 10)], "13:10", today=day)
+    assert kc.update_ticker(ticker, 365) == 0
+    env(ticker, [_bar(day, 10)], cutoff, today=day)
+    assert kc.update_ticker(ticker, 365) == 1
+    assert _dates(path) == [day]
+
+
+def test_holiday_weekend_and_future_rows_never_enter_cache(env):
+    day = "2026-09-07"  # Labor Day; Friday is the last completed session.
+    bars = [_bar(d, 100) for d in ("2026-09-04", "2026-09-05", "2026-09-06",
+                                  "2026-09-07", "2026-09-08")]
+    path = env("TEST", bars, "17:00", today=day)
+    assert kc.update_ticker("TEST", 365) == 1
+    assert _dates(path) == ["2026-09-04"]
 
 
 # ── 情报层收拢退役棘轮 (, 用户: 本仓只做技术分析+风控) ──

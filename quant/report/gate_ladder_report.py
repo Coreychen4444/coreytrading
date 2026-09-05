@@ -331,10 +331,28 @@ def fastlane_lines(fl: Optional[dict], g: dict, need: int, streak: List[str],
     return out
 
 
+LADDER_TABLE_HEADER = ("| 线 | 名 | 确认 | 距离 · 备注 |", "|---|---|:-:|---|")
+
+
+def _cell(x) -> str:
+    """表格单元格: 竖线转义 (tg_rich 认 `\\|`), 换行折成 ` · `。"""
+    return str(x).replace("|", "\\|").replace("\n", " · ").strip()
+
+
+def _row(status: str, tag: str, confirm: str, note: str) -> str:
+    return "| " + " | ".join(_cell(c) for c in (status, tag, confirm, note)) + " |"
+
+
 def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
                   deep: Optional[List[dict]] = None,
                   deep_note: Optional[str] = None,
                   overdue: Optional[dict] = None) -> List[str]:
+    """一票一块 (4b 表格式, 富消息通道原生渲染):
+      第 0 行 = **票 价 涨跌 量比** · 🧭结构 · 📍位置 · 🛑stop   (粗体头 + 行内标签)
+      ⬇ 断层 / ⚠️ 线名降级 各占一行
+      gate 阶梯 = 4 列表格: 线 | 名 | 确认 | 距离 · 备注 (⚡快车道 / stop 风险读数 / 量能闸 都进备注)
+      🔒 约束 / 💱 溢价 跟在表后
+    内容与  行式版逐字同源 —— 变的只是排版, 不是字段。"""
     if len(bars) < 2:
         return [f"{tk}: 无缓存 K 线 — 先跑 kline_cache"]
     close = coerce_float(bars[-1].get("close"))
@@ -342,27 +360,18 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
     chg = (close / prev - 1) * 100 if close and prev else 0.0
     vr = vol_ratio_last(bars)
     vr_s = f"{vr:.2f}×{'⚡' if vr >= VOL_GATE else ''}" if vr is not None else "?"
-    L = [f"{tk} ${close:g} ({chg:+.1f}%) 量比 {vr_s}"]
-    # A demotion replaces the old stop, so show unresolved exit decisions beside
-    # the post-transition ladder until a sell, recovery or recorded override resolves them.
-    if overdue:
-        n = trading_days_after((str(b.get("time", ""))[:10] for b in bars),
-                               overdue["date"])
-        olds = f"{overdue['old_stop']:g}" if overdue.get("old_stop") is not None else "?"
-        news = f"{overdue['new_stop']:g}" if overdue.get("new_stop") is not None else "?"
-        L.append(f"  ⬇ {overdue['date']} 收盘破 stop 已降级 (旧 {olds} → 新 {news}, "
-                 f"cap 0) D+{n} 未执行 — 下表已是降级后的新图, "
-                 f"退出裁决仍悬 (清仓, 无 override 路径; 未执行 = 规则外评 C 起步)")
-    # 线名 = gate 的**结构身份**四分类，替代旧的 trend/lsh 两档启发式。
+    head = f"**{tk} ${close:g} ({chg:+.1f}%) 量比 {vr_s}**"
+    tags: List[str] = []
+    # 线名 = gate 的**结构身份**四分类 ( 换掉旧的 trend/lsh 两档启发式)。
     # 修复路径仍用 止跌/收复/修复 三词; 非修复路径分 突破线/箱体顶/新高线。
     st = technical.swing_structure(bars)
     # 🧭 结构 + 动态 lsh (v3 ⑤): 修复线权威读数与结构标签同行, 每票都渲染
     lsh = coerce_float(st.get("last_swing_high"))
     if st.get("trend"):
-        s = f"  🧭 {st.get('high_label')}+{st.get('low_label')}({st.get('trend')})"
+        seg = f"🧭 {st.get('high_label')}+{st.get('low_label')}({st.get('trend')})"
         if lsh and close:
-            s += f" | 动态 lsh {lsh:g} ({(lsh / close - 1) * 100:+.1f}%)"
-        L.append(s)
+            seg += f" | 动态 lsh {lsh:g} ({(lsh / close - 1) * 100:+.1f}%)"
+        tags.append(seg)
 
     zones = agent.get("zones") or {}
     z1 = zones.get("accumulation_zone_1")
@@ -372,22 +381,36 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
         # 位置行全覆盖 (用户: 持仓常态在 z1 上方, 旧版只画带内/带下 →
         # NBIS 整块只剩一条 gate 行, "持仓 section 反而最没数据")
         if z1[0] <= close <= z1[1]:
-            L.append(f"  📍 zone1 {z1[0]:g}-{z1[1]:g} 带内 (左侧参与位)")
+            tags.append(f"📍 zone1 {z1[0]:g}-{z1[1]:g} 带内 (左侧参与位)")
         elif close < z1[0]:
-            L.append(f"  📍 zone1 {z1[0]:g}-{z1[1]:g} 之下 — 对照 stop {zones.get('stop_level')}")
+            tags.append(f"📍 zone1 {z1[0]:g}-{z1[1]:g} 之下 — 对照 stop {zones.get('stop_level')}")
         elif trim and close > trim[1]:
-            L.append(f"  📍 trim {trim[0]:g}-{trim[1]:g} 上方 (+{(close / trim[1] - 1) * 100:.1f}%)"
-                     " — breakout-stale 观察")
+            tags.append(f"📍 trim {trim[0]:g}-{trim[1]:g} 上方 (+{(close / trim[1] - 1) * 100:.1f}%)"
+                        " — breakout-stale 观察")
         elif trim and trim[0] <= close <= trim[1]:
-            L.append(f"  📍 trim {trim[0]:g}-{trim[1]:g} 带内"
-                     + (" (持仓减仓观察)" if held else " — 不做入场"))
+            tags.append(f"📍 trim {trim[0]:g}-{trim[1]:g} 带内"
+                        + (" (持仓减仓观察)" if held else " — 不做入场"))
         elif nc and close > nc:
-            L.append(f"  📍 no_chase {nc:g} 上方 (+{(close / nc - 1) * 100:.1f}%) — 不追价")
+            tags.append(f"📍 no_chase {nc:g} 上方 (+{(close / nc - 1) * 100:.1f}%) — 不追价")
         else:
-            L.append(f"  📍 等待区: zone1 上沿 {(close / z1[1] - 1) * 100:+.1f}%"
-                     + (f" | no_chase {nc:g}" if nc else ""))
+            tags.append(f"📍 等待区: zone1 上沿 {(close / z1[1] - 1) * 100:+.1f}%"
+                        + (f" | no_chase {nc:g}" if nc else ""))
     if held and coerce_float(zones.get("stop_level")) is not None:
-        L.append(f"  🛑 stop {zones['stop_level']:g} (收盘 ×{zones.get('stop_level_days') or 1}日)")
+        tags.append(f"🛑 stop {zones['stop_level']:g} (收盘 ×{zones.get('stop_level_days') or 1}日)")
+    L = [" · ".join([head] + tags)]
+    # ⬇ 破 stop 降级断层标记:
+    # 本表按设计渲染**转移后**的新世界 (阶梯 = 夜盘挂单用的图),
+    # 但降级把被破的旧 stop 从卡上抹掉 —— 断层必须可见: 下面每一条线都是新图的,
+    # 而"收盘破了旧 stop 该平仓"这件事还悬着。判别式与 brief 的 exit_overdue
+    # 同一份 (structure.unresolved_demotions), 平仓/override 注解/收复转移后自然消失。
+    if overdue:
+        n = trading_days_after((str(b.get("time", ""))[:10] for b in bars),
+                               overdue["date"])
+        olds = f"{overdue['old_stop']:g}" if overdue.get("old_stop") is not None else "?"
+        news = f"{overdue['new_stop']:g}" if overdue.get("new_stop") is not None else "?"
+        L.append(f"⬇ {overdue['date']} 收盘破 stop 已降级 (旧 {olds} → 新 {news}, "
+                 f"cap 0) D+{n} 未执行 — 下表已是降级后的新图, "
+                 f"退出裁决仍悬 (清仓, 无 override 路径; 未执行 = 规则外评 C 起步)")
 
     atr = (technical.atr(bars, ATR_PERIOD) or [None])[-1]
     if deep is None:                      # 调用方没给深序列 (render_ticker 保持无 IO)
@@ -395,10 +418,11 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
     # 深度缓存**不入 git 且会过期**—— 降级必须说出口, 不许静默拿一年的高点当 ATH
     if any(g["kind"] in RETAG_KINDS for g in ladder_of(agent)):
         if len(deep) < MIN_BARS:
-            L.append(f"  ⚠️ 线名回落旧规则: 序列 n={len(deep)} < {MIN_BARS}"
+            L.append(f"⚠️ 线名回落旧规则: 序列 n={len(deep)} < {MIN_BARS}"
                      + (f" ({deep_note})" if deep_note else ""))
         elif deep_note:
-            L.append(f"  ⚠️ 线名按现有序列判: {deep_note} (n={len(deep)})")
+            L.append(f"⚠️ 线名按现有序列判: {deep_note} (n={len(deep)})")
+    rows: List[str] = []
     for g in ladder_of(agent):
         cls = gate_path_of(g["level"], deep, st.get("trend"), atr)
         g = retag(g, cls, lsh, uptrend=st.get("trend") == "up")
@@ -408,49 +432,53 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
         # 线名与 ⚡域共用同一个 cls —— 一次计算, 两处消费, 永不分叉
         fl = fastlane_state(bars, close, atr, g, n, tk, cls=cls)
         if close is not None and close <= g["level"]:
-            line = f"  ▫️ {g['level']:g} {g['tag']} [0/{need}] {dist}"
+            note = dist
             if fl and fl.get("domain") == "repair":
                 # 下一个收盘就是首日 → 预告两个价: gate = 开始 ×2 计数;
                 # gate+0.5N = 当日转移免确认。量腿读数是**今日**的, 不预测明日。
-                seg = f" | ⚡ ≥{fl['trigger']:,.2f} 免 ×{need}"
+                note += f" · ⚡ ≥{fl['trigger']:,.2f} 免 ×{need}"
                 if g.get("vol_min"):
-                    seg += f" (今日 {vol_short(fl['vol_note'], fl['vol_ok'])})"
-                line += seg
+                    note += f" (今日 {vol_short(fl['vol_note'], fl['vol_ok'])})"
             elif fl:
                 # ⓪域外/不可判: live _fastlane 不会发车 —— 预告「⚡ ≥X 免 ×2」
                 # 就是预告一条不存在的路 (接线, 与转移机同判)
                 c = fl.get("domain")
-                line += (" | ⚡域不可判 — ×%d 恒定" % need if c is None
-                         else f" | ⚡域外({PATH_TAGS.get(c, c)}) — ×{need} 恒定")
-            L.append(line)
+                note += (" · ⚡域不可判 — ×%d 恒定" % need if c is None
+                         else f" · ⚡域外({PATH_TAGS.get(c, c)}) — ×{need} 恒定")
+            rows.append(_row(f"▫️ {g['level']:g}", g["tag"], f"0/{need}", note))
         elif n >= need:
-            line = (f"  ✅ {g['level']:g} {g['tag']} [{min(n, need)}/{need} 成立]"
-                    + (f" 自 {streak[0]}" if streak else "") + f" · {dist}")
+            confirm = f"{min(n, need)}/{need} 成立" + (f" 自 {streak[0][5:]}" if streak else "")
+            note = dist
             # 成立即可挂 ladder → 直接给风险读数。地板 = 卡片 next_regime 自己写的
             # stop, 没写则按 round-2b 约定 gate−0.5N 推; 来源标出来, 不混。
             if g.get("kind") == "entry" and atr:
                 ns, src = g.get("next_stop"), "卡"
                 if ns is None:
                     ns, src = g["level"] - BFLOOR_BUF * atr, "约定"
-                line += f" → stop {ns:,.2f}[{src}] 风险 {(close - ns) / atr:.2f}N"
-            # 卡片自带的量能闸: regime_transition.volume_leg 同一函数 (起
+                note += f" → stop {ns:,.2f}[{src}] 风险 {(close - ns) / atr:.2f}N"
+            # 卡片自带的量能闸: regime_transition.volume_leg 同一函数 ( 起
             # 相对口径, 裁决 R) — 报表与转移机永不分叉。收盘 streak 与量能闸是两个
             # 事实, 只报 ✅ 会把"差量能"的 gate 播成全过。
             vm = g.get("vol_min")
             if vm:
                 vok, vnote = volume_leg(bars, vm, tk)
                 if not vok:
-                    line += f" · ⚠️ {vnote} < {vm:g} 量能闸未过"
-            L.append(line)
+                    note += f" · ⚠️ {vnote} < {vm:g} 量能闸未过"
+            rows.append(_row(f"✅ {g['level']:g}", g["tag"], confirm, note))
         else:
-            L.append(f"  ⏳ {g['level']:g} {g['tag']} [{n}/{need}] {dist}")
-            L.extend(fastlane_lines(fl, g, need, streak, close))
+            # ⏳ 的两行展开 进同一格: 卡在哪一条 + 还剩什么路
+            extra = " · ".join(x.strip() for x in fastlane_lines(fl, g, need, streak, close))
+            rows.append(_row(f"⏳ {g['level']:g}", g["tag"], f"{n}/{need}",
+                             dist + (f" · {extra}" if extra else "")))
+    if rows:
+        L.extend(LADDER_TABLE_HEADER)
+        L.extend(rows)
 
     # 🔒 约束播报 = sizing.constraint_lines (canonical)。窗口态以本报表的快照日
     # (最后完成 bar) 为准, 与"截至 X 收盘"同框 —— 手搓渲染丢 from 的病  修。
     asof = str(bars[-1].get("time", ""))[:10]
     for ln in constraint_lines(read_constraints(agent), asof):
-        L.append("  " + ln)
+        L.append(ln)
     return L
 
 
@@ -464,7 +492,7 @@ def skhy_premium_line(market_dir: Path = MARKET_DIR) -> Optional[str]:
         if prem is None:
             return None
         gate = "未过 (>20% → 双闸 clamp)" if prem > 20 else "✅ 已压缩至阈内"
-        return f"  💱 ADR 溢价 {prem:+.1f}% ({str(last.get('date') or '')[:10]}) — premium gate {gate}"
+        return f"💱 ADR 溢价 {prem:+.1f}% ({str(last.get('date') or '')[:10]}) — premium gate {gate}"
     except (ValueError, IndexError):
         return None
 
@@ -533,8 +561,8 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
         head += "\n".join(sec) + "\n"
     parts = [head]
     if held_blocks:
-        parts.append("📌 持仓\n\n" + "\n\n".join(held_blocks))
-    parts.append("👀 Watchlist\n\n" + "\n\n".join(wl_blocks))
+        parts.append("## 📌 持仓\n\n" + "\n\n".join(held_blocks))
+    parts.append("## 👀 Watchlist\n\n" + "\n\n".join(wl_blocks))
     return "\n".join(parts)
 
 

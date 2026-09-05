@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 from quant.core.paths import add_openapi_path  # noqa: E402
 
 from quant.core import env  # noqa: F401  (.env → os.environ)
+from quant.core.quote_times import opend_quote_time
 
 import os
 import time
@@ -232,8 +233,14 @@ def get_quote(tickers: List[str]) -> Dict[str, dict]:
             chg = (price - prev) if price and prev else None
             pct = (chg / prev * 100) if chg is not None and prev else None
 
+            data_date = str(safe_get(row, 'data_date', default='') or '')
+            data_time = str(safe_get(row, 'data_time', default='') or '')
+            raw_time = data_time if len(data_time) >= 19 and data_time[4:5] == '-' else (data_date + ' ' + data_time).strip()
             results[ticker] = {
-                "quote_time": _now_iso(),
+                "quote_time": opend_quote_time(raw_time, market=code.split('.', 1)[0]),
+                "quote_time_raw": raw_time,
+                "quote_time_basis": "opend_data_date_time",
+                "quote_retrieved_at": _now_iso(),
                 "last_price": last,
                 "pre_price": pre,
                 "after_price": after,
@@ -289,7 +296,10 @@ def get_snapshot(tickers: List[str]) -> Dict[str, dict]:
             pct = (chg / prev * 100) if chg is not None and prev else None
 
             results[ticker] = {
-                "update_time": safe_get(row, 'update_time', default=''),
+                "update_time": opend_quote_time(str(safe_get(row, 'update_time', default='') or ''), market=code.split('.', 1)[0]),
+                "update_time_raw": safe_get(row, 'update_time', default=''),
+                "quote_time_basis": "opend_snapshot_update_time",
+                "quote_retrieved_at": _now_iso(),
                 "last_price": last,
                 "prev_close": prev,
                 "open": safe_float(safe_get(row, 'open_price'), default=None),

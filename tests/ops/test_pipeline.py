@@ -7,7 +7,17 @@ tasks/*.md 的 prose 里, 已经漂出四处分歧 (顺序错 / 漏 order_sync /
 import json
 from pathlib import Path
 
+import pytest
+
 from quant.ops import pipeline  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_pipeline_state(monkeypatch, tmp_path):
+    from quant.core import paths
+    monkeypatch.setattr(pipeline, "STATE_PATH", tmp_path / "heartbeat-state.json")
+    monkeypatch.setattr(paths, "AGENT_RUNS_DIR", tmp_path / "agents")
+    monkeypatch.setattr(pipeline, "scheduled_session_due", lambda *a: {"due": True, "reason": "synthetic_session"})
 
 
 def keys(mode):
@@ -72,10 +82,22 @@ def test_push_brief_alerts_pushes_only_when_alerts_exist(monkeypatch):
     assert sent[0].index("card") < sent[0].index("AAOI 🚨 STOP"), "卡片在前, alerts 在后"
 
 
+def test_push_brief_alerts_bolds_card_head_only(monkeypatch):
+    """ 全部富消息: 卡片头行加粗、alerts 标题加粗, 卡片正文逐字不动 (原文规矩)。"""
+    sent = []
+    monkeypatch.setattr(pipeline, "notify", lambda msg: sent.append(msg) or True)
+    card = "🔒 AAOI +3.2% @ 133.20 (opend)\n持仓 20 股 @ 120.00 | UPL +264.00\n止损 card 124.83"
+    pipeline.push_brief_alerts({"alerts": ["AAOI 🚨 STOP"], "fired_cards": [card]})
+    body = sent[0]
+    assert body.startswith("**🔒 AAOI +3.2% @ 133.20 (opend)**\n持仓 20 股 @ 120.00 | UPL +264.00\n止损 card 124.83")
+    assert "\n\n**— alerts —**\nAAOI 🚨 STOP" in body
+    assert pipeline._bold_head("**已粗**\nx") == "**已粗**\nx" and pipeline._bold_head("") == ""
+
+
 def test_postclose_is_lean_close_layer_only():
     """The close-dependent chain evaluates exits before applying transitions."""
     kp = keys(pipeline.POSTCLOSE)
-    assert kp == ["positions", "klines", "nav", "brief", "regime",
+    assert kp == ["positions", "klines", "nav", "brief", "regime", "agents",
                   "reminders", "today_group"]
     assert set(kp) <= set(keys(pipeline.BRIEFING))
 
@@ -173,30 +195,43 @@ def test_autopaint_runs_after_watchlist_steps_and_before_brief():
         assert planned.index("autopaint") < planned.index("brief"), mode
 
 
-def test_read_only_downgrades_state_writers_to_dry_run(monkeypatch):
-    """Every state writer in a read-only pipeline must become a dry run."""
+@pytest.mark.parametrize("mode", pipeline.ALL_MODES)
+def test_read_only_skips_every_unapproved_stage(monkeypatch, capsys, mode):
+    """Collectors, apply commands, effectors and future stages are denied by default."""
     seen = {}
 
     def fake_run_stage(s, extra=None, drop=None):
         seen[s.key] = list(extra or [])
         return {"key": s.key, "ok": True, "rc": 0, "secs": 0.0, "stdout": "", "stderr": ""}
 
-    monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
+    def forbidden(*args, **kwargs):
+        pytest.fail("cache preview attempted a live operation")
+
+    monkeypatch.setattr(pipeline, "opend_alive", forbidden)
+    monkeypatch.setattr(pipeline, "handle_opend_down", forbidden)
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", forbidden)
+    monkeypatch.setattr(pipeline, "stamp_heartbeat", forbidden)
+    monkeypatch.setattr(pipeline, "notify", forbidden)
+    extra_stage = pipeline.Stage("future_writer", ["future.py", "--apply"],
+                                 pipeline.ALL_MODES, "must not run")
+    monkeypatch.setattr(pipeline, "STAGES", [*pipeline.STAGES, extra_stage])
     monkeypatch.setattr(pipeline, "et_session_state", lambda: "pre")
     monkeypatch.setattr(pipeline, "run_stage", fake_run_stage)
-    pipeline.main(["--mode", "heartbeat", "--read-only", "--json"])
-
-    assert "--dry-run" in seen["reconcile"]
-    assert "--dry-run" in seen["lots"]
-    assert "--dry-run" in seen["autopaint"]
-    # 第四个 (): exit_score 写 scores.jsonl — 预览不落评分
-    assert "--dry-run" in seen["exit_score"]
+    assert pipeline.main(["--mode", mode, "--read-only", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert seen == {"brief": ["--read-only"]}
+    assert out["data_source"] == "existing_cache"
+    assert out["opend"] == "not_checked_read_only"
+    assert all(r.get("skipped") == "read_only" for k, r in out["stages"].items()
+               if k != "brief")
+    assert not pipeline.STATE_PATH.exists()
 
 
 def test_postclose_refuses_mid_session_and_alerts(monkeypatch):
-    """冬令时自检: postclose 在盘中被触发 = DST 换季 cron 没改。
-    kline 守卫只会让它静默 no-op —— 静默的 no-op 就是"这一步不存在",
-    必须变成会响的错误: TG 告警 + 中止 rc=3, 每天响到改为止。"""
+    """盘中自检 (;  改口径): postclose 只能在收盘后跑。due 门与时段
+    判断读同一份 XNYS 日历, 走到这里 = 两个时钟不一致或手动误跑 —— 不再是"冬令时 cron
+    没改" (多槽 cron 由日历放行, 不手改)。kline 守卫只会让它静默 no-op —— 静默的 no-op
+    就是"这一步不存在", 必须变成会响的错误: TG 告警 + 中止 rc=3, 每次响。"""
     sent, ran = [], []
     monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
     monkeypatch.setattr(pipeline, "et_session_state", lambda: "open")
@@ -205,7 +240,8 @@ def test_postclose_refuses_mid_session_and_alerts(monkeypatch):
                         lambda s, extra=None, drop=None: ran.append(s.key))
     rc = pipeline.main(["--mode", "postclose", "--json"])
     assert rc == 3 and ran == []
-    assert any("冬令时" in m for m in sent)
+    assert any("常规时段内" in m and "不要手改 cron" in m for m in sent)
+    assert not any("10 4" in m for m in sent), "旧的改 cron 指令不能再出现"
 
 
 def test_migrate_always_carries_apply():
@@ -231,7 +267,7 @@ def test_get_portfolio_always_pins_usd():
 
 # ── read-only 语义 ────────────────────────────────────────────────
 
-def test_read_only_strips_log_and_adds_read_only(monkeypatch):
+def test_read_only_report_has_no_entry_chain_or_logging(monkeypatch):
     calls = []
 
     def fake_run(argv, **kw):
@@ -248,9 +284,8 @@ def test_read_only_strips_log_and_adds_read_only(monkeypatch):
     pipeline.main(["--mode", "briefing", "--read-only", "--json"])
 
     brief = next(c for c in calls if "portfolio_brief.py" in " ".join(c))
-    entry = next(c for c in calls if "entry_guard.py" in " ".join(c))
     assert "--read-only" in brief
-    assert "--log" not in entry, "read-only 不该落 decisions.jsonl"
+    assert len(calls) == 1, "entry can fetch an option chain even without --log"
 
 
 def test_normal_run_keeps_log_and_no_read_only(monkeypatch):
@@ -293,7 +328,7 @@ def test_event_day_flag_only_reaches_entry_guard(monkeypatch):
     monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
     monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
     monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
-    pipeline.main(["--mode", "briefing", "--event-day", "--read-only", "--json"])
+    pipeline.main(["--mode", "briefing", "--event-day", "--json"])
     with_flag = [c for c in calls if "--event-day" in c]
     assert len(with_flag) == 1 and "entry_guard.py" in " ".join(with_flag[0])
 
@@ -320,7 +355,9 @@ def test_read_only_never_writes_infra_state(monkeypatch):
     monkeypatch.setattr(pipeline, "handle_opend_down",
                         lambda send: (_ for _ in ()).throw(
                             AssertionError("read-only 不该写 INFRA 冷却状态")))
-    assert pipeline.main(["--mode", "heartbeat", "--read-only", "--json"]) == 2
+    monkeypatch.setattr(pipeline, "run_stage", lambda s, extra=None: {
+        "key": s.key, "ok": True, "rc": 0, "secs": 0, "stdout": "", "stderr": ""})
+    assert pipeline.main(["--mode", "heartbeat", "--read-only", "--json"]) == 0
 
 
 def test_fatal_stage_aborts_the_rest(monkeypatch):
@@ -337,7 +374,7 @@ def test_fatal_stage_aborts_the_rest(monkeypatch):
     monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
     monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
     monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
-    rc = pipeline.main(["--mode", "briefing", "--read-only", "--json"])
+    rc = pipeline.main(["--mode", "briefing", "--json"])
     assert rc == 1
     assert not any("portfolio_brief.py" in " ".join(c) for c in seen), \
         "broker 刷新失败后还跑 brief = 拿旧报价当今天的"
@@ -411,6 +448,25 @@ def test_session_open_only_when_open():
     assert not tu.et_session_open(datetime(2026, 7, 28, 16, 30, tzinfo=tu.ET))
 
 
+def test_half_day_postclose_uses_actual_exchange_close(monkeypatch, capsys):
+    from datetime import datetime
+    from quant.core.timeutil import et_session_state
+
+    calls = []
+    monkeypatch.setattr(pipeline, "opend_alive", lambda: True)
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: et_session_state(
+        datetime.fromisoformat("2026-11-27T13:10:00-05:00")))
+    monkeypatch.setattr(pipeline, "run_stage", lambda stage, extra: (
+        calls.append(stage.key) or {"key": stage.key, "ok": True, "data": {}}))
+    monkeypatch.setattr(pipeline, "notify", lambda *a, **k: pytest.fail("unexpected notification"))
+    assert pipeline.main(["--mode", "postclose", "--json", "--no-notify"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["et_session"] == "closed"
+    assert result["aborted"] is None
+    assert {"klines", "nav", "regime", "agents"} <= set(calls)
+
+
 def test_kline_cache_drops_todays_unfinished_bar(monkeypatch, tmp_path):
     """缓存的契约是"已完成的日线"。盘中当日那根必须丢。"""
     from quant.data import kline_cache as kc
@@ -453,7 +509,8 @@ def test_eod_ledgers_skipped_while_session_open(monkeypatch):
     monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
     monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
     monkeypatch.setattr(pipeline, "et_session_state", lambda: "open")
-    pipeline.main(["--mode", "briefing", "--read-only", "--json"])
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+    pipeline.main(["--mode", "briefing", "--json"])
     joined = " ".join(calls)
     for banned in ("iv_logger.py", "nav_snapshot.py", "skhy_premium.py"):
         assert banned not in joined, f"盘中不该跑 {banned}"
@@ -474,7 +531,8 @@ def test_eod_ledgers_run_premarket(monkeypatch):
     monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
     monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
     monkeypatch.setattr(pipeline, "et_session_state", lambda: "pre")  # 定时任务时点
-    pipeline.main(["--mode", "briefing", "--read-only", "--json"])
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+    pipeline.main(["--mode", "briefing", "--json"])
     joined = " ".join(calls)
     for needed in ("iv_logger.py", "nav_snapshot.py", "skhy_premium.py"):
         assert needed in joined, f"盘前必须跑 {needed}"
@@ -581,3 +639,75 @@ def test_exit_score_after_reconcile_before_watchlist_sync():
         assert k.index("exit_score") > k.index("reconcile"), mode
         assert k.index("exit_score") < k.index("watchlist_sync"), mode
     assert "exit_score" not in keys(pipeline.POSTCLOSE)
+
+
+def test_cashflow_ledger_syncs_daily_in_briefing_only():
+    """出入金账本: briefing 每日回看 7 日幂等即可;
+    heartbeat 盘中不需要, postclose 保持精简收盘链。它不是 brief 的输入 (nav_report 读时算)。"""
+    assert "cashflows" in keys(pipeline.BRIEFING)
+    assert "cashflows" not in keys(pipeline.HEARTBEAT)
+    assert "cashflows" not in keys(pipeline.POSTCLOSE)
+    s = next(x for x in pipeline.STAGES if x.key == "cashflows")
+    assert not s.eod_only and s.parse_json
+
+
+# ── agents 阶段的 partial 口径 ( 交接核对) ──────────────────
+
+def test_classify_agents_stage_only_reclassifies_partial():
+    ok = {"key": "agents", "ok": True, "rc": 0, "data": {"status": "completed"}}
+    assert pipeline.classify_agents_stage(dict(ok)) == ok
+    failed = {"key": "agents", "ok": False, "rc": 1, "data": {"status": "failed"}}
+    assert pipeline.classify_agents_stage(dict(failed))["ok"] is False
+    unparsed = {"key": "agents", "ok": False, "rc": 1, "json_parse_failed": True}
+    assert pipeline.classify_agents_stage(dict(unparsed))["ok"] is False
+    partial = pipeline.classify_agents_stage({"key": "agents", "ok": False, "rc": 1, "data": {
+        "status": "partial", "reports": {}, "cards": [], "pending_cards": [1, 2, 3]}})
+    assert partial["ok"] is True
+    assert partial["partial"] == {"failed_roles": [], "cards_not_applied": [], "pending_cards": 3}
+
+
+def _agents_receipt_runner(receipt):
+    def fake_run(argv, **kw):
+        agents = "agent_jobs.py" in " ".join(argv)
+
+        class R:
+            returncode = 1 if agents else 0
+            stdout = json.dumps(receipt) if agents else ""
+            stderr = ""
+        return R()
+    return fake_run
+
+
+def test_agents_partial_receipt_is_todo_not_a_failed_stage(monkeypatch, capsys):
+    """agent_jobs 对 partial 退出码 1 (领域任务已结束, 但有缺失角色 / 未落卡 / 超出每轮 2 张
+    的待办)。这不是"这一步挂了": 简报按 reports / cards / pending_cards 列待办。所以 partial
+    进顶层 `partial` 不进 `failed`, 待办数据原样保留; 真 failed 仍进 `failed`。"""
+    receipt = {"status": "partial", "job_kind": "briefing",
+               "reports": {"macro": {"status": "succeeded"}, "risk": {"status": "failed"}},
+               "cards": [{"ticker": "AAA", "status": "applied"},
+                         {"ticker": "BBB", "status": "needs_review"}],
+               "pending_cards": [{"ticker": "CCC", "bucket": "watchlist"}]}
+    monkeypatch.setattr(pipeline.subprocess, "run", _agents_receipt_runner(receipt))
+    monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: "closed")
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+    rc = pipeline.main(["--mode", "briefing", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["failed"] == []
+    assert out["stages"]["agents"]["ok"] is True
+    assert out["partial"] == {"agents": {"failed_roles": ["risk"], "cards_not_applied": ["BBB"],
+                                         "pending_cards": 1}}
+    assert out["stages"]["agents"]["data"] == receipt
+
+
+def test_agents_failed_receipt_stays_failed(monkeypatch, capsys):
+    monkeypatch.setattr(pipeline.subprocess, "run",
+                        _agents_receipt_runner({"status": "failed", "job_kind": "postclose",
+                                                "error": "RunnerError: unavailable"}))
+    monkeypatch.setattr(pipeline, "opend_alive", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: "closed")
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+    rc = pipeline.main(["--mode", "postclose", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["failed"] == ["agents"] and out["partial"] == {}
+    assert rc == 0, "agents 不是 fatal 阶段: 其余步骤照跑, 退出码只看 aborted"

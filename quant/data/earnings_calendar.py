@@ -46,7 +46,7 @@ from quant.core import env  # noqa: F401  (.env → os.environ)
 from quant.core import technical  # noqa: E402
 from quant.core.earnings import (# noqa: E402
     MIN_PRIOR, POOL_X_EARN, SHRINK_N0, shrink_ratio)
-from quant.core.holdings import is_traded  # noqa: E402
+from quant.core.holdings import is_candidate, is_traded  # noqa: E402  (候选/参考票判据单一真源)
 from quant.core.io_json import atomic_write_json, iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
@@ -137,7 +137,10 @@ def card_tickers() -> List[str]:
         # watchlist 腿静默清空, 日历只剩 positions, entry 侧 T+0 缩仓与财报提示
         # 全部失效 (COHR  print 前夜 用户 抓漏)。未持仓 + watching 即在场;
         # Today 组成员 ⊆ 持仓∪watchlist, 覆盖两文件即覆盖 Today。
-        watching = (not live) and str(body.get("status")) == "watching"
+        # 候选判据 = holdings.is_candidate (status=watching 且 moomoo_listed≠false): 移出自选分组
+        # 只翻 moomoo_listed 不改 status, 只看 status 会把墓碑卡的财报排进「下周财报」并白吃
+        # API 配额 ( 周复盘幽灵标的案, 判别式收拢第 N 处)
+        watching = (not live) and is_candidate(body)
         if live or watching:
             out.add(base)
     return sorted(out)

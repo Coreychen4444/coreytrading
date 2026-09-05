@@ -50,7 +50,9 @@ def brief(tmp_path, monkeypatch):
         path = tmp_path / "positions.json"
         path.write_text(json.dumps({"tickers": tickers}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", path)
-        # 隔离 watchlist —— wl_zone_touch (入场侧补盲) 读真 watchlist
+        # 预算/敞口使用同一份合成账本，不能回读 book 的默认私有路径。
+        monkeypatch.setattr(pb.book, "POSITIONS_PATH", path)
+        # 隔离 watchlist —— wl_zone_touch ( 入场侧补盲) 读真 watchlist
         # 的报价快照, 以前碰巧无候选在带内;  COHR -11.3% 砸进 z2 后
         # 泄漏必现 (与下面 exit_guard 同一类洞: 真数据一动, 单测跟着市场红绿)
         wl = tmp_path / "watchlist.json"
@@ -76,6 +78,7 @@ def brief(tmp_path, monkeypatch):
         nav = tmp_path / "nav_history.jsonl"
         nav.write_text("", encoding="utf-8")
         monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+        monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
 
         kdir = tmp_path / "klines"
         kdir.mkdir(exist_ok=True)
@@ -83,6 +86,7 @@ def brief(tmp_path, monkeypatch):
             (kdir / f"{ticker}.jsonl").write_text(
                 "\n".join(json.dumps(b) for b in bars), encoding="utf-8")
         monkeypatch.setattr(pb, "KLINE_CACHE_DIR", kdir)
+        monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", kdir)
 
         rows, col = pb.load_rows_from_state(path)
         return pb.build_brief(rows, col, mutate_state=False)
@@ -154,7 +158,7 @@ def test_option_keeps_the_fixed_band(brief):
 # ── dedup key 分方向 ──────────────────────────────────────────
 
 def test_reversal_alerts_again_instead_of_being_deduped(brief):
-    """SPCX 2026-08-04 的形状: 白天涨停式上涨 latch 住, 当晚财报砸下来。"""
+    """SPCX  的形状: 白天涨停式上涨 latch 住, 当晚财报砸下来。"""
     now = int(time.time())
     up = pb.alert_key("SPCX", pb.move_trigger_type(+9.43))
     state = {"alerts": {up: {"active": True, "lastAlertTs": now}}}
@@ -209,7 +213,7 @@ def test_index_risk_silent_within_threshold(brief):
 
 
 def test_index_risk_reaches_the_alert_list(brief):
-    """2026-08-05 之前这条检查在持仓循环里, 而 QQQ 不是持仓 —— 规则文档写了
+    """ 之前这条检查在持仓循环里, 而 QQQ 不是持仓 —— 规则文档写了
     整整半年的"大盘补充", 代码里没有任何路径能触发它。"""
     out = brief({"MSFT": _position(price=100.0, change_pct=0.0)},
                 {"MSFT": _bars(100.0, 0.05), "SPY": _daily([757.0, 730.0])})

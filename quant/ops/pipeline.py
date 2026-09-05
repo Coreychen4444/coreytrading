@@ -48,11 +48,13 @@ import os
 import socket
 import subprocess
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from quant.core.io_json import atomic_write_json  # noqa: E402
 from quant.core.paths import HEARTBEAT_STATE_PATH, ROOT  # noqa: E402
 from quant.core.timeutil import et_session_state  # noqa: E402
+from quant.core.market_sessions import scheduled_session_due
 
 PY = sys.executable                       # 用当前解释器 (应为 .venv/moomoo/bin/python3)
 STATE_PATH = HEARTBEAT_STATE_PATH
@@ -74,13 +76,14 @@ class Stage:
 
     def __init__(self, key: str, argv: List[str], modes, desc: str, *,
                  fatal: bool = False, parse_json: bool = False, needs_opend: bool = True,
-                 eod_only: bool = False):
+                 eod_only: bool = False, timeout_s: int | None = None):
         self.key, self.argv, self.modes, self.desc = key, argv, tuple(modes), desc
         self.fatal, self.parse_json, self.needs_opend = fatal, parse_json, needs_opend
         # eod_only: 拉**实时**读数、每交易日只写一行的账本 (IV / NAV / ADR 溢价)。
         # 盘中跑 = 把某个盘中时刻的读数当成"这一天的记录", 而 IV percentile 之类
         # 靠的是同一时点的可比序列。日线类不用标 —— kline_cache 自己会丢当日未完成 bar。
         self.eod_only = eod_only
+        self.timeout_s = timeout_s
 
 
 # ── 唯一的正确顺序 ────────────────────────────────────────────────
@@ -145,6 +148,12 @@ STAGES: List[Stage] = [
           "转移后重画的备注金额用当日收盘账户; 此前只在盘前跑 = cap 数学落后一个交易日, "
           "且 briefing 里 reminders 排在 nav 前 = 画线用旧 NAV、brief 用新 NAV 两处打架",
           parse_json=True, eod_only=True),
+    Stage("cashflows", ["quant/data/cash_flow_sync.py", "--json"], (BRIEFING,),
+          "券商资金流水 → events/cash_flows.jsonl: 只收银证转账 (出入金 = 外部流), 回看 7 日按 "
+          "clearing_date 逐日查, key 去重幂等。出入金不是盈亏 —— 周复盘/绩效的 NAV 变动必须剔它 "
+          "(口径 core/nav, 出口 report/nav_report)。"
+          "不 eod_only: 按清算日查, 盘中跑不会把盘中时刻当成一天; 只进 briefing = 每日一次够用",
+          parse_json=True),
     Stage("iv", ["quant/data/iv_logger.py"], (BRIEFING,), "每日 ATM IV 快照 (幂等)",
           eod_only=True),
     Stage("earnings", ["quant/data/earnings_calendar.py", "--json"], (BRIEFING,),
@@ -164,8 +173,20 @@ STAGES: List[Stage] = [
           fatal=True, parse_json=True, needs_opend=False),
     Stage("regime", ["quant/decision/regime_transition.py", "--apply", "--json"],
           (BRIEFING, POSTCLOSE),
-          "apply close-confirmed regime transitions after exit evaluation",
-          parse_json=True),
+          "gate 触发即机械转移卡片 regime — 收盘依赖; 须在 brief 之后 (退出侧先于"
+          "转移 2026-08-20)、效果层之前 (画线/白名单渲染转移后世界)", parse_json=True),
+    Stage("agents", ["quant/ops/agent_jobs.py", "run", "--json", "--apply"],
+          (BRIEFING, POSTCLOSE),
+          "领域工作流和受控复核写卡；退出评估与机械转移之后、提醒线和入场计划之前。",
+          parse_json=True, needs_opend=False, timeout_s=10800),
+    # ↓ 效果层: 只写外部副作用 (moomoo 画线/分组), brief 不消费它们的任何输出。
+    #    定序: 告警先出门 —— 画线/白名单的 OpenD 调用一旦变慢或
+    #   挂住 (STAGE_TIMEOUT 上限), 排在 brief 之前就是在堵告警; 排在之后, 告警
+    #   已在 TG 上。附带收益: reminders 读的 exit_guards.json 从"上一轮 brief
+    #   (≤6h 前)"变成**同轮刚算的** ——  裁决接受的 ≤6h 画线滞后消除
+    #   (postclose  起同享: 此前它画 trail 用的是 ≤10h 前旧收盘算的值)。
+    #   已知代价: brief (fatal) 失败的那一轮画线/白名单不刷, 停留 ≤6h 到下一轮
+    #   —— brief 失败是响的 (fatal + 任务层可见), 可接受。
     Stage("reminders", ["quant/sync/price_reminder_sync.py", "--json"], ALL_MODES,
           "reconcile owned broker reminders from the post-transition card and the "
           "same-run exit stack; manual reminders remain untouched",
@@ -177,6 +198,11 @@ STAGES: List[Stage] = [
           "入场执行计划 (PLAN 变动才落 decisions.jsonl); 输出为**渲染文本**, 原样进简报",
           needs_opend=False),
 ]
+
+# Cache-only preview is an allowlist: new collectors/effectors are skipped until
+# their complete call graph has an explicitly read-only contract. In particular,
+# entry_guard without --log can still fetch an option chain through option_plan.
+READ_ONLY_STAGE_ARGS = {"brief": ["--read-only"]}
 
 
 # ── OpenD 探活 ────────────────────────────────────────────────────
@@ -271,10 +297,20 @@ def push_brief_alerts(data: Dict):
     cards = data.get("fired_cards") or []
     if not alerts and not cards:
         return "no_alerts"          # 与"推送失败"区分 — False 才需要 agent 兜底
-    blocks = list(cards)
+    #  tg_notify CLI 默认富消息, 这里只给
+    # 每张卡的头行加粗 (格式不是改写 —— 卡片正文一个字不动,  原文规矩不变)。
+    blocks = [_bold_head(str(c)) for c in cards]
     if alerts:
-        blocks.append("— alerts —\n" + "\n".join(str(x) for x in alerts))
+        blocks.append("**— alerts —**\n" + "\n".join(str(x) for x in alerts))
     return notify("\n\n".join(blocks))
+
+
+def _bold_head(card: str) -> str:
+    """卡片第一行 → `**…**` (富消息里成粗体头; 老路回落时 `*…*` 同样是粗体)。"""
+    first, sep, rest = card.partition("\n")
+    if not first.strip() or first.startswith("**"):
+        return card
+    return f"**{first.strip()}**{sep}{rest}"
 
 
 def stamp_heartbeat() -> None:
@@ -295,20 +331,44 @@ def run_stage(s: Stage, extra: Optional[List[str]] = None,
     t0 = time.time()
     try:
         p = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True,
-                           timeout=STAGE_TIMEOUT_S)
+                           timeout=s.timeout_s or STAGE_TIMEOUT_S)
         rc, out, err = p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        rc, out, err = -1, "", f"timeout >{STAGE_TIMEOUT_S}s"
+        rc, out, err = -1, "", f"timeout >{s.timeout_s or STAGE_TIMEOUT_S}s"
     except Exception as e:                                    # noqa: BLE001
         rc, out, err = -1, "", f"{type(e).__name__}: {e}"
     res = {"key": s.key, "ok": rc == 0, "rc": rc, "secs": round(time.time() - t0, 1),
            "stdout": out, "stderr": err[-2000:] if err else ""}
-    if s.parse_json and rc == 0 and out.strip():
+    if s.parse_json and out.strip():
         try:
             res["data"] = json.loads(out)
         except json.JSONDecodeError:
             res["json_parse_failed"] = True
     return res
+
+
+def classify_agents_stage(r: Dict) -> Dict:
+    """agents 阶段的退出码 1 盖住三种回执: failed / partial / needs_review (agent_jobs 语义)。
+
+    partial = 领域任务**已结束**, 但有缺失角色、未落卡或超出每轮 2 张的待办 —— 这不是
+    "这一步挂了" (简报按 reports / cards / pending_cards 逐项列待办), 所以不进 `failed`,
+    改记 `partial`。failed / 回执解析不了 仍是失败。待办数据仍在 r["data"] 里原样保留。
+    """
+    data = r.get("data")
+    if r["ok"] or not isinstance(data, dict) or data.get("status") != "partial":
+        return r
+    reports = data.get("reports") if isinstance(data.get("reports"), dict) else {}
+    cards = data.get("cards") if isinstance(data.get("cards"), list) else []
+    r["ok"] = True
+    r["partial"] = {
+        "failed_roles": sorted(role for role, rep in reports.items()
+                               if not isinstance(rep, dict) or rep.get("status") != "succeeded"),
+        "cards_not_applied": [str(c.get("ticker")) for c in cards
+                              if isinstance(c, dict) and c.get("status") != "applied"],
+        "pending_cards": len(data.get("pending_cards") or []),
+    }
+    r["note"] = "领域任务部分完成 (partial): 缺失角色 / 未落卡 / 待办按回执列出, 不是该步挂了"
+    return r
 
 
 def plan(mode: str) -> List[Stage]:
@@ -326,9 +386,9 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--no-notify", action="store_true",
                     help="不发 INFRA Telegram (人工调试用)")
     ap.add_argument("--read-only", action="store_true",
-                    help="人工 / session 内预览: brief 不消耗告警冷却、entry 不落 "
-                         "decisions.jsonl、不写 dead-man 与 INFRA 状态。"
-                         "**定时任务绝不能带这个**—— 带了等于监控没跑")
+                    help="缓存预览: 仅运行明确只读的报告，其余采集、状态写入、后台 agent、"
+                         "外部同步全部跳过；不连接 OpenD、不发通知、不写冷却或 dead-man。"
+                         "**定时任务绝不能带这个** —— 带了等于监控没跑")
     a = ap.parse_args(argv)
 
     stages = plan(a.mode)
@@ -343,7 +403,18 @@ def main(argv: List[str]) -> int:
     result: Dict = {"mode": a.mode, "opend": None, "stages": {}, "aborted": None,
                     "read_only": a.read_only}
 
-    if not opend_alive():
+    if not a.read_only:
+        due = scheduled_session_due(a.mode, datetime.now(timezone.utc))
+        result["calendar"] = due
+        if not due["due"]:
+            bad_calendar = due["reason"].startswith("calendar_unavailable")
+            result.update(status="failed" if bad_calendar else "skipped", failed=[])
+            if bad_calendar and send:
+                notify("⚠️ 交易日历不可用，本轮任务未执行：" + due["reason"])
+            print(json.dumps(result, ensure_ascii=False))
+            return 2 if bad_calendar else 0
+
+    if not a.read_only and not opend_alive():
         result["opend"] = "down"
         result["infra_alert"] = ({"skipped": "read_only"} if a.read_only
                                  else handle_opend_down(send))
@@ -356,18 +427,24 @@ def main(argv: List[str]) -> int:
         return 2
     session = et_session_state()
     result["et_session"] = session
-    result["opend"] = "up"
+    result["opend"] = "not_checked_read_only" if a.read_only else "up"
+    if a.read_only:
+        result["data_source"] = "existing_cache"
+        result["note"] = "只读缓存预览；报价和账户未刷新，不生成新的当日入场计划。"
     result["opend_recovered"] = False if a.read_only else handle_opend_recovered(send)
 
-    if a.mode == POSTCLOSE and session == "open":
-        # 冬令时自检 (用户 批): postclose 在盘中被触发 = DST 换季没改
-        # cron (`10 4`→`10 5`)。kline 守卫只会让本轮静默 no-op —— 静默的 no-op
-        # 就是"这一步不存在", 必须变成会响的错误。无冷却, 每天响到改为止。
-        msg = ("⚠️ postclose 在美股盘中被触发 — 冬令时 cron 未改? 注册表 "
-               "postclose-transition `10 4`→`10 5`, gate-ladder-report `20 4`→`20 5`。"
+    if a.mode == POSTCLOSE and session == "open" and not a.read_only:
+        # 盘中自检: postclose 只能在收盘后跑。
+        # due 门 (scheduled_session_due) 与这里的时段判断读同一份 XNYS 日历, 半日市与
+        # DST 都由日历裁定, 不再靠手改 cron —— 走到这里 = 两个时钟不一致或手动误跑。
+        # kline 守卫只会让本轮静默 no-op —— 静默的 no-op 就是"这一步不存在", 必须变成
+        # 会响的错误。无冷却, 每次响。
+        msg = ("⚠️ postclose 在美股常规时段内被触发 — 日历 due 门与时段判断不一致, 或手动误跑。"
+               "多槽 cron 由 `agent_jobs.py due --kind postclose` 放行, 不要手改 cron; "
+               "查 `quant/core/market_sessions.py` 日历与本机时钟。"
                "本轮已中止, 今晚转移由 18:30 briefing 兜底。")
         result["aborted"] = "postclose_in_session"
-        result["dst_alert"] = notify(msg) if send else "skipped"
+        result["in_session_alert"] = notify(msg) if send else "skipped"
         if a.json:
             print(json.dumps(result, ensure_ascii=False))
         else:
@@ -375,6 +452,11 @@ def main(argv: List[str]) -> int:
         return 3
 
     for s in stages:
+        if a.read_only and s.key not in READ_ONLY_STAGE_ARGS:
+            result["stages"][s.key] = {
+                "key": s.key, "ok": True, "skipped": "read_only",
+                "note": "缓存预览跳过：此步骤未获只读执行资格"}
+            continue
         if s.eod_only and session == "open":
             result["stages"][s.key] = {
                 "key": s.key, "ok": True, "skipped": "et_session_open",
@@ -384,13 +466,13 @@ def main(argv: List[str]) -> int:
         extra: List[str] = []
         if s.key == "entry" and a.event_day:
             extra.append("--event-day")
-        if a.read_only and s.key == "brief":
-            extra.append("--read-only")          # 不消耗真 heartbeat 的告警窗口
-        if a.read_only and s.key in ("reconcile", "exit_score", "lots", "autopaint"):
-            # A preview must not mutate trading state.
-            # Autopaint launches a detached writer, so preview mode only reports targets.
-            extra.append("--dry-run")
-        r = run_stage(s, extra, drop=["--log"] if (a.read_only and s.key == "entry") else None)
+        if s.key == "agents":
+            extra.extend(["--kind", a.mode])
+        if a.read_only:
+            extra.extend(READ_ONLY_STAGE_ARGS[s.key])
+        r = run_stage(s, extra)
+        if s.key == "agents":
+            r = classify_agents_stage(r)
         result["stages"][s.key] = r
         if not r["ok"] and s.fatal:
             result["aborted"] = f"fatal_stage:{s.key}"
@@ -402,6 +484,20 @@ def main(argv: List[str]) -> int:
 
     ok = result["aborted"] is None
     result["failed"] = [k for k, v in result["stages"].items() if not v["ok"]]
+    result["partial"] = {k: v["partial"] for k, v in result["stages"].items() if v.get("partial")}
+    if not a.read_only:
+        # Health has its own durable outbox; failed delivery is retried next run.
+        from quant.ops.agent_health import acknowledge_events, update_health
+        from quant.core.paths import AGENT_RUNS_DIR
+        health = update_health(AGENT_RUNS_DIR)
+        result["agent_health"] = health
+        pending = health.get("pending_events", [])
+        if pending and send:
+            lines = ["⚠️ 领域 Agent 运行状态"]
+            for event in pending:
+                lines.append(json.dumps(event, ensure_ascii=False))
+            if notify("\n".join(lines)):
+                acknowledge_events(AGENT_RUNS_DIR, [e["event_id"] for e in pending])
     # dead-man 只在 heartbeat 模式、且没有 fatal 中止时落点
     if a.mode == HEARTBEAT and ok and not a.read_only:
         stamp_heartbeat()
@@ -410,6 +506,8 @@ def main(argv: List[str]) -> int:
     if a.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
+        if a.read_only:
+            print(result["note"])
         for s in stages:
             r = result["stages"].get(s.key)
             if not r:
@@ -420,6 +518,8 @@ def main(argv: List[str]) -> int:
                 continue
             print(f"  {'✅' if r['ok'] else '❌'} {s.key:<18} {r['secs']:>5.1f}s"
                   + ("" if r["ok"] else f"  rc={r['rc']} {r['stderr'].splitlines()[-1:] }"))
+        if result["partial"]:
+            print(f"\n⚠️ 部分完成: {', '.join(result['partial'])} — 待办按回执列出, 不算挂")
         if result["aborted"]:
             print(f"\n⛔ 中止: {result['aborted']}")
         elif result["failed"]:

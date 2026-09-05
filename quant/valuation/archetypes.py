@@ -20,6 +20,11 @@
   ⚠️ 雷达自动的新闻→驱动走 `ai_news/valuation/overlays.jsonl`, 不走本文件。
 
 🚨 零授权效力: 本层不被 sizing/entry_guard/exit_guard import, 不写 positions/watchlist。
+
+CLI (画卡时一并做; 缺了画卡脚本写盘后 ⚠️ +
+brief `INFRA:card_missing_archetype` 点名):
+    python3 quant/valuation/archetypes.py                                   # 每票原型
+    python3 quant/valuation/archetypes.py set TICKER --archetype platform --rationale "..." [--override target_margin=0.15]
 """
 from __future__ import annotations
 
@@ -28,10 +33,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 quant/<层>/<模块>.py` 时让 `quant.*` 可 import
 
+import argparse
 import copy
 import json
 
-from quant.core.io_json import read_json  # noqa: E402
+from quant.core.io_json import atomic_write_json, read_json  # noqa: E402
 from quant.core.paths import VALUATION_INPUTS_PATH  # noqa: E402
 
 # ── 原型缺省 ────────────────────────────────────────────────────────
@@ -226,7 +232,66 @@ def resolve(ticker: str, inputs: dict) -> dict:
     }
 
 
+def _parse_override(kv: str):
+    """`key=value` → (key, 值); 值按 JSON 解析 (0.15 / true / "trend" / {"bear":..})，解析不了当字符串。"""
+    if "=" not in kv:
+        raise ValueError(f"--override 要写 key=value: {kv!r}")
+    k, v = kv.split("=", 1)
+    try:
+        return k.strip(), json.loads(v)
+    except json.JSONDecodeError:
+        return k.strip(), v.strip()
+
+
+def set_entry(ticker: str, archetype: str, rationale: str, *, overrides: dict | None = None,
+              notes: str | None = None, path: Path | None = None) -> dict:
+    """写/改一票的原型归属 (画卡一并做)。
+
+    只动这一票: 已有 overrides 与 news_overlay **保留** (overrides 按键合并, 传了才覆盖);
+    整份先过 validate_inputs 再原子写盘 —— 写错原型名 / 错键名当场拒绝, 不落盘。
+    → 写回的条目。"""
+    p = Path(path or VALUATION_INPUTS_PATH)
+    doc = load_inputs(p)
+    tk = ticker.upper()
+    prev = dict((doc.get("tickers") or {}).get(tk) or {})
+    entry: dict = {"archetype": archetype, "rationale": rationale}
+    merged = {**(prev.get("overrides") or {}), **(overrides or {})}
+    if merged:
+        entry["overrides"] = merged
+    if prev.get("news_overlay"):
+        entry["news_overlay"] = prev["news_overlay"]
+    if notes is not None:
+        entry["notes"] = notes
+    elif prev.get("notes"):
+        entry["notes"] = prev["notes"]
+    _validate_ticker_entry(tk, entry)
+    doc.setdefault("tickers", {})[tk] = entry
+    doc["tickers"] = dict(sorted(doc["tickers"].items()))
+    validate_inputs(doc)
+    atomic_write_json(p, doc)
+    return entry
+
+
 def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="估值层人工区: 原型归属 (零授权效力)")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("list", help="每票原型 (缺省)")
+    sp = sub.add_parser("set", help="写/改一票的原型 (画卡一并做; 只动这一票, 已有 overrides/news_overlay 保留)")
+    sp.add_argument("ticker")
+    sp.add_argument("--archetype", required=True, choices=sorted(ARCHETYPES))
+    sp.add_argument("--rationale", required=True, help="为什么归这类 (商业模式一句话, 判断要留痕)")
+    sp.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
+                    help=f"覆盖值 (可多次); 只认 {sorted(OVERRIDE_KEYS)}")
+    sp.add_argument("--notes")
+    sp.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    if a.cmd == "set":
+        ov = dict(_parse_override(kv) for kv in a.override)
+        entry = set_entry(a.ticker, a.archetype, a.rationale, overrides=ov or None, notes=a.notes)
+        print(json.dumps({a.ticker.upper(): entry}, ensure_ascii=False, indent=2) if a.json
+              else f"[archetypes] {a.ticker.upper()} → {a.archetype} ({ARCHETYPES[a.archetype]['label']})"
+                   + (f" overrides={entry['overrides']}" if entry.get("overrides") else ""))
+        return 0
     doc = load_inputs()
     print(json.dumps({t: e["archetype"] for t, e in doc["tickers"].items()}, ensure_ascii=False, indent=2))
     return 0

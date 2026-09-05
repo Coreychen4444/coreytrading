@@ -122,7 +122,7 @@ def test_power_room_subtracts_todays_buys(tmp_path, monkeypatch):
 
 def test_power_room_flags_leverage_and_ignores_broken_cash_field(tmp_path, monkeypatch):
     """power 是券商口径购买力不是现金: 一旦带杠杆这条臂会自动变宽, 必须置位报出来。
-    `cash` 字段不可用 (2026-08-11 读 0.0 / 历史出现负数), 这里钉的是它不进计算。"""
+    `cash` 字段不可用 ( 读 0.0 / 历史出现负数), 这里钉的是它不进计算。"""
     _write_nav(tmp_path, monkeypatch, _nav_row(power=34000.0, cash=-1223.0))
     lev = book.power_room("2026-08-11", events_dir=tmp_path)
     assert lev["leveraged"] is True
@@ -135,3 +135,25 @@ def test_power_room_flags_leverage_and_ignores_broken_cash_field(tmp_path, monke
 def test_power_room_missing_snapshot_is_unknown_not_zero(tmp_path, monkeypatch):
     _write_nav(tmp_path, monkeypatch, _nav_row(power=None))
     assert book.power_room("2026-08-11", events_dir=tmp_path)["room"] is None
+
+
+def test_power_room_frozen_inputs_match_disk_calculator(tmp_path, monkeypatch):
+    account = _nav_row()
+    events = [{"timestamp": "2026-08-11T10:00:00-04:00", "event_type": "fill", "side": "BUY",
+               "ticker": "SYN270115C100000", "qty": 2, "price": 3.0},
+              {"timestamp": "2026-08-11T11:00:00-04:00", "event_type": "fill", "side": "SELL",
+               "ticker": "SYN", "qty": 4, "price": 100.0}]
+    _write_nav(tmp_path, monkeypatch, account)
+    directory = tmp_path / "2026-08"
+    directory.mkdir()
+    (directory / "trades.jsonl").write_text("\n".join(json.dumps(e) for e in events))
+    expected = book.power_room("2026-08-11", events_dir=tmp_path)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("frozen power calculator read disk defaults")
+
+    monkeypatch.setattr(book, "latest_account", forbidden)
+    monkeypatch.setattr(book, "iter_events", forbidden)
+    assert book.power_room("2026-08-11", account=account, events=events) == expected
+    assert expected["spent_today"] == 600
+    assert book.power_room("2026-08-11", account={}, events=[])["room"] is None

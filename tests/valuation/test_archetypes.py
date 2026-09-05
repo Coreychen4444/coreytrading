@@ -24,15 +24,10 @@ def test_every_archetype_declares_every_parameter():
                 assert a["target_margin"] is not None
 
 
-def test_manual_region_validates_and_every_ticker_has_rationale():
-    """人工区每条都要过校验并写明归类理由。
-
-    私有工作区存在时钉的是真文件; 公开仓里没有 runtime 文件, 钉的是同 schema 的
-    合成样例 —— 两种情况下这条不变量都在跑, 不需要跳过。
-    """
-    path = VALUATION_INPUTS_PATH if VALUATION_INPUTS_PATH.exists() else EXAMPLE_INPUTS_PATH
-    doc = A.load_inputs(path)
-    assert doc["tickers"], f"人工区不该是空的: {path}"
+@pytest.mark.live_data
+def test_live_inputs_validate_and_every_ticker_has_rationale():
+    doc = A.load_inputs(VALUATION_INPUTS_PATH)
+    assert doc["tickers"], "人工区不该是空的"
     for t, e in doc["tickers"].items():
         assert e["archetype"] in A.ARCHETYPES and e["rationale"].strip()
 
@@ -71,3 +66,29 @@ def test_resolve_merges_defaults_overrides_overlay_with_provenance(tmp_path):
     assert A.ARCHETYPES["semi_cyclical"]["horizon_years"] == 10, "resolve 不许改动原型表本身"
     with pytest.raises(KeyError):
         A.resolve("ZZZ", doc)
+
+
+def test_set_cli_writes_validates_and_preserves_existing_fields(tmp_path, monkeypatch, capsys):
+    """归原型是画卡的一部分: 一条命令写人工区, 只动这一票, 错原型名/错键当场拒绝。"""
+    p = tmp_path / "inputs.json"
+    p.write_text(json.dumps({"as_of": "2026-09-02", "tickers": {
+        "MU": {"archetype": "semi_cyclical", "rationale": "x", "overrides": {"history_start": "2024-01-01"},
+               "news_overlay": [{"date": "2026-09-01", "source": "s", "driver": "erp", "delta": 0.01, "note": "n"}]}}}))
+    monkeypatch.setattr(A, "VALUATION_INPUTS_PATH", p)
+    assert A.main(["set", "avgo", "--archetype", "platform", "--rationale", "双引擎"]) == 0
+    assert "AVGO → platform" in capsys.readouterr().out
+    doc = json.loads(p.read_text())
+    assert doc["tickers"]["AVGO"] == {"archetype": "platform", "rationale": "双引擎"}
+    assert doc["as_of"] == "2026-09-02" and list(doc["tickers"]) == ["AVGO", "MU"]
+    # 改原型保留已有 overrides/news_overlay, 新 override 按键合并
+    assert A.main(["set", "MU", "--archetype", "platform", "--rationale", "y", "--override", "target_margin=0.15"]) == 0
+    mu = json.loads(p.read_text())["tickers"]["MU"]
+    assert mu["archetype"] == "platform" and mu["overrides"] == {"history_start": "2024-01-01", "target_margin": 0.15}
+    assert len(mu["news_overlay"]) == 1
+    # 错键当场拒绝, 不落盘
+    with pytest.raises(ValueError):
+        A.set_entry("BE", "ai_infra_capex", "z", overrides={"nope": 1}, path=p)
+    assert "BE" not in json.loads(p.read_text())["tickers"]
+    with pytest.raises(SystemExit):
+        A.main(["set", "BE", "--archetype", "bogus", "--rationale", "z"])
+    assert A.main([]) == 0 and "AVGO" in capsys.readouterr().out

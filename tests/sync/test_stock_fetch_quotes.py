@@ -13,6 +13,23 @@ import pytest
 from quant.sync import stock_fetch  # noqa: E402
 
 
+def test_snapshot_clock_is_aware_and_keeps_original_provenance():
+    row = stock_fetch._quote_from_snapshot({"last_price": 100, "update_time": "2026-09-04 20:02:20"}, "CLOSED")
+    assert row["quote_time"] == "2026-09-04T20:02:20-04:00"
+    updates = stock_fetch.rows_to_broker_updates([{"代码": "SYN", "持有数量": 1, **row}])
+    assert updates["SYN"]["as_of"] == row["quote_time"]
+    assert updates["SYN"]["quote_time_raw"] == "2026-09-04 20:02:20"
+    assert updates["SYN"]["quote_time_basis"] == "opend_snapshot_update_time"
+
+
+def test_missing_observation_time_does_not_become_current_host_time(monkeypatch):
+    monkeypatch.setattr(stock_fetch, "now_iso", lambda: "2026-09-05T10:00:00Z")
+    row = stock_fetch._quote_from_snapshot({"last_price": 100}, "CLOSED")
+    assert row["quote_time"] is None
+    updates = stock_fetch.rows_to_broker_updates([{"代码": "SYN", "持有数量": 1, **row}])
+    assert updates["SYN"]["as_of"] is None
+
+
 @pytest.fixture
 def patched(monkeypatch):
     """Stub the three OpenD calls fetch_moomoo_quotes depends on."""

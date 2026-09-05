@@ -257,11 +257,11 @@ def cards_missing_next_gate(*docs: Optional[dict]) -> List[str]:
     (持仓 cap 0) 三张缺, 其余 9 张都有 (AMZN `R_突破_279` 是范本: 价位带
     level_map 证据, 站不住的带标 provisional 等转移当日补画)。
     """
-    from .holdings import is_managed                        # noqa: PLC0415  同层
+    from .holdings import is_managed, is_scannable_card     # noqa: PLC0415  同层
     out: List[str] = []
     for doc in docs:
         for t, body in sorted(((doc or {}).get("tickers") or {}).items()):
-            if body.get("status") == "closed" or not is_managed(body):
+            if not is_scannable_card(body) or not is_managed(body):
                 continue
             if ((body.get("instrument") or {}).get("type")) == "option":
                 continue        # 期权卡的转移轴在 underlying 上 (同 current_regime 豁免)
@@ -306,11 +306,11 @@ def cards_missing_zone_anchor(*docs: Optional[dict]) -> List[str]:
     模拟转移后 `anchored_on: None` / `anchor_date() → `, 而那套 zones 是
     8/01 建、8/06 按**跳空前**分布重推的 —— 不含当天那根 45 点、40M+ 股的 bar。
     """
-    from .holdings import is_managed                        # noqa: PLC0415  同层
+    from .holdings import is_managed, is_scannable_card     # noqa: PLC0415  同层
     out: List[str] = []
     for doc in docs:
         for t, body in sorted(((doc or {}).get("tickers") or {}).items()):
-            if body.get("status") == "closed" or not is_managed(body):
+            if not is_scannable_card(body) or not is_managed(body):
                 continue
             if ((body.get("instrument") or {}).get("type")) == "option":
                 continue        # 期权卡的结构锚在 underlying 上 (同 next_gate 豁免)
@@ -488,11 +488,11 @@ def cards_with_gate_anchor_desync(*docs: Optional[dict]) -> List[str]:
     884411d 一笔造出两个方向相反的破裂, watchlist 那张 (MU) 判 STALE 天天喊,
     持仓那张 (MRVL) 零告警。
     """
-    from .holdings import is_managed                        # noqa: PLC0415  同层
+    from .holdings import is_managed, is_scannable_card     # noqa: PLC0415  同层
     out: List[str] = []
     for doc in docs:
         for t, body in sorted(((doc or {}).get("tickers") or {}).items()):
-            if body.get("status") == "closed" or not is_managed(body):
+            if not is_scannable_card(body) or not is_managed(body):
                 continue
             if ((body.get("instrument") or {}).get("type")) == "option":
                 continue        # 期权卡无自有 zones/gate, 锚在 underlying 上

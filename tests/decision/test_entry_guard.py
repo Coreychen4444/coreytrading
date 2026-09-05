@@ -6,11 +6,25 @@ import os
 
 import pytest
 
+from quant.core import io_json
 from quant.decision import entry_guard
 from quant.decision.entry_guard import (
     PARAMS, build_ladder, momentum_mode, size_caps, zone_bands,
     zone_position, zone_staleness,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_supporting_state(monkeypatch, tmp_path, request):
+    if request.node.get_closest_marker("live_data") is not None:
+        return
+    calendar = tmp_path / "calendar.json"
+    calendar.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
+    monkeypatch.setattr(entry_guard.earnings, "EARNINGS_CALENDAR_PATH", calendar)
+    monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path / "iv_history")
+    monkeypatch.setattr(entry_guard, "_power", lambda: {"room": 22000.0})
+    monkeypatch.setattr(entry_guard.book, "exposure_of", lambda ticker: 0.0)
 
 
 def _bar(t, c, h=None, low=None):
@@ -300,14 +314,13 @@ def test_next_regime_marks_provisional_zones():
     assert "stop 100" in switch and "provisional" not in switch.split("stop 100")[1][:20]
 
 
-@pytest.mark.skipif(os.environ.get("COREYTRADING_CHECK_LIVE_STATE") != "1",
-                    reason="set COREYTRADING_CHECK_LIVE_STATE=1 to scan local account state")
+@pytest.mark.live_data
 def test_gate_sits_above_the_current_regime_no_chase():
     """核心不变式: gate 是下一个状态的入口, 按定义在本 regime 的 no_chase 之上。
     两者放同一坐标系比大小 → gate 成立即 above_no_chase → VETO 死锁
-    (2026-07-25 INTC 卡原始写法就是这个)。
+    ( INTC 卡原始写法就是这个)。
 
-    2026-07-31 起扫描 watchlist + positions 全部带 next_regime.entry_gate 的卡
+     起扫描 watchlist + positions 全部带 next_regime.entry_gate 的卡
     —— 旧版钉死 watchlist['INTC'], INTC promote 进 positions 当天就 KeyError:
     live 状态会流动, 不变式测试不能锚具体 ticker 在具体 bucket。"""
     import json
@@ -584,7 +597,7 @@ def _eval_at(monkeypatch, close, card=None):
 
 
 def test_waiting_position_now_plans(monkeypatch):
-    """等待区不再 WAIT — 出 zone 限价单计划 (2026-08-10: 铃响那一刻手上要有计划)。"""
+    """等待区不再 WAIT — 出 zone 限价单计划 (: 铃响那一刻手上要有计划)。"""
     r = _eval_at(monkeypatch, 97.0)
     assert r["verdict"] == "PLAN" and r["ladder"], r["reasons"]
     assert all(p <= 93.0 for p in r["ladder"]), "计划必须锚 zone, 不贴市价"
@@ -789,3 +802,23 @@ def test_structure_tier_never_changes_the_verdict_or_the_numbers(monkeypatch):
                                                           "stage_cn": "s"})
     r2 = eg.evaluate_ticker("TST", _vehicle_card(0.40), "2026-08-05", nav=22000.0)
     assert (r2["verdict"], r2["ladder"], r2["caps"]) == (r["verdict"], r["ladder"], r["caps"])
+
+
+# ── 一览表 = GFM 表 (, tg_notify --rich 渲染成 Telegram 原生表格) ──
+
+def test_summary_line_is_a_pipe_table_row_with_escaped_bars():
+    r = {"verdict": "VETO", "ticker": "MU", "close": 925.0,
+         "reasons": ["结构未修复 | trend down"], "lines": []}
+    row = entry_guard._summary_line(r)
+    assert row.startswith("| ⛔ MU 925 | VETO | ") and row.endswith(" |")
+    assert "结构未修复 \\| trend down" in row            # 竖线转义, 列不被切歪
+    assert entry_guard.SUMMARY_HEADER[1] == "|---|---|---|"
+
+
+def test_render_overview_emits_header_row_before_ticker_rows():
+    rs = [{"verdict": "VETO", "ticker": "A", "close": 1.0, "reasons": ["x"], "lines": []},
+          {"verdict": "VETO", "ticker": "B", "close": 2.0, "reasons": ["y"], "lines": []}]
+    out = entry_guard.render(rs, None, "2026-09-04").splitlines()
+    i = out.index("── 一览 ──────────────")
+    assert out[i + 1:i + 3] == list(entry_guard.SUMMARY_HEADER)
+    assert out[i + 3].startswith("| ⛔ A 1 | VETO | x |")

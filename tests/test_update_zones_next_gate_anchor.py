@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from quant.core import io_json, paths
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".claude/skills/trading-analysis/scripts/update_position_zones.py"
 
@@ -130,7 +132,7 @@ def test_card_without_next_regime_is_a_noop(upz):
 
 
 def test_gate_with_anchor_but_zones_without_one_only_warns(upz, capsys):
-    """2026-07-29 之前画的卡 zones 没有 anchored_on —— 无从同步, 但要说出口
+    """ 之前画的卡 zones 没有 anchored_on —— 无从同步, 但要说出口
     (混进硬判定实测会让全部卡当场作废)。"""
     agent = _agent(gate_date="2026-08-11")
     agent["zones"].pop("anchored_on")
@@ -157,6 +159,8 @@ def test_it_never_raises(upz):
 
 @pytest.fixture
 def cli(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     spec = importlib.util.spec_from_file_location("upz_next_gate_e2e", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setattr(sys, "argv", ["upz"])
@@ -180,6 +184,8 @@ def cli(monkeypatch, tmp_path):
     pos.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
     monkeypatch.setattr(mod, "WATCHLIST_PATH", wl)
     monkeypatch.setattr(mod, "POSITIONS_PATH", pos)
+    monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
+    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
 
     def run(argv):
         sys.argv = ["upz", "--ticker", "MU", "--bucket", "watchlist",
@@ -192,6 +198,8 @@ def cli(monkeypatch, tmp_path):
 @pytest.fixture
 def cli_pos(monkeypatch, tmp_path):
     """positions 桶 → merge_position() 那条写卡路径。"""
+    monkeypatch.setattr(paths, "ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     spec = importlib.util.spec_from_file_location("upz_next_gate_e2e_pos", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setattr(sys, "argv", ["upz"])
@@ -219,6 +227,8 @@ def cli_pos(monkeypatch, tmp_path):
     wl.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
     monkeypatch.setattr(mod, "WATCHLIST_PATH", wl)
     monkeypatch.setattr(mod, "POSITIONS_PATH", pos)
+    monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
+    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
 
     def run(argv):
         sys.argv = ["upz", "--ticker", "MU", "--bucket", "current",

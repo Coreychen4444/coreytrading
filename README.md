@@ -390,6 +390,7 @@ Three rules:
 1. Edit the repository prompt first, then update an authorized local task copy.
 2. Writing a prompt file is not task registration; verify the runtime registry.
 3. Schedules must be reviewed for timezone, exchange calendar and daylight-saving changes.
+4. Every prompt starts with the exchange-calendar gate (`quant/ops/agent_jobs.py due --kind <kind>`); wake-up slots outside the session window stop before collecting anything, and the post-close tasks wait for the same-session receipt before reading the transition state.
 
 Local task-copy reconciliation is opt-in through the environment described in `tests/test_repo_references.py`. Public CI never depends on a user's task registry.
 
@@ -411,7 +412,7 @@ flowchart TD
     end
     subgraph S3["3. Close-dependent"]
         direction LR
-        P7["kline cache<br/>completed bars"] --> P8["regime transition<br/>gate fires"] --> P9["NAV snapshot<br/>budget denominator"]
+        P7["kline cache<br/>completed bars"] --> P8["regime transition<br/>gate fires"] --> P9["NAV snapshot<br/>budget denominator"] --> P9b["domain agents<br/>frozen evidence · reviewed repaints"]
     end
     subgraph S4["4. Authorization surfaces"]
         direction LR
@@ -435,8 +436,8 @@ Ordering constraints:
 | Mode | Role |
 |---|---|
 | `heartbeat` | Broker refresh, reconciliation, reminders, whitelist and exit patrol |
-| `briefing` | Full run including completed bars, transitions, snapshots, drift and entry plans |
-| `postclose` | Lean completed-bar chain for prompt after-hours state |
+| `briefing` | Full run including completed bars, transitions, snapshots, drift, four-role research and entry plans |
+| `postclose` | Lean completed-bar chain: exits, transitions, technical/risk research, reviewed repaints, effectors |
 
 ### Standing infrastructure alerts
 
@@ -452,6 +453,25 @@ The brief reports fail-silent classes explicitly, including:
 - unavailable OpenD.
 
 Alerts share a cooldown state so multiple operating modes deduplicate the same condition.
+
+---
+
+## Domain agents and model routing
+
+Research is split into four domain roles, and the roles are decoupled from the runtimes and models that execute them. Switching a role from one CLI to the other is a routing change; the role contract and the trading rules do not move.
+
+| Role | Default runtime | Independent reviewer | Responsibility |
+|---|---|---|---|
+| Macro | Codex CLI | Claude Code | Read the existing macro evidence and phase; provide an environment prior |
+| Technical | Claude Code | Codex CLI | Read price structure, gates and zones; propose single-card updates |
+| Risk and sizing | Claude Code | Codex CLI | Explain the mechanical sizing, exposure, buying-power and exit receipts |
+| Valuation | Codex CLI | Claude Code | Interpret statements, the valuation ledger, scenarios and implied expectations |
+
+`agents/routing.json` is the configuration source of truth. Model profiles pin a runtime, a primary model, fallback models and an effort level; each role references a primary profile and a reviewer profile on the other runtime. Fallback happens only on runtime failure, timeout or a contract violation: a valid abstention or a rejected review never triggers a different model. Receipts record the requested model separately from what the CLI reported.
+
+Workers consume frozen evidence and return structured JSON. They have no workspace, broker, shell, messaging or order access. Only the technical role may propose, and only through the arguments of the existing card writer. A single-card job captures evidence, proposes, obtains an independent review from the other runtime, checks policy, expiry, parameter whitelist and card revision under the writer lock, and only then applies. A receipt with `status == "applied"` is the only proof that a card was written; `needs_review`, `partial` and `applying` have documented recovery paths and are never retried blindly.
+
+`quant/ops/agent_jobs.py` is the production entry: `due --kind` is the exchange-calendar gate every scheduled prompt runs first, and `run --kind` executes the briefing, post-close, weekly and chart jobs that the pipeline invokes as its agents stage. Per-workflow and global call budgets, process leases and a durable health outbox live in `quant/ops/agent_health.py`; `quant/ops/agent_doctor.py --json` inventories scheduler metadata and runner binary resolution without executing anything. The operating manual is [`agents/README.md`](agents/README.md); the model maintenance policy is [`agents/MODEL_POLICY.md`](agents/MODEL_POLICY.md).
 
 ---
 

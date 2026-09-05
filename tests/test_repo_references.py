@@ -82,6 +82,7 @@ TASKS = {p.stem for p in (ROOT / "tasks").glob("*.md") if p.stem != "README"}
 @pytest.mark.skipif(not CHECK_LIVE_TASKS or not LIVE_TASKS.exists(),
                     reason="set COREYTRADING_CHECK_LIVE_TASKS=1 to compare local task copies")
 @pytest.mark.parametrize("name", sorted(TASKS))
+@pytest.mark.host_state
 def test_live_scheduled_task_matches_repo(name):
     """`tasks/` 是真源，live 副本必须逐字节一致。
 
@@ -99,8 +100,8 @@ def test_live_scheduled_task_matches_repo(name):
         f"    cp tasks/{name}.md {live}")
 
 
-@pytest.mark.skipif(not CHECK_LIVE_TASKS or not LIVE_TASKS.exists(),
-                    reason="set COREYTRADING_CHECK_LIVE_TASKS=1 to inspect local task copies")
+@pytest.mark.skipif(not LIVE_TASKS.exists(), reason="本机没有 live 定时任务目录")
+@pytest.mark.host_state
 def test_live_tasks_reference_only_existing_scripts():
     """live 副本里的每个脚本路径都要能跑到 —— 这是监控变黑最直接的失败模式。"""
     broken = []

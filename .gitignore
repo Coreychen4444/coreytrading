@@ -33,6 +33,9 @@ build/
 
 # Runtime scratch
 tmp/
+
+# Domain-agent runs, control leases and rollout backups (private)
+var/
 *.log
 
 # AI private-workspace boundary. Only contracts and synthetic examples are public.

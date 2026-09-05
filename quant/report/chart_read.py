@@ -65,7 +65,8 @@ from quant.core import dow, patterns, technical  # noqa: E402
 from quant.core import structure as st  # noqa: E402
 from quant.core.episodes import (BROKE_WINDOW, DELTA_ATR, breakdown_in_window,  # noqa: E402
                                  episodes_of, gate_path, merge_bars_by_date)
-from quant.core.holdings import live_tickers  # noqa: E402
+from quant.core.holdings import (is_candidate, is_managed, is_traded,  # noqa: E402
+                                 live_tickers)
 from quant.core.io_json import iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (EARNINGS_CALENDAR_PATH, KLINE_CACHE_DIR,  # noqa: E402
@@ -140,7 +141,7 @@ def load_bars(ticker: str, asof: Optional[str] = None):
 def load_card(ticker: str) -> Optional[Dict]:
     """卡片（含 agent 全块）。判据同 `level_map.load_zone_context`：
     live → positions 卡优先，否则 watchlist 优先 —— positions 里的 closed 残卡
-    不得遮真源（2026-08-06 INTC 显示已平仓旧 zone 的同型 bug）。"""
+    不得遮真源（ INTC 显示已平仓旧 zone 的同型 bug）。"""
     docs = {}
     for path, bucket in ((POSITIONS_PATH, "positions"), (WATCHLIST_PATH, "watchlist")):
         try:
@@ -158,19 +159,53 @@ def load_card(ticker: str) -> Optional[Dict]:
 
 
 def book_tickers() -> List[str]:
-    """全书 = 有 zones 的活跃正股卡（持仓 + watchlist），与简报同一个人群。"""
+    """全书 = 有 zones 的**活着的**正股卡（持仓 + watchlist），与简报同一个人群。
+
+    判据全部来自 `core.holdings`，本函数不自己写一份：
+
+      持仓侧   `live_tickers` (broker.qty 单一真源 + 在持期权的 synthetic 行)
+               ∩ `is_managed` (结构豁免层「不进任何 task 输出」)
+      候选侧   `is_candidate` (status=watching **且** moomoo_listed≠false)
+               ∩ `is_traded`  (参考票 SPY/QQQ/SMH/SOXX 不出块)
+
+    ⚠️ **`status` 不是判据** —— 它是手工字段, 本仓两个方向都出过事
+    (`core/holdings` 模块顶部)。旧实现只排除 `status=="closed"` 并要求有 zones,
+    于是两类死卡照读:
+
+      ① 移出 moomoo 自选 "Watchlist" 分组的墓碑卡 —— `watchlist_sync` **不删卡**
+         (thesis/zones 是资产), 只把 `moomoo_listed` 翻成 false, `status` 一动不动
+         仍是 "watching"。 收盘判读实况: 好几张墓碑卡占了整整一栏。
+         正是 `is_candidate` docstring 记的那个洞 (消费端手抄判别式) —— 那次收进了
+         `is_candidate`, 本模块是漏网的一处:
+         `grep -rn moomoo_listed quant/` 的名单里, 八个消费端都查, 只有这里不查。
+      ② positions 里 `status=active` 但 qty=0 的残卡 (期权已平/清仓)。
+
+    判读层零授权效力不代表人群可以糊 —— 读一张已经不在书上的图, 与读错一张图
+    的代价一样: 它占的是每天那一屏的注意力。
+    """
     out: List[str] = []
-    for path in (POSITIONS_PATH, WATCHLIST_PATH):
-        try:
-            doc = read_json(path) or {}
-        except Exception:                                    # noqa: BLE001
-            continue
-        for t, body in (doc.get("tickers") or {}).items():
-            if (body.get("status") or "active") in ("closed",):
-                continue
-            if ((body.get("agent") or {}).get("zones") or {}).get("accumulation_zone_1"):
-                if t.isalpha() and t not in out:
-                    out.append(t)
+    try:
+        pos_doc = read_json(POSITIONS_PATH) or {}
+    except Exception:                                        # noqa: BLE001
+        pos_doc = {}
+    try:
+        wl_doc = read_json(WATCHLIST_PATH) or {}
+    except Exception:                                        # noqa: BLE001
+        wl_doc = {}
+
+    def _has_zones(body: dict) -> bool:
+        return bool(((body.get("agent") or {}).get("zones") or {}).get("accumulation_zone_1"))
+
+    pos_cards = pos_doc.get("tickers") or {}
+    for t in live_tickers(pos_doc):
+        body = pos_cards.get(t) or {}
+        if t.isalpha() and is_managed(body) and _has_zones(body) and t not in out:
+            out.append(t)
+
+    for t, body in (wl_doc.get("tickers") or {}).items():
+        if t.isalpha() and is_candidate(body) and is_traded(body) and _has_zones(body) and t not in out:
+            out.append(t)
+
     return sorted(out)
 
 
@@ -1266,17 +1301,34 @@ def dow_digest_line(dv: Optional[Dict], label: bool = True) -> str:
     return head + body
 
 
-def digest_block(r: Dict) -> List[str]:
-    """一只票在扫描表上的全部内容 = 票头 + **一行短期道氏结构**。
+DIGEST_TABLE_HEADER = ("| 票 | 档 | 结构 |", "|---|:-:|---|")
 
-    力果 / 形态 / 倾向 / 机会保留在 `--tickers <T>` 详情页，只有结构留在摘要。
-    **收盘价 / 涨跌 / 日周 / 授权 cap / zone 位置照旧不进**
+
+def _cell(x) -> str:
+    """表格单元格: 竖线转义 (tg_rich 认 `\\|`), 不许有换行。"""
+    return str(x).replace("|", "\\|").replace("\n", " · ").strip()
+
+
+def digest_row(r: Dict) -> str:
+    """扫描表一行 = 一只票（GFM 表行, 富消息通道渲染成原生表格）:
+    票（+ 🚨待重画）| 档（优先/次位/末位 = `dow.priority`, 与盘前清单同尺）| 短期道氏结构一行。
+
+    只留下结构列 —— 早先定的四件
+    （力果 / 形态 / 倾向 / 机会）退回 `--tickers <T>` 详情页，只有 08-22 早加的第五件
+    （结构）留在推送上。**收盘价 / 涨跌 / 日周 / 授权 cap / zone 位置照旧不进**
     —— 判读层搬来授权层的东西，只会让人以为这里能下单。
     """
+    who = f"**{r['ticker']}**" + ("  🚨待重画" if r.get("card_stale_earnings") else "")
     if r.get("error"):
-        return [f"━━ {r['ticker']} ━━", f"  {r['error']}"]
-    head = f"━━ {r['ticker']} ━━" + ("  🚨待重画" if r.get("card_stale_earnings") else "")
-    return [head, dow_digest_line((r.get("structure") or {}).get("dow"), label=False)]
+        return "| " + " | ".join(_cell(c) for c in (who, "—", r["error"])) + " |"
+    dv = (r.get("structure") or {}).get("dow") or {}
+    tier = dow.priority(dv, dv.get("weekly"))["short"]
+    return "| " + " | ".join(_cell(c) for c in (who, tier, dow_digest_line(dv or None, label=False))) + " |"
+
+
+def digest_block(r: Dict) -> List[str]:
+    """兼容名: 一只票在扫描表上的全部内容 = 一行表行。"""
+    return [digest_row(r)]
 
 
 def _digest_sort_key(r: Dict):
@@ -1289,13 +1341,14 @@ def _digest_sort_key(r: Dict):
 
 
 def digest(reports: List[Dict], asof: Optional[str] = None) -> str:
-    """摘要推送：每票两行（票头 + 结构行），只保留四步图例与排序说明。"""
-    L = [f"[FYI] 收盘判读 {asof or ''} · 判读层，零授权效力".rstrip(),
-         "结构 = 短期道氏四步：推进中 → 一根阴线收破前一根低点=观察① 等lsl成形 → ② 看反弹vs lsh → ③ 反弹失败LH 看lsl → 跌破=终止确认；"
+    """**唯一那条推送**（不需要每票详情，只在总结里一并说明；只留下结构列；富消息 = 标题 + 图例引用块 + 一票一行的表）。"""
+    L = [f"## [FYI] 收盘判读 {asof or ''} · 判读层，零授权效力".replace("  ", " "),
+         "> 结构 = 短期道氏四步：推进中 → 一根阴线收破前一根低点=观察① 等lsl成形 → ② 看反弹vs lsh → ③ 反弹失败LH 看lsl → 跌破=终止确认；"
          "｜周线级 = 同一台机器跑周K（回调还是反转的先验）；回撤带 = Rhea 1/3–2/3",
-         "顺序 = 优先(上涨推进/反转向上已确认) → 次位(观察期) → 末位(下跌)，与盘前清单同尺；只排序不授权"]
+         "> 档 = 优先(上涨推进/反转向上已确认) → 次位(观察期) → 末位(下跌)，与盘前清单同尺；只排序不授权",
+         "", *DIGEST_TABLE_HEADER]
     for r in sorted(reports, key=_digest_sort_key):
-        L += [""] + digest_block(r)
+        L.append(digest_row(r))
     return "\n".join(L)
 
 

@@ -4,4 +4,5 @@ moomoo-api==10.9.6908
 protobuf==3.20.3
 pandas>=2.2
 numpy>=2.0
+exchange-calendars>=4.13  # XNYS holidays, half days and DST-aware session closes
 pytest>=8.0

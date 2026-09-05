@@ -310,14 +310,28 @@ def _ov(driver, delta, ticker="SYN", channel=None, **kw):
             "delta": delta, "reliability": "filing", "source": "s", "note": "n", "resolved_until": "2026-12-01", **kw}
 
 
-def test_market_stage_applies_rf_erp_and_macro_tilt_without_double_count():
+def test_market_stage_applies_explicit_rf_erp_without_implicit_macro_tilt():
     m = M.apply_overlays_market(0.045, 0.045, [_ov("rf", 0.002), _ov("erp", 0.003)], {"risk_level": "adverse", "risk_score": -1})
-    assert m["rf"] == pytest.approx(0.047) and m["erp"] == pytest.approx(0.045 + 0.003 + M.ERP_TILT_BY_RISK["adverse"])
+    assert m["rf"] == pytest.approx(0.047) and m["erp"] == pytest.approx(0.045 + 0.003)
     explicit = M.apply_overlays_market(0.045, 0.045, [_ov("erp", 0.01, ticker="MACRO")], {"risk_level": "adverse"})
-    assert explicit["erp_tilt"] == 0.0 and explicit["erp"] == pytest.approx(0.055) and "不再机械加点" in explicit["erp_tilt_basis"]
+    assert explicit["erp_tilt"] == 0.0 and explicit["erp"] == pytest.approx(0.055) and "仅研究上下文" in explicit["erp_tilt_basis"]
     none = M.apply_overlays_market(0.045, 0.045, [], None)
     assert none["erp"] == 0.045 and none["erp_tilt_basis"] == "无宏观状态"
-    assert M.apply_overlays_market(0.045, 0.045, [], {"risk_level": "supportive"})["erp"] == pytest.approx(0.04)
+
+
+@pytest.mark.parametrize("level,score", [("supportive", 2), ("neutral", 0), ("adverse", -1), ("crisis", -2), ("unknown", -2)])
+def test_risk_labels_preserve_valuation_and_context_without_quantified_overlays(level, score):
+    b = make_bundle(price=50.0)
+    params = dict(rf=0.045, erp=0.045, beta=None)
+    plain = M.valuate(b, _resolved("platform"), **params)
+    context = {"risk_level": level, "risk_score": score, "run_id": "macro-label-only"}
+    labelled = M.valuate(b, _resolved("platform"), macro_context=context, **params)
+    assert labelled["fair_value"] == pytest.approx(plain["fair_value"])
+    assert labelled["cost_of_capital"]["erp"] == pytest.approx(0.045)
+    assert labelled["cost_of_capital"]["wacc"] == pytest.approx(plain["cost_of_capital"]["wacc"])
+    assert labelled["scenarios"]["probabilities"] == plain["scenarios"]["probabilities"]
+    assert labelled["news"]["macro_context"] == context
+    assert labelled["news"]["erp_tilt"] == 0.0
 
 
 def test_spec_stage_multiplicative_and_additive_drivers():
@@ -356,7 +370,7 @@ def test_valuate_carries_news_block_and_moves_fair_value():
                      macro_context={"risk_level": "adverse", "risk_score": -1})
     assert bear["fair_value"] < plain["fair_value"]
     assert bear["base"]["eps_pe"]["pe_mult"] == pytest.approx(0.8) and "overlay" in bear["base"]["eps_pe"]["pe_basis"]
-    assert bear["cost_of_capital"]["erp"] == pytest.approx(0.045 + 0.01 + 0.005) and bear["cost_of_capital"]["erp_tilt"] == 0.005
+    assert bear["cost_of_capital"]["erp"] == pytest.approx(0.045 + 0.01) and bear["cost_of_capital"]["erp_tilt"] == 0.0
     assert bear["scenarios"]["probabilities"]["bear"] == pytest.approx(0.35)
     assert plain["news"]["applied"] == [] and plain["cost_of_capital"]["erp_tilt"] == 0.0
 

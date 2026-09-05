@@ -145,7 +145,7 @@ def test_share_ladder_zero_shares_forces_written_exception():
 
 
 def test_share_ladder_lite_confirmed_case_no_fractional_tiers():
-    """2026-07-28 实际输出: $818 cap → 0.6/0.3/0.2 股。整股后应是单档 1 股。"""
+    """ 实际输出: $818 cap → 0.6/0.3/0.2 股。整股后应是单档 1 股。"""
     sl = share_ladder(817.59, [708.4, 701.32, 694.31], (0.5, 0.3, 0.2))
     assert sl["n_shares"] == 1 and sl["n_tiers"] == 1
     assert all(float(t["shares"]).is_integer() and t["shares"] >= 1 for t in sl["tiers"])
@@ -180,6 +180,32 @@ def test_round_schedule_is_single_source_for_all_consumers():
 #   「结构降级反转立马 cap 0 即可」)
 #   close_below_last_swing_low 且 trend=up → **不**VETO (回调, 非破位)
 
+def _synthetic_entry_context(monkeypatch):
+    """非空合成书供结构用例算钱；日历/购买力不再隐式读私人数据。"""
+    from quant.decision import entry_guard
+    positions = {"tickers": {"TEST": {"instrument": {"type": "stock"},
+                                      "broker": {"qty": 2, "current_price": 100}}}}
+    exposure = entry_guard.book.exposure_of
+    monkeypatch.setattr(entry_guard.book, "exposure_of", lambda ticker: exposure(ticker, positions_doc=positions))
+    monkeypatch.setattr(entry_guard, "_power", lambda: {"room": 50000.0, "as_of": "2026-07-29"})
+    return {"calendar": {"as_of": "2026-07-29", "tickers": {}},
+            "usage": sizing.book_usage(positions, 100000, price_of=lambda ticker: 100,
+                                       atr_of=lambda ticker: 2)}
+
+
+def _synthetic_entry_context(monkeypatch):
+    """非空合成书供结构用例算钱；日历/购买力不再隐式读私人数据。"""
+    from quant.decision import entry_guard
+    positions = {"tickers": {"TEST": {"instrument": {"type": "stock"},
+                                      "broker": {"qty": 2, "current_price": 100}}}}
+    exposure = entry_guard.book.exposure_of
+    monkeypatch.setattr(entry_guard.book, "exposure_of", lambda ticker: exposure(ticker, positions_doc=positions))
+    monkeypatch.setattr(entry_guard, "_power", lambda: {"room": 50000.0, "as_of": "2026-07-29"})
+    return {"calendar": {"as_of": "2026-07-29", "tickers": {}},
+            "usage": sizing.book_usage(positions, 100000, price_of=lambda ticker: 100,
+                                       atr_of=lambda ticker: 2)}
+
+
 def _eval_class(monkeypatch, structure, trend_repaired_close=None):
     """跑 entry_guard 的结构 VETO 段, 只喂结构 —— 其余走一张最简 intact 卡。"""
     from quant.decision import entry_guard
@@ -197,11 +223,12 @@ def _eval_class(monkeypatch, structure, trend_repaired_close=None):
     monkeypatch.setattr(entry_guard.technical, "swing_structure", lambda r, **k: structure)
     monkeypatch.setattr(entry_guard, "zone_staleness", lambda *a, **k: [])
     monkeypatch.setattr(entry_guard, "iv_gate_line", lambda tk: "")
-    return entry_guard.evaluate_ticker("TEST", card, today="2026-07-29", nav=100000)
+    return entry_guard.evaluate_ticker("TEST", card, today="2026-07-29", nav=100000,
+                                       **_synthetic_entry_context(monkeypatch))
 
 
 def test_transition_vetoes(monkeypatch):
-    """LITE 2026-07-28 内核: HH+LL 曾逃过 trend=='down' 判别式。二值世界 = VETO。"""
+    """LITE  内核: HH+LL 曾逃过 trend=='down' 判别式。二值世界 = VETO。"""
     r = _eval_class(monkeypatch, {"trend": "transition", "high_label": "HH",
                                   "low_label": "LL", "last_swing_high": 150,
                                   "close_below_last_swing_low": False})
@@ -232,6 +259,7 @@ def test_clean_up_plans_full_r1(monkeypatch):
                                   "close_below_last_swing_low": False})
     assert r["verdict"] == "PLAN"
     assert r["caps"]["final"] is not None and r["caps"]["final"] > 0
+    assert r["caps"]["regime_cap"] == 100000 * sizing.NOTIONAL_CAP - 200.0
 
 
 def test_repaired_transition_is_not_vetoed(monkeypatch):
@@ -304,7 +332,8 @@ def test_entry_guard_vetoes_inside_zero_cap_regime(monkeypatch):
         "trend": "up", "high_label": "HH", "low_label": "HL", "last_swing_high": 90,
         "close_below_last_swing_low": False})
     r = entry_guard.evaluate_ticker("TEST", {"agent": agent},
-                                    today="2026-07-29", nav=100000)
+                                    today="2026-07-29", nav=100000,
+                                    **_synthetic_entry_context(monkeypatch))
     assert r["verdict"] == "VETO", f"价格在 zone1 内但 regime cap 0 应 VETO, 实得 {r['verdict']}"
     assert any("cap 0" in x for x in r["reasons"])
     # 结构修复也不放行 —— 此前 wait_for_structure 轨修复后就按正常 cap 给 ladder

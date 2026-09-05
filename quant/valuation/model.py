@@ -14,9 +14,9 @@
                驱动段 revenue_base/growth_start/target_margin/margin_start/share_change_rate/
                  net_interest_after_tax/tax_rate/terminal_growth (EPS 通道: 订单·指引·利润率·回购·融资);
                倍数段 pe_multiplier (PE 通道: 监管·诉讼·资金流折价/溢价) → 引擎 B 的 PE 锚;
-               概率段 scenario_tilt (方向性但无数字的可靠新闻: 概率从熊搬到牛或反之)。
-               宏观风险环境 (ai_news/macro/current.json) 机械映射到 ERP (ERP_TILT_BY_RISK),
-               雷达显式写了 MACRO erp overlay 时以它为准不再叠加。本模块仍不读新闻正文——
+               概率段 scenario_tilt (有量化依据的显式概率调整: 概率从熊搬到牛或反之)。
+               宏观风险环境 (ai_news/macro/current.json) 只保留为研究上下文，不自动改变 ERP、
+               折价或概率；数值调整来自显式参数及通过契约筛选的 overlay。本模块仍不读新闻正文——
                新闻→数字是雷达/人的判断, 这里只保证每一个数字进来都带出处、有到期、可撤销。
 
 引擎 A  FCFF-DCF:  EV = Σ_{t=1..N} FCF_t/(1+WACC)^t + TV/(1+WACC)^N,
@@ -54,7 +54,7 @@ import math
 import statistics
 from typing import Callable
 
-MODEL_VERSION = "v3"             # 夜: v2 一致预期锚定 + v3 行业 β / 10 年跑道 / 引擎 B = 卖方一致目标价 (v1 = TTM 外推)
+MODEL_VERSION = "v3.1"           # : 保留 v3 引擎，取消宏观风险标签自动映射 ERP
 TTM_QUARTERS = 4
 MIN_CYCLE_QUARTERS = 12          # through_cycle 至少 3 年利润率历史, 否则退回 current 并打旗
 MIN_TREND_QUARTERS = 20          # 收入对数趋势至少 5 年 (20 个 TTM 点), 否则不用趋势
@@ -83,7 +83,6 @@ CYCLE_PEAK_MULT = 1.3                 # 周期票: 当前利润率 > 1.3× 历�
 ONEOFF_WARN_SHARE = 0.20
 TV_SHARE_WARN = 0.80
 PEAK_MARGIN_PCTL = 0.95              # TTM 利润率处于自身历史 ≥95% 分位 → 置信 −1 (均值回归风险, 平台原型也不豁免)
-ERP_TILT_BY_RISK = {"crisis": 0.015, "adverse": 0.005, "neutral": 0.0, "supportive": -0.005}   # 宏观风险环境 → ERP 加点 (声明值)
 PROB_FLOOR = 0.05                     # scenario_tilt 后每个情景概率下限
 MULTIPLICATIVE_DRIVERS = frozenset({"revenue_base", "pe_multiplier"})
 
@@ -608,23 +607,14 @@ def resolve_revenue_base(drivers: dict, params: dict, overrides: dict) -> tuple[
 
 
 def apply_overlays_market(rf: float, erp: float, overlays: list[dict], macro_context: dict | None) -> dict:
-    """市场段: rf/erp 的 overlay 增量 + 宏观风险环境 → ERP 机械加点 (雷达显式 MACRO erp overlay 时不叠加)。"""
+    """市场段只应用显式 rf/erp 增量；宏观标签留作上下文，不代表可量化的风险溢价。"""
     rf_d = sum(float(o["delta"]) for o in overlays if o["driver"] == "rf")
     erp_d = sum(float(o["delta"]) for o in overlays if o["driver"] == "erp")
-    explicit_macro_erp = any(o["driver"] == "erp" and o.get("ticker") == "MACRO" for o in overlays)
     level = (macro_context or {}).get("risk_level")
-    tilt = 0.0
-    tilt_basis = "无宏观状态"
-    if level in ERP_TILT_BY_RISK:
-        if explicit_macro_erp:
-            tilt_basis = f"宏观风险 {level}: 雷达已写 MACRO erp overlay, 不再机械加点"
-        else:
-            tilt = ERP_TILT_BY_RISK[level]
-            tilt_basis = f"宏观风险 {level} (分 {(macro_context or {}).get('risk_score')}) → ERP {tilt:+.2%} (ERP_TILT_BY_RISK)"
-    elif level:
-        tilt_basis = f"宏观风险 {level!r} 不在词表, 不加点"
-    return {"rf": rf + rf_d, "erp": erp + erp_d + tilt, "rf_delta": rf_d, "erp_delta": erp_d,
-            "erp_tilt": tilt, "erp_tilt_basis": tilt_basis}
+    tilt_basis = f"宏观风险 {level}: 仅研究上下文；ERP 只用显式参数和 overlay" if level else "无宏观状态"
+    # 保留字段兼容已有渲染与账本读取；0 仅表示没有由标签产生的额外调整。
+    return {"rf": rf + rf_d, "erp": erp + erp_d, "rf_delta": rf_d, "erp_delta": erp_d,
+            "erp_tilt": 0.0, "erp_tilt_basis": tilt_basis}
 
 
 def apply_overlays_spec(spec: dict, overlays: list[dict]) -> dict:

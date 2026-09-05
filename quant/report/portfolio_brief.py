@@ -26,15 +26,15 @@ from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, earnings, sizing, structure  # noqa: E402  组合占用 + 财报缩仓 + gate 结构完整性
 from quant.core.holdings import (
-    UNMANAGED_ROLES, flat_with_lots, is_managed, is_reference_role, live_tickers,
-    lot_gap, lot_qty, managed_tickers, underlying_cards_missing_zones)
-from quant.core.io_json import atomic_write_json, iter_jsonl
+    UNMANAGED_ROLES, cards_missing_archetype, flat_with_lots, is_candidate, is_managed,
+    is_reference_role, live_tickers, lot_gap, lot_qty, managed_tickers, underlying_cards_missing_zones)
+from quant.core.io_json import atomic_write_json, iter_jsonl, read_json
 from quant.core.occ import is_option_ticker
 from quant.core.num import coerce_float as normalize_num
 from quant.core.occ import parse_occ
 from quant.core.paths import (
     EVENTS_DIR, HEARTBEAT_STATE_PATH, HOLDING_ROOT, IV_HISTORY_DIR,
-    KLINE_CACHE_DIR, NAV_HISTORY_PATH,
+    KLINE_CACHE_DIR, NAV_HISTORY_PATH, SCORES_PATH, VALUATION_INPUTS_PATH,
 )
 from quant.core.sizing import regime_lines
 from quant.core.technical import atr, resample_weekly
@@ -289,8 +289,23 @@ UNTAGGED_FILL_WINDOW_DAYS = 14
 AUTH_TAG_SINCE = "2026-08-13"
 
 
+def scored_fill_refs() -> set:
+    """scores.jsonl 里已被人裁定 (有评分行) 的成交 order_id 集合。
+
+    cap 0 的成交按 schema **不能**盖 auth 章 (`validate_event`: cap 0 = 无授权, 不该有
+    auth), 所以 `fill_untagged` 告警文案里那句「判定后 annotate_event 补注 + 落评分」
+    此前对它是假的: 注解 + 评分做完, 告警照响到 14 天窗口自然滑出 —— 人工裁定章解的只是 cap>0 那半;
+    cap 0 的规则外成交裁「直接评 C, 不再点名」: 评分行 (`ref` = order_id) 是判定完成的唯一机器
+    可见形状, 告警以它收口。只读 scores.jsonl, 不改事件, 读不到 = 没人判过, 照常点名。
+    """
+    try:
+        return {str(r.get("ref")) for r in iter_jsonl(SCORES_PATH) if r.get("ref")}
+    except Exception:                                   # noqa: BLE001  账本读不到 = 照常点名
+        return set()
+
+
 def untagged_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
-    """近 N 天内落库却没盖上授权标签的 BUY fill。
+    """近 N 天内落库却没盖上授权标签、也还没被裁定 (无评分行) 的 BUY fill。
 
      起 `trade_history_sync` 落库即盖章 (判别式 core/sizing +
     core/holdings;  起盖 `auth` 不再盖 classification), 所以正常情况下
@@ -303,6 +318,7 @@ def untagged_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
     看得见)。
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    scored = scored_fill_refs()
     out: List[str] = []
     for month_dir in sorted(p for p in EVENTS_DIR.glob("2*") if p.is_dir()):
         for row in iter_jsonl(month_dir / "trades.jsonl"):
@@ -313,6 +329,8 @@ def untagged_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
                 else (row.get("classification") or row.get("auth"))
             if tagged:
                 continue
+            if str(row.get("order_id") or "") in scored:
+                continue                # 已裁定 (scores.jsonl 有评分行) = 判定完成, 告警收口
             when = parse_ts(ts)
             if not when or when < cutoff:
                 continue
@@ -385,6 +403,9 @@ def load_zone_maps_from_state() -> Tuple[Dict[str, dict], Dict[str, dict], List[
             "thesis": thesis.get("summary") or "",
             "priority": body.get("priority") or "medium",
             "moomoo_listed": body.get("moomoo_listed"),
+            # 候选判据单一真源 (holdings.is_candidate = status=watching 且 moomoo_listed≠false):
+            # 下游触碰 / z2 冻结 / zone 行 / stale 清单四处只读这一个布尔, 不再各自看 status
+            "is_candidate": is_candidate(body),
             "role": instrument.get("role"),
             "cap_pct_nav": (agent.get("current_regime") or {}).get("cap_pct_nav"),
             "price": broker.get("current_price"),
@@ -649,8 +670,9 @@ def build_watchlist_zone_lines(watchlist_rows: List[dict], watchlist_zones: Dict
         ticker = str(row.get("ticker", "")).strip().upper()
         if not ticker:
             continue
-        # 已移出 moomoo 分组的卡不进 zone 行 (entry_guard 段一行带过)
-        if row.get("moomoo_listed") is False:
+        # 非候选卡 (已移出 moomoo 分组的墓碑 / status≠watching) 不进 zone 行 —— 判据
+        # holdings.is_candidate, 与触碰 / 冻结 / stale 清单同源
+        if not row.get("is_candidate"):
             continue
         cfg = watchlist_zones.get(ticker, {})
         zone1 = normalize_zone_pair(cfg.get("accumulation_zone_1"))
@@ -1824,7 +1846,10 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
     # cap>0 的卡 (与 z1 画线  补洞同判据 — 无授权卡响铃只会邀请未授权
     # 入场)。24h 边沿冷却与持仓告警共用同一份状态。
     for wb in watchlist_basic:
-        if str(wb.get("status")) != "watching" or is_reference_role(wb.get("role")):
+        # 候选判据 = holdings.is_candidate: 移出自选分组只翻 moomoo_listed 不改 status, 只看
+        # status 会给墓碑卡响铃 (移出分组的墓碑卡曾在周复盘里冒出
+        # 「破 z2 下沿 → 当日 BUY 冻结」—— 同概念多份判别式的老病, 本文件是漏网的那一处)
+        if not wb.get("is_candidate") or is_reference_role(wb.get("role")):
             continue
         cap = normalize_num(wb.get("cap_pct_nav"))
         px = normalize_num(wb.get("price"))
@@ -1880,7 +1905,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
     held_stock = {r[0] for r in breach_rows}  # 双桶同 ticker (促升窗): 持仓卡为真源
     for wb in watchlist_basic:
         wt = str(wb["ticker"]).upper()
-        if wt in held_stock or str(wb.get("status")) != "watching" \
+        if wt in held_stock or not wb.get("is_candidate") \
                 or is_reference_role(wb.get("role")):
             continue
         breach_rows.append((wt, normalize_num(wb.get("price")),
@@ -1909,6 +1934,23 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
                   "卖出/减仓不受影响, cap 不在盘中动 — 授权改动归收盘机器")
             triggers.append({"ticker": tk, "type": freeze_type, "value": px,
                              "z2_lo": lo, "stop": stop})
+
+    # 候选卡 staleness 清单 (): 周复盘此前自己扫 watchlist.json 的 valid_until 列
+    # 「候选卡过期」, 把已移出自选的墓碑卡一起列了 —— 范围判据只在这里出口一次,
+    # 消费端抄输出。只报不拦 (触碰告警已按同一 zone_staleness 跳过 stale 卡; 冻结有意不跳)。
+    watchlist_stale: List[Dict] = []
+    for wb in watchlist_basic:
+        if not wb.get("is_candidate") or is_reference_role(wb.get("role")):
+            continue
+        wt = str(wb["ticker"]).upper()
+        if wt in held_stock:                      # 促升窗双桶同票: 持仓卡为真源
+            continue
+        zcfg = watchlist_zones.get(wt) or {}
+        if not zcfg.get("accumulation_zone_1"):   # 空 stub 归 cardless (autopaint), 不是 stale
+            continue
+        reasons = zone_staleness(wt, zcfg)
+        if reasons:
+            watchlist_stale.append({"ticker": wt, "reasons": reasons})
 
     # Zone staleness (代码化触发: valid_until / breakout / breakdown via kline 缓存)
     stale_zones: List[Dict] = []
@@ -2110,6 +2152,28 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
                             "(范本见 AMZN R_突破_279)")
             triggers.append({"ticker": "INFRA", "type": "card_missing_next_gate",
                              "value": len(no_next_gate)})
+
+    # 画了卡没归估值原型: 新候选卡画完
+    # 一周, 估值层人工区没有它们, 周复盘估值一览只能印 ✗。判断层零授权 —— 只报不拦, 与
+    # card_missing_next_gate 同款出口; 修法一条命令 (archetypes.py set), 不是让人手填 JSON。
+    try:
+        _inputs = read_json(VALUATION_INPUTS_PATH) if VALUATION_INPUTS_PATH.exists() else {}
+    except Exception:                                              # noqa: BLE001  坏文件不拖垮 brief
+        _inputs = {}
+    no_arch = cards_missing_archetype(
+        pos_doc_infra, _load_state_doc(STATE_WATCHLIST_PATH), _inputs or {})
+    if no_arch:
+        active_keys.add(alert_key("INFRA", "card_missing_archetype"))
+        all_conditions.append({"ticker": "INFRA", "type": "card_missing_archetype",
+                               "value": len(no_arch)})
+        if emit_gate("INFRA", "card_missing_archetype"):
+            alerts.append("⚠️ 卡已画但估值层未归原型 (inputs.json 无条目, 画卡一并做): "
+                          + ", ".join(no_arch)
+                          + " → `python3 quant/valuation/archetypes.py set <T> --archetype "
+                            "<platform|semi_cyclical|ai_infra_capex|software_growth|not_applicable> "
+                            "--rationale \"<商业模式一句话>\"` (判断层零授权, 只影响估值一览覆盖)")
+            triggers.append({"ticker": "INFRA", "type": "card_missing_archetype",
+                             "value": len(no_arch)})
 
     # 转移装上来的 zones 没有锚 → anchor_date() 用 thesis.last_reviewed 凭空补新鲜度,
     # 财报重画 SLA 与同锚层一并消音 (用户 , NBIS 快车道前夜)。
@@ -2323,6 +2387,11 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
         for z in watchlist_zone_lines:
             lines.append(f"- {z}")
 
+    if watchlist_stale:
+        lines.append("Watchlist stale (候选判据已过滤, 墓碑卡不进; 先重画再用):")
+        for st in watchlist_stale:
+            lines.append(f"- {st['ticker']}: {'; '.join(st['reasons'])}")
+
     if alerts:
         lines.append("Alerts:")
         for a in alerts:
@@ -2347,6 +2416,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
         "exit_guards": guard_lines,
         "margin_account": guard_account,
         "watchlist_zone_lines": watchlist_zone_lines,
+        "watchlist_stale": watchlist_stale,
         "alerts": alerts,
         "triggers": triggers,
         "active_conditions": all_conditions,

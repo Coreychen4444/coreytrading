@@ -10,7 +10,7 @@ from quant.report import gate_ladder_report as glr
 
 @pytest.fixture(autouse=True)
 def _no_bench(monkeypatch):
-    """量腿基准隔离 (volume_leg 2026-08-06 起相对口径): fixture 是真实 2026-07 日期,
+    """量腿基准隔离 (volume_leg  起相对口径): fixture 是真实  日期,
     不隔离会读 live 缓存的 QQQ/SMH 真数据。置 None = 绝对兜底路径。"""
     monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: None)
 
@@ -98,7 +98,7 @@ def test_uptrend_gates_renamed_breakout():
 def test_render_counting_midway():
     bars = _bars([150] * 20 + [174])          # 172.5 之上仅 1 收盘 → ⏳ 1/2
     out = "\n".join(glr.render_ticker("NBIS", AGENT, bars))
-    assert "⏳ 172.5" in out and "[1/2]" in out
+    assert "⏳ 172.5" in out and "| 1/2 |" in out          # 确认列 ( 表格式)
 
 
 def test_zone1_position_marked():
@@ -226,15 +226,31 @@ def test_untouched_transition_gate_previews_both_prices():
     assert glr.FASTLANE_K == 0.5
 
 
-def test_counting_gate_expands_two_lines_with_why_fastlane_missed():
-    """⏳ 展开两行 (用户  选定): 卡在哪一条 + 还剩什么路。"""
+def test_counting_gate_row_carries_why_fastlane_missed():
+    """⏳ 的两行展开 进同一格 (4b 表格式):
+    卡在哪一条 + 还剩什么路, 一个字不少。"""
     bars = _bars([150] * 20 + [174])          # 首日站上 172.5, 幅度很小
     out = glr.render_ticker("NBIS", AGENT, bars, deep=_deep_repair())
-    idx = [i for i, l in enumerate(out) if "⏳ 172.5" in l][0]
-    assert "上方 +0.9%" in out[idx]
-    assert "⚡快车道未成" in out[idx + 1] and "首日" in out[idx + 1]
-    assert "幅度" in out[idx + 1] and "需收 ≥" in out[idx + 1]
-    assert "首日已消耗" in out[idx + 2] and "只剩 ×2" in out[idx + 2]
+    row = [l for l in out if "⏳ 172.5" in l][0]
+    assert row.startswith("| ⏳ 172.5 | ") and "| 1/2 |" in row
+    assert "上方 +0.9%" in row
+    assert "⚡快车道未成" in row and "首日" in row
+    assert "幅度" in row and "需收 ≥" in row
+    assert "首日已消耗" in row and "只剩 ×2" in row
+
+
+def test_ticker_block_is_bold_head_plus_gate_table(monkeypatch):
+    """4b 表格式: 第 0 行粗体头 + 行内标签, gate 行是 4 列管道表,
+    表头/对齐行紧跟, 富消息通道渲染成原生表格; 竖线转义不切列。"""
+    bars = _bars([150] * 20 + [170, 175, 180])
+    out = glr.render_ticker("NBIS", AGENT, bars)
+    assert out[0].startswith("**NBIS $180 (+2.9%) 量比") and "🧭" in out[0] and "📍" in out[0]
+    i = out.index(glr.LADDER_TABLE_HEADER[0])
+    assert out[i + 1] == glr.LADDER_TABLE_HEADER[1]
+    rows = [l for l in out[i + 2:] if l.startswith("| ")]
+    assert [r.split(" | ")[0] for r in rows] == ["| ✅ 156", "| ✅ 172.5", "| ▫️ 187"]
+    assert all(r.count(" | ") == 3 for r in rows)          # 恰好 4 列
+    assert glr._cell("a|b\nc") == "a\\|b · c"
 
 
 def test_fastlane_qualified_says_transition_in_flight():
@@ -270,7 +286,7 @@ def test_established_transition_gate_gives_the_risk_read():
 
 
 def test_distance_is_dual_unit_because_percent_alone_is_not_comparable():
-    """同一个 % 在不同波动率的票上是完全不同的距离 —— 2026-08-08 实测
+    """同一个 % 在不同波动率的票上是完全不同的距离 ——  实测
     MSFT 距 +6.5% = 2.33N, MU 距 +7.1% = 0.82N, 差 2.8 倍。"""
     calm = glr.gate_distance(100.0, 1.0, 110.0)      # ATR = 1% of price
     wild = glr.gate_distance(100.0, 10.0, 110.0)     # ATR = 10% of price
@@ -389,7 +405,7 @@ def test_deep_cache_gap_is_reported_not_swallowed():
 
 
 def test_merge_dedupes_instead_of_concatenating():
-    """🚨 2026-08-08 实测踩过: 直接拼接, 重叠段的重复 bar 污染 MA60, 分类当场算错。"""
+    """🚨  实测踩过: 直接拼接, 重叠段的重复 bar 污染 MA60, 分类当场算错。"""
     a = _deep([100.0 + i for i in range(50)])
     b = _deep([100.0 + i for i in range(50)])[30:]          # 与 a 重叠 20 根
     merged, note = glr.merge_bars_by_date(a, b)

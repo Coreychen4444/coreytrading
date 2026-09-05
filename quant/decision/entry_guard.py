@@ -854,21 +854,27 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
 _ICON = {"PLAN": "🟢", "STALE": "⚠️", "NEEDS_CARD": "📇", "VETO": "⛔"}
 
 
-def _summary_line(r: dict) -> str:
-    """一览表单行 (display-only,  用户: 简报要像 gate-ladder-report 一目了然)。
+def _esc_cell(s: str) -> str:
+    """表格单元格里的竖线要转义 (tg_rich 认 `\\|`), 否则一条 reason 把列切歪。"""
+    return str(s).replace("|", "\\|")
+
+
+def _summary_cells(r: dict) -> tuple:
+    """一览表一行的三格 (票·价, 判定, 位置/计划) —— display-only: 简报要像
+    gate-ladder-report 一目了然; 渲染成 Telegram 原生表格 (rich 通道)。
     数据全部取自本文件自己渲染的 lines/结构化字段 —— 机械抽取, 不是散文改写。
     PLAN 行的信息 = 挂哪 (z1 带 + 回踩距离) + 挂多少 (首档股数) ——
     verdict 不含市价语义, 一览要回答的就是这两问。"""
-    seg = f"{_ICON.get(r['verdict'], '?')} {r['ticker']}"
+    who = f"{_ICON.get(r['verdict'], '?')} {r['ticker']}"
     if r.get("close"):
-        seg += f" {r['close']:g}"
-    seg += f" {r['verdict']}"
+        who += f" {r['close']:g}"
+    verdict = r["verdict"]
     if r["verdict"] == "PLAN":
         # 档位不再由域决定 (二次定版): 一张连过两道 gate 却没买过的
         # 候选卡就是 gate2 —— 旧的写死 "(R1)" 会在一览上把 4% 的计划标成 2.5% 的。
-        seg += f"(gate{(r.get('caps') or {}).get('gate_no') or 1})"
+        verdict += f"(gate{(r.get('caps') or {}).get('gate_no') or 1})"
         if r.get("dow"):
-            seg += f"·{r['dow']['short']}"          # 结构位 = 清单第一排序键
+            verdict += f"·{r['dow']['short']}"          # 结构位 = 清单第一排序键 ()
     tail = None
     if r["verdict"] == "PLAN" and r.get("ladder"):
         parts = []
@@ -885,7 +891,7 @@ def _summary_line(r: dict) -> str:
             t0 = sl["tiers"][0]
             parts.append(f"首档 ${t0['price']:g}×{t0['shares']}股"
                          + (" ⛔0股例外" if sl["exception"] else ""))
-        tail = " ".join(parts) or None
+        tail = " · ".join(parts) or None
     if tail is None:
         for ln in r.get("lines", []):
             if "⏱" in ln and "✅" not in ln:
@@ -903,7 +909,15 @@ def _summary_line(r: dict) -> str:
                 break
     if tail is None and r.get("reasons"):
         tail = str(r["reasons"][0])[:60]
-    return seg + (f" | {tail}" if tail else "")
+    return who, verdict, tail or ""
+
+
+SUMMARY_HEADER = ("| 票 | 判定 | 位置 / 计划 |", "|---|---|---|")
+
+
+def _summary_line(r: dict) -> str:
+    """一览表一行 (GFM 管道表行; 老的单行文本 = 三格用 ` | ` 并排, 语义不变)。"""
+    return "| " + " | ".join(_esc_cell(c) for c in _summary_cells(r)) + " |"
 
 
 def render(results: List[dict], nav: Optional[float], today: str,
@@ -921,6 +935,7 @@ def render(results: List[dict], nav: Optional[float], today: str,
     lines.extend(usage_txt or [])
     if len(ordered) > 1:
         lines.append("── 一览 ──────────────")
+        lines.extend(SUMMARY_HEADER)              # 表头 + 对齐行: tg_notify --rich 渲染成原生表格
         lines.extend(_summary_line(r) for r in ordered)
         lines.append("── 详情 ──────────────")
     for r in ordered:

@@ -266,6 +266,8 @@ Notification modules are optional external side effects. Configure them only aft
 
 Never register all tasks automatically. Never infer that a prompt file is already installed in the user's task runner.
 
+Every trading prompt starts with the exchange-calendar gate (`python3 quant/ops/agent_jobs.py due --kind <kind>`), backed by the pinned `exchange-calendars` XNYS calendar declared in `pyproject.toml`; verify that the gate answers before registering a cadence. The optional domain-agent controller (`agents/README.md`) additionally needs the Claude Code and/or Codex CLI installed and logged in on the machine, keeps its private run artifacts, leases and backups under the ignored `var/` directory, and applies card updates only after an independent cross-runtime review. Read `agents/routing.json` and `agents/MODEL_POLICY.md` before changing which runtime or model serves a role.
+
 ### CI
 
 A CI environment should install the declared development dependencies and run the offline verification gate only. It must not receive broker credentials, access private `trade/` runtime files, start OpenD, register tasks, send notifications, or exercise order scripts. CI configuration is a separate repository change and requires normal review.

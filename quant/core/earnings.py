@@ -159,14 +159,14 @@ def cards_stale_after_print(*docs: Optional[dict], today: str,
     缩仓, 重画 SLA 只活在 prose 的 `update_trigger` 里, 没有读者。同轮 NBIS
     (8/12 BMO) 卡锚同样停在 8/06。**强制点只在文档不在代码 = 这条规则不存在。**
     """
-    from .holdings import is_managed                        # noqa: PLC0415  同层
+    from .holdings import is_managed, is_scannable_card     # noqa: PLC0415  同层
     from .structure import anchor_date                      # noqa: PLC0415  同层
     cal = calendar if calendar is not None else load_calendar()
     rows = (cal.get("tickers") or {}) if cal else {}
     out: List[str] = []
     for doc in docs:
         for t, body in sorted(((doc or {}).get("tickers") or {}).items()):
-            if body.get("status") == "closed" or not is_managed(body):
+            if not is_scannable_card(body) or not is_managed(body):
                 continue
             if ((body.get("instrument") or {}).get("type")) == "option":
                 continue        # 期权卡无自有 zones, 它的图锚在 underlying 卡上

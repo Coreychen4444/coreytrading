@@ -4,7 +4,20 @@
  收盘判读改成"全部内容进一条总结"之后，这条限制从"详情才会碰到"
 变成"票一多就会碰到"，所以拆条必须是代码，不是 prose 指令。
 """
+import pytest
+
+from quant.core import motto
 from quant.ops import tg_notify as tg
+
+FOOTER = "synthetic reminder line"
+
+
+@pytest.fixture
+def footer(monkeypatch):
+    """Configured closing line; the default (unset) is exercised separately."""
+    monkeypatch.setattr(motto, "MOTTO", FOOTER)
+    monkeypatch.setattr(motto, "MOTTO_LINE", motto.PREFIX + FOOTER)
+    return motto.MOTTO_LINE
 
 
 def test_short_message_is_not_split():
@@ -70,3 +83,81 @@ def test_load_bot_token_falls_back_to_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(tg, "TOKEN_ENV_PATHS", (str(missing),))
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "environment-token")
     assert tg.load_bot_token() == "environment-token"
+
+
+# ── rich 通道 (, Bot API 10.1 sendRichMessage) ──────────────────
+
+class _RichSpy:
+    def __init__(self, fail_at=None):
+        self.sent, self.fail_at = [], fail_at
+
+    def __call__(self, blocks):
+        if self.fail_at is not None and len(self.sent) + 1 == self.fail_at:
+            raise RuntimeError("Telegram API error 400 (no retry): Bad Request: bad block")
+        self.sent.append(blocks)
+        return {"ok": True}
+
+
+class _LegacySpy:
+    def __init__(self):
+        self.sent = []
+
+    def __call__(self, text, parse_mode="Markdown", retries=3):
+        self.sent.append((text, parse_mode))
+        return {"ok": True}
+
+
+def test_rich_parts_compile_split_and_footer_motto(footer):
+    parts = tg.rich_parts("# 报告\n| a | b |\n|---|---|\n| 1 | 2 |")
+    assert len(parts) == 1
+    assert [b["type"] for b in parts[0]] == ["heading", "table", "footer"]
+    assert parts[0][-1]["text"] == footer
+    assert [b["type"] for b in tg.rich_parts("x", motto=False)[0]] == ["paragraph"]
+
+
+def test_send_rich_uses_rich_channel_and_reports_mode():
+    rich, legacy = _RichSpy(), _LegacySpy()
+    res = tg.send_rich("# 报告\n正文", send_part=rich, legacy_send=legacy, sleep_fn=lambda s: None)
+    assert res == {"mode": "rich", "parts": 1} and len(rich.sent) == 1 and not legacy.sent
+
+
+def test_send_rich_rejected_part_falls_back_to_legacy_for_the_remainder(monkeypatch, footer):
+    """第 2 条被 400 → 第 1 条已在手机上, 剩余内容走老路 (子集→HTML), 尾行仍只有一份。"""
+    monkeypatch.setattr(tg.tg_rich, "RICH_CHAR_BUDGET", 60)
+    text = "# 一\n" + "a" * 50 + "\n\n# 二\n" + "b" * 50 + " *粗* [l](https://x.y)"
+    rich, legacy = _RichSpy(fail_at=2), _LegacySpy()
+    res = tg.send_rich(text, send_part=rich, legacy_send=legacy, sleep_fn=lambda s: None)
+    assert res["mode"] == "legacy_fallback" and res["rich_parts"] == 1 and res["fallback_from"] == 2
+    assert len(rich.sent) == 1 and "a" * 50 in tg.tg_rich.blocks_plain(rich.sent[0])
+    html = "\n".join(t for t, _ in legacy.sent)
+    assert "<b>二</b>" in html and "b" * 50 in html and "<b>粗</b>" in html and 'href="https://x.y"' in html
+    assert html.count(footer) == 1 and "a" * 50 not in html
+    assert all(mode == "HTML" for _, mode in legacy.sent)
+
+
+def test_cli_default_is_rich_dry_run_prints_blocks_and_never_sends(monkeypatch, capsys, footer):
+    """不带任何旗 = rich; --rich 只是兼容旗。"""
+    monkeypatch.setattr(tg, "send_rich_message", lambda blocks: (_ for _ in ()).throw(AssertionError("sent!")))
+    monkeypatch.setattr(tg, "send_message", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent!")))
+    for argv in (["--dry-run", "# 标题\n| a |\n|---|\n| 1 |"],
+                 ["--rich", "--dry-run", "# 标题\n| a |\n|---|\n| 1 |"]):
+        tg.main(argv)
+        parts = __import__("json").loads(capsys.readouterr().out)
+        assert [b["type"] for b in parts[0]] == ["heading", "table", "footer"]
+
+
+def test_cli_legacy_flag_is_the_only_way_back_to_send_message(monkeypatch, capsys, footer):
+    monkeypatch.setattr(tg, "send_rich_message", lambda blocks: (_ for _ in ()).throw(AssertionError("sent!")))
+    monkeypatch.setattr(tg, "send_message", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent!")))
+    tg.main(["--legacy", "--plain", "--dry-run", "第一段\n\n第二段 *x*"])
+    out = capsys.readouterr().out
+    assert "<<<PART>>>" not in out and "*x*" in out and footer in out   # 一条, 原样文本 + 座右铭尾行
+    with pytest.raises(SystemExit):
+        tg.main(["--rich", "--legacy", "--dry-run", "x"])                    # 互斥
+
+
+def test_no_footer_configured_means_nothing_is_appended(monkeypatch):
+    monkeypatch.setattr(motto, "MOTTO", "")
+    monkeypatch.setattr(motto, "MOTTO_LINE", "")
+    assert [b["type"] for b in tg.rich_parts("x")[0]] == ["paragraph"]
+    assert tg.append_motto(["a", "b"]) == ["a", "b"] and tg.append_motto([]) == []

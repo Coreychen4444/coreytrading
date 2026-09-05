@@ -32,6 +32,8 @@ CLI:
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import sys
 from pathlib import Path
 
@@ -583,27 +585,30 @@ def run(apply: bool = False) -> Dict:
         ("watchlist", state_io.read_watchlist, state_io.write_watchlist),
 )
     for bucket, read, write in buckets:
-        doc = read()
-        hits: List[Dict] = []
-        for ticker, card in (doc.get("tickers") or {}).items():
-            if bucket == "positions":
-                broker = card.get("broker") or {}
-                if card.get("status") == "closed" and not (broker.get("qty") or 0):
-                    continue
-                if not is_managed(card):
-                    continue
-            else:
-                if card.get("moomoo_listed") is False:
-                    continue
-            tr = detect_transition(ticker, card, today=today)
-            if tr:
-                tr["bucket"] = bucket
-                found.append(tr)
-                hits.append(tr)
-                if apply:
-                    apply_transition(card, tr)
-        if apply and hits:
-            with state_lock():
+        # Hold the lock from the read through the merge and write. Locking only
+        # write(doc) can overwrite a broker sync or a newly repainted card with
+        # the old whole-document snapshot. A preview neither writes nor locks.
+        with state_lock() if apply else nullcontext():
+            doc = read()
+            hits: List[Dict] = []
+            for ticker, card in (doc.get("tickers") or {}).items():
+                if bucket == "positions":
+                    broker = card.get("broker") or {}
+                    if card.get("status") == "closed" and not (broker.get("qty") or 0):
+                        continue
+                    if not is_managed(card):
+                        continue
+                else:
+                    if card.get("moomoo_listed") is False:
+                        continue
+                tr = detect_transition(ticker, card, today=today)
+                if tr:
+                    tr["bucket"] = bucket
+                    found.append(tr)
+                    hits.append(tr)
+                    if apply:
+                        apply_transition(card, tr)
+            if apply and hits:
                 write(doc)
         for t, c in (doc.get("tickers") or {}).items():
             pr = (c.get("agent") or {}).get("pending_repaint")

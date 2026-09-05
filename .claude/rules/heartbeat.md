@@ -1,6 +1,9 @@
 # Heartbeat rules
 
 - Use `quant/ops/pipeline.py --mode heartbeat` as the canonical periodic sequence.
+- Every scheduled trading prompt starts with `quant/ops/agent_jobs.py due --kind <kind>`; a non-session day or an out-of-window wake-up stops before any collection, and a calendar error is reported rather than guessed around.
+- The `agents` stage (domain research and reviewed card updates) runs after the brief and the regime transition and before reminders and the authorization group. Only a receipt with `status == "applied"` is a written card; a `partial` receipt lists missing roles, cards not applied and pending targets and is recorded as `partial`, not as a failed stage.
+- `pipeline --read-only` is an allowlist: only the cached brief runs, and the agents stage is skipped.
 - Missing eligible cards may start detached analysis through `quant/ops/card_autopaint.py`; the stage must return immediately, and read-only runs must use its dry-run mode.
 - Promote a held watchlist card before lot reconciliation so re-entry lots inherit the current analyzed card.
 - Score structural exits between close reconciliation and candidate migration: the exit record is the predicate, and promotion would otherwise overwrite the card being scored.

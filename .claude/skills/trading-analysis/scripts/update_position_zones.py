@@ -27,17 +27,18 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 # scripts -> trading-analysis -> skills -> .claude -> workspace root
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))          # repo root → `quant.*` (分层见 quant/README.md)
 
 from quant.core import book, schema as _schema  # noqa: E402
-from quant.core.io_json import atomic_write_json, state_lock  # noqa: E402
+from quant.core.agent_contracts import canonical_hash  # noqa: E402
+from quant.core.io_json import atomic_write_json, read_json, state_lock  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import is_option_ticker  # noqa: E402
-from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
+from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, VALUATION_INPUTS_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core import structure  # noqa: E402
 from quant.core.structure import derive_card_regime  # noqa: E402
 from quant.core.timeutil import et_today, now_utc_iso as utc_now_iso  # noqa: E402
@@ -57,10 +58,14 @@ KNOWN_ROLES = {
 }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Upsert execution zones in v2 state/")
     p.add_argument("--ticker", required=True)
     p.add_argument("--bucket", required=True, choices=["current", "watchlist"])
+    p.add_argument("--expected-revision", default=None,
+                   help="Optional canonical SHA256 of the complete target ticker card. "
+                        "Checked under the state lock; stale proposals abort before writing. "
+                        "For a missing card use canonical_hash(None).")
     p.add_argument("--instrument-type", default="stock", choices=["stock", "option"])
     p.add_argument("--role", default="")
     p.add_argument("--linked-underlying", default="")
@@ -161,7 +166,7 @@ def parse_args() -> argparse.Namespace:
 )
     p.add_argument("--remove-from-other", action="store_true")
     p.add_argument("--print-json", action="store_true")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def load_doc(path: Path, *, required: bool = False) -> Dict[str, Any]:
@@ -431,6 +436,37 @@ def apply_repair_gate_anchor(agent: Dict[str, Any], args: argparse.Namespace) ->
                   f"entry_guard 将判 STALE; 复核该收复线后加 --repair-gate-anchor-basis 盖同日锚")
 
 
+def drop_stale_auto_observation(agent: Dict[str, Any], prev_zones: Dict[str, Any]) -> None:
+    """stop 换了数值 → 转移机按**旧 stop** 预推的 `last_regime` 作废。
+
+    `regime_transition.derive_observation_regime` 在每次转移后把「破了 stop 落到哪」预推成
+    `last_regime` (source=auto, repair_gate.level == 当时的 stop)。它是那条 stop 的函数:
+    z1 顶 = stop, z1/z2/下一 stop 依次锚 stop 之下的 pivot 低点。而下行分支 (`apply_transition`
+    else 段) **只在 last_regime 为空时重推**, 否则原样把 `last.zones` 搬成 current ——
+    于是重画把 stop 从 180.6 抬到 201.9 之后, 若不清掉这块, 2 日收 <201.9 那天机器装上的
+    是一套锚在 180.6 之下的图 (172-180 / 164-172, stop 154) + 名字 observation_below_180.6:
+    「冻结快照不知母结构已死」的形状 (memory data_discipline)。
+
+    只清 source=auto 且 repair_gate.level == 旧 stop 的块 —— 那才是「按旧 stop 推出来的」。
+    上行转移写的 last_regime (source=demoted, repair_gate = 刚收复的 gate, zones = 旧 current)
+    不是 stop 的函数, stop 改了它仍成立, 不动。清空是诚实的 (机器按新 stop 重推), 手编替它
+    重推不是 (画图的手不写机器字段)。stop 数值未变 → 不动 (纯复核重画不触发)。
+    """
+    lr = agent.get("last_regime")
+    if not isinstance(lr, dict) or lr.get("source") != "auto":
+        return
+    old_stop = coerce_float((prev_zones or {}).get("stop_level"))
+    new_stop = coerce_float((agent.get("zones") or {}).get("stop_level"))
+    lvl = coerce_float((lr.get("repair_gate") or {}).get("level"))
+    if old_stop is None or new_stop is None or lvl is None:
+        return
+    if round(old_stop, 2) == round(new_stop, 2) or abs(lvl - old_stop) > 1e-6:
+        return
+    agent.pop("last_regime", None)
+    print(f"[zones] last_regime {lr.get('name') or ''} (auto, 按旧 stop {old_stop:g} 预推) 随 stop "
+          f"→ {new_stop:g} 作废并清除 — 转移机在破位时按新 stop 重推 (下行分支只在该块为空时重推)")
+
+
 def apply_next_gate_anchor(agent: Dict[str, Any], args: argparse.Namespace) -> None:
     """`next_regime` 里 gate 的锚日 **由构造给定**, 不接受手写 ()。
 
@@ -516,6 +552,29 @@ def warn_missing_next_gate(ticker: str, agent: Dict[str, Any]) -> None:
           f"provisional; 范本 AMZN R_突破_279)")
 
 
+def warn_missing_archetype(ticker: str, *, inputs_path: Optional[Path] = None) -> bool:
+    """画卡写盘后: 估值层人工区没有这票 → ⚠️ 提醒 (不拦截)。→ True = 缺。
+
+    归原型是画卡的一部分, 不是事后让人手填的
+    步骤。不拦截: 判断层零授权, 缺它不影响 zone/gate/cap; 缺着由 brief `INFRA:card_missing_archetype`
+    每轮点名 (与 next_gate 同款)。期权卡不查 (估的是 underlying)。
+    """
+    if is_option_ticker(ticker) or not str(ticker).isalpha():
+        return False
+    p = Path(inputs_path or VALUATION_INPUTS_PATH)
+    try:
+        have = {str(k).upper() for k in ((read_json(p) if p.exists() else {}) or {}).get("tickers") or {}}
+    except Exception:                                              # noqa: BLE001  坏文件不拖垮画卡
+        have = set()
+    if ticker.upper() in have:
+        return False
+    print(f"⚠️ {ticker} 卡已写盘但估值层未归原型 (inputs.json 无条目) — 画卡一并做:\n"
+          f"   python3 quant/valuation/archetypes.py set {ticker} --archetype "
+          f"<platform|semi_cyclical|ai_infra_capex|software_growth|not_applicable> "
+          f"--rationale \"<商业模式一句话>\"   (原型参数见 ARCHETYPES; 判断层零授权)")
+    return True
+
+
 def merge_position(
     existing: Dict[str, Any], args: argparse.Namespace, *, ticker: str
 ) -> Dict[str, Any]:
@@ -559,8 +618,10 @@ def merge_position(
     thesis["last_reviewed"] = utc_now_iso()
     agent["thesis"] = thesis
 
+    prev_zones = dict(agent.get("zones") or {}) if isinstance(agent.get("zones"), dict) else {}
     zones_block = build_zones_block(args, ticker=ticker)
     apply_zones_block(agent, zones_block)
+    drop_stale_auto_observation(agent, prev_zones)
     if args.next_regime is not None:
         nr = json.loads(args.next_regime)
         if nr is None:
@@ -635,8 +696,10 @@ def merge_candidate(
     thesis["last_reviewed"] = utc_now_iso()
     agent["thesis"] = thesis
 
+    prev_zones = dict(agent.get("zones") or {}) if isinstance(agent.get("zones"), dict) else {}
     zones_block = build_zones_block(args, ticker=str(out.get("_ticker") or ""))
     apply_zones_block(agent, zones_block)
+    drop_stale_auto_observation(agent, prev_zones)
     if args.next_regime is not None:
         nr = json.loads(args.next_regime)
         if nr is None:
@@ -676,13 +739,31 @@ def merge_candidate(
     return out
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable[[dict], None]] = None) -> int:
+    """Legacy CLI plus an optional trusted-host check under the RMW lock.
+
+    The callback is a Python API only, never a worker/CLI argument. It runs after
+    schema validation and before the first write, allowing the controller to
+    recheck expiring review/evidence after waiting for the shared state lock.
+    It receives only the ticker, bucket, and before/after target-card hashes;
+    the latter is computed from the final merged card, including writer stamps.
+    """
+    if precommit_check is not None and not callable(precommit_check):
+        raise TypeError("precommit_check must be a trusted callable")
+    args = parse_args(argv)
     ticker = args.ticker.upper().strip()
 
     with state_lock():
         pos = load_doc(POSITIONS_PATH, required=True)
         wl = load_doc(WATCHLIST_PATH)
+        target = pos if args.bucket == "current" else wl
+        before_revision = canonical_hash((target.get("tickers") or {}).get(ticker))
+        if args.expected_revision is not None:
+            actual = before_revision
+            if actual != args.expected_revision:
+                raise RuntimeError(
+                    f"revision conflict: {ticker} in {args.bucket} changed since proposal "
+                    f"(expected {args.expected_revision}, actual {actual}) — abort, 未写盘")
         pos_dirty = wl_dirty = False
 
         if args.bucket == "current":
@@ -748,7 +829,6 @@ def main() -> int:
                 print(report, file=sys.stderr)
             if errors:
                 raise RuntimeError("zone update aborted — positions.json schema errors")
-            atomic_write_json(POSITIONS_PATH, pos)
         if wl_dirty:
             errors, warnings = _schema.validate_watchlist_doc(wl)
             report = _schema.format_report(errors, warnings, label="watchlist.json")
@@ -756,7 +836,15 @@ def main() -> int:
                 print(report, file=sys.stderr)
             if errors:
                 raise RuntimeError("zone update aborted — watchlist.json schema errors")
+        if precommit_check is not None:
+            precommit_check({"ticker": ticker, "bucket": args.bucket,
+                             "before_revision": before_revision, "after_revision": canonical_hash(written)})
+        if pos_dirty:
+            atomic_write_json(POSITIONS_PATH, pos)
+        if wl_dirty:
             atomic_write_json(WATCHLIST_PATH, wl)
+
+    warn_missing_archetype(ticker)
 
     if args.print_json:
         print(

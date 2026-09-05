@@ -25,10 +25,11 @@ import json
 from datetime import date, timedelta
 
 from quant.core.io_json import iter_jsonl, read_json  # noqa: E402
+from quant.core.market_sessions import session_close  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
-from quant.core.timeutil import et_today  # noqa: E402
+from quant.core.timeutil import ET, et_today  # noqa: E402
 
 from quant.data.market_data import get_kline  # noqa: E402
 
@@ -45,7 +46,8 @@ BENCHMARKS = ["QQQ", "SPY", "SMH", "SOXX"]   # SMH/SOXX: 半导体板块量能 g
 # 用户: 本仓只做技术分析+风控, 宏观读数不再采集; UTC 日历守卫 YH_UTC_DATED 随 BTC 一并退役。)
 INDEX_YH = {"NDX": "^NDX", "SPX": "^GSPC", "SOX": "^SOX", "VIX": "^VIX"}
 
-# 定型时刻特例 (ET wall-clock, 缺省 16:05)。VIX 16:15 结算取 16:20 ( 案)。
+# 定型时刻特例 (ET wall-clock)。现金股票缺省 XNYS 收盘 +5 分钟。
+# VIX 保留 16:20 ( 案)；现金日历不能证明 VIX/期权的提前收市。
 YH_CUTOFF = {"VIX": "16:20"}
 
 
@@ -124,16 +126,18 @@ def update_ticker(ticker: str, backfill_days: int) -> int:
     KLINE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = KLINE_CACHE_DIR / f"{ticker}.jsonl"
     last = last_cached_date(path)
-    start = (date.fromisoformat(last) + timedelta(days=1)).isoformat() if last \
-        else (date.fromisoformat(et_today()) - timedelta(days=backfill_days)).isoformat()
     end = et_today()
+    start = (date.fromisoformat(last) + timedelta(days=1)).isoformat() if last \
+        else (date.fromisoformat(end) - timedelta(days=backfill_days)).isoformat()
     if start > end:
         return 0
     if ticker in INDEX_YH:
         bars = _yahoo_daily(INDEX_YH[ticker], start)
     else:
         bars = get_kline(ticker, ktype="1d", start=start, end=end)
-    new = [b for b in bars if str(b.get("time", ""))[:10] >= start]
+    # 不接受未来/休市日行，即使供方错误返回它们；不改写已有缓存。
+    new = [b for b in bars if start <= str(b.get("time", ""))[:10] <= end
+           and session_close(str(b.get("time", ""))[:10]) is not None]
     # 当日那根 bar 只有在它的 session 完整结束后才定型 —— 之前它的 close 只是
     # 拉数据那一刻的现价。缓存的契约是"**已完成**的日线", 全部下游
     # (regime_transition / exit_guard 棘轮与趋势线 / entry_guard gate 计数 /
@@ -143,13 +147,17 @@ def update_ticker(ticker: str, backfill_days: int) -> int:
     #  06:31 ET (盘前) briefing 轮把 VIX 当日进行中读数 16.35 当日线
     # 落了库 —— NDX/SPX/SOX 没中招只因 Yahoo 盘前不播股指当日 row, 是运气不是
     # 机制 (同夜盘基准案: 守卫只盖一个窗口, 失效存在于更宽的窗口)。
-    # 判据改为**定型时刻**: ET 时刻 < cutoff → 丢一切当日 bar, 与处在哪个 session
-    # 无关。VIX 16:15 ET 结算取 16:20; 其余 16:05 —— postclose (16:10 ET) 依赖
-    # 当日正股收盘, 不能一刀切 16:20, 代价是 VIX 当日 bar 次晨 briefing 轮才入库。
-    # 特例表 YH_CUTOFF (VIX 16:20)。
-    if _et_hhmm() < YH_CUTOFF.get(ticker, "16:05"):
+    # 现金股票/普通股指使用 XNYS 当日收盘 + 既有 5 分钟供方定型等待，
+    # 半日市为 13:05，普通交易日为 16:05。VIX 与 OCC 期权保留既有较晚
+    # 守卫，不能把现金市场的 13:00 推断为这些产品已经定型。
+    close = session_close(end)
+    if ticker in YH_CUTOFF or parse_occ(ticker):
         cutoff = YH_CUTOFF.get(ticker, "16:05")
-        today = et_today()
+    else:
+        cutoff = ((close.astimezone(ET) + timedelta(minutes=5)).strftime("%H:%M")
+                  if close is not None else None)
+    if cutoff is None or _et_hhmm() < cutoff:
+        today = end
         dropped = [b for b in new if str(b.get("time", ""))[:10] >= today]
         if dropped:
             print(f"[kline_cache] {ticker}: 未过定型时刻 {cutoff} ET, 丢弃当日未完成 "

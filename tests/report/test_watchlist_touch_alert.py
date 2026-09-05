@@ -41,6 +41,8 @@ def brief(tmp_path, monkeypatch):
         wl = tmp_path / "watchlist.json"
         wl.write_text(json.dumps({"tickers": wl_tickers}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", pos)
+        # 预算/敞口使用同一份合成账本，不能回读 book 的默认私有路径。
+        monkeypatch.setattr(pb.book, "POSITIONS_PATH", pos)
         monkeypatch.setattr(pb, "STATE_WATCHLIST_PATH", wl)
         monkeypatch.setattr(pb, "lot_drift", lambda *a, **k: [])
         # 同上: build_brief 读真日历 = 断言跟着财报季红绿 (立规)。
@@ -56,9 +58,11 @@ def brief(tmp_path, monkeypatch):
         nav = tmp_path / "nav_history.jsonl"
         nav.write_text("", encoding="utf-8")
         monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+        monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
         kdir = tmp_path / "klines"
         kdir.mkdir(exist_ok=True)
         monkeypatch.setattr(pb, "KLINE_CACHE_DIR", kdir)
+        monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", kdir)
         return pb.build_brief([], "代码", mutate_state=False)
     return _run
 
@@ -83,7 +87,7 @@ def test_touch_extends_down_through_z2(brief):
 
 def test_cap_zero_card_never_rings(brief):
     """修复观察 (cap 0) 卡的回踩不是动作触发点 — 响铃只会邀请未授权入场,
-    与 2026-08-09 z1 画线补洞同判据。变异守卫: 拿掉 cap 判断即红。"""
+    与  z1 画线补洞同判据。变异守卫: 拿掉 cap 判断即红。"""
     out = brief({"NVDA": _wl_card(price=212.4, cap=0)})
     assert _touch_alerts(out) == []
 
@@ -101,3 +105,9 @@ def test_no_snapshot_no_opinion(brief):
 def test_volume_reference_never_rings(brief):
     out = brief({"SPY": _wl_card(price=212.4, role="volume_reference")})
     assert _touch_alerts(out) == []
+
+
+def test_tombstone_card_does_not_ring(brief):
+    """移出自选分组只翻 moomoo_listed, status 仍 watching —— 只看 status 会给墓碑卡响铃 ()。"""
+    assert _touch_alerts(brief({"AMKR": _wl_card()}))                       # 对照: 候选卡照响
+    assert _touch_alerts(brief({"AMKR": {**_wl_card(), "moomoo_listed": False}})) == []

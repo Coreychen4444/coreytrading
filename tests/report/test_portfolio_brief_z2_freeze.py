@@ -32,6 +32,8 @@ def brief(tmp_path, monkeypatch):
         path = tmp_path / "positions.json"
         path.write_text(json.dumps({"tickers": positions or {}}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_POSITIONS_PATH", path)
+        # 预算/敞口使用同一份合成账本，不能回读 book 的默认私有路径。
+        monkeypatch.setattr(pb.book, "POSITIONS_PATH", path)
         wl = tmp_path / "watchlist.json"
         wl.write_text(json.dumps({"tickers": watchlist or {}}), encoding="utf-8")
         monkeypatch.setattr(pb, "STATE_WATCHLIST_PATH", wl)
@@ -48,9 +50,11 @@ def brief(tmp_path, monkeypatch):
         nav = tmp_path / "nav_history.jsonl"
         nav.write_text("", encoding="utf-8")
         monkeypatch.setattr(pb, "NAV_HISTORY_PATH", nav)
+        monkeypatch.setattr(pb.book, "NAV_HISTORY_PATH", nav)
         kdir = tmp_path / "klines"
         kdir.mkdir(exist_ok=True)
         monkeypatch.setattr(pb, "KLINE_CACHE_DIR", kdir)
+        monkeypatch.setattr(pb.book, "KLINE_CACHE_DIR", kdir)
 
         rows, col = pb.load_rows_from_state(path)
         return pb.build_brief(rows, col, mutate_state=False)
@@ -106,3 +110,14 @@ def test_held_ticker_dedups_to_positions_card(brief):
                qty=0, status="watching")
     out = brief(positions={"TST": pos}, watchlist={"TST": wl})
     assert _freeze_triggers(out) == []
+
+
+def test_tombstone_card_removed_from_moomoo_group_stays_silent(brief):
+    """源案例: 移出自选分组 (moomoo_listed=false, status 仍 watching) 的墓碑卡在周复盘里
+    冒出「破 z2 下沿 → 当日 BUY 冻结」。候选判据 = holdings.is_candidate, 不是 status。"""
+    card = _card([578.0, 588.0], [560.0, 571.0], cap=0.4, price=553.5, qty=0, status="watching")
+    card["moomoo_listed"] = False
+    out = brief(watchlist={"MSTR": card})
+    assert _freeze_triggers(out) == []
+    assert not any("MSTR" in a for a in out["alerts"])
+    assert not any("MSTR" in z for z in out["watchlist_zone_lines"])

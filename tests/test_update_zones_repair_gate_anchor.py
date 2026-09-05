@@ -12,12 +12,16 @@ from pathlib import Path
 
 import pytest
 
+from quant.core import io_json, paths
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".claude/skills/trading-analysis/scripts/update_position_zones.py"
 
 
 @pytest.fixture
 def upz(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     spec = importlib.util.spec_from_file_location("upz_repair_anchor_test", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setattr(sys, "argv", ["upz"])
@@ -58,6 +62,8 @@ def upz(monkeypatch, tmp_path):
     pos.write_text(json.dumps({"tickers": {}}), encoding="utf-8")
     monkeypatch.setattr(mod, "WATCHLIST_PATH", wl)
     monkeypatch.setattr(mod, "POSITIONS_PATH", pos)
+    monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
+    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
     return mod, wl
 
 
@@ -96,7 +102,7 @@ def test_standalone_flag_anchors_to_existing_zone_date(upz):
 
 
 def test_bfloor_gap_warns_on_deviation_but_never_blocks(upz, capsys):
-    """A3 (2026-08-09): 带 repair_gate 的卡, stop 距收复线偏离 [0.4,0.6]N → 喊。
+    """A3 (): 带 repair_gate 的卡, stop 距收复线偏离 [0.4,0.6]N → 喊。
 
     round-2b 约定 stop = gate − 0.5N, 此前写入路径零校验 (唯一告警线 entry_guard
     0.25N 比约定松一半), live 合规全靠画卡的人记得。"""

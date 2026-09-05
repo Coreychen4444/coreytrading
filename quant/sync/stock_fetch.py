@@ -35,7 +35,8 @@ from common import (
 # Import project market data module for quotes
 from quant.data.market_data import get_quote, get_snapshot, get_market_state
 
-QUOTE_COLS = ['quote_time', 'price_source', 'current_price', 'change', 'change_pct',
+QUOTE_CLOCK_FIELDS = ('quote_time_raw', 'quote_time_basis', 'quote_retrieved_at')
+QUOTE_COLS = ['quote_time', *QUOTE_CLOCK_FIELDS, 'price_source', 'current_price', 'change', 'change_pct',
               'open', 'high', 'low', 'prev_close']
 # Option greeks persisted into the broker block (, shock-budget
 # framework). `delta` is the load-bearing one — gross exposure is delta
@@ -54,6 +55,7 @@ from quant.sync import state_io  # noqa: E402  (sibling script)
 from quant.core.num import coerce_float as _safe_float  # noqa: E402
 from quant.core.occ import OCC_RE as OPTION_RE  # noqa: E402  (group(1) = underlying)
 from quant.core.timeutil import now_utc_iso as now_iso  # noqa: E402
+from quant.core.quote_times import opend_quote_time
 
 
 def rows_to_broker_updates(rows: List[dict]) -> Dict[str, dict]:
@@ -68,7 +70,7 @@ def rows_to_broker_updates(rows: List[dict]) -> Dict[str, dict]:
             'qty': _safe_float(row.get('持有数量')) or 0.0,
             'avg_cost': max(_safe_float(row.get('平均成本价')) or 0.0, 0.0),
             'currency': (row.get('币种') or 'USD').strip(),
-            'as_of': row.get('quote_time') or now_iso(),
+            'as_of': opend_quote_time(row.get('quote_time')),
             'synthetic': (row.get('synthetic') or '').strip().upper() == 'Y',
         }
         for src, dst in (
@@ -92,6 +94,9 @@ def rows_to_broker_updates(rows: List[dict]) -> Dict[str, dict]:
                 block[dst] = v
         if row.get('price_source'):
             block['quote_source'] = row['price_source']
+        for field in QUOTE_CLOCK_FIELDS:
+            if row.get(field) is not None:
+                block[field] = row[field]
         # Greeks: only written when the snapshot actually carried them. A stale
         # persisted delta is fine (it ages like current_price does); a silently
         # absent one is not — core.sizing.book_usage falls back to delta=1.0 and
@@ -327,7 +332,8 @@ def _quote_from_subscription(q: dict, state: str) -> dict:
         chg = (price - prev) if prev is not None else None
         pct = (chg / prev * 100) if (chg is not None and prev) else None
         return {
-            'quote_time': q.get('quote_time', now_iso()),
+            'quote_time': q.get('quote_time'),
+            **{k: q[k] for k in QUOTE_CLOCK_FIELDS if k in q},
             'price_source': f'moomoo_{field.replace("_price", "")}:{state}',
             'current_price': price,
             'change': chg,
@@ -353,7 +359,8 @@ def _quote_from_sub_last(q: dict) -> dict:
     chg = (last - prev) if (last is not None and prev is not None) else None
     pct = (chg / prev * 100) if (chg is not None and prev) else None
     return {
-        'quote_time': q.get('quote_time', now_iso()),
+        'quote_time': q.get('quote_time'),
+        **{k: q[k] for k in QUOTE_CLOCK_FIELDS if k in q},
         'price_source': 'moomoo_last',
         'current_price': q.get('last_price'),
         'change': chg,
@@ -374,7 +381,10 @@ def _quote_from_snapshot(snap: dict, state: str, live: bool = False) -> dict:
     """
     prefix = 'moomoo_live' if live else 'moomoo_close'
     return {
-        'quote_time': snap.get('update_time') or now_iso(),
+        'quote_time': opend_quote_time(snap.get('update_time')),
+        'quote_time_raw': snap.get('update_time_raw', snap.get('update_time')),
+        'quote_time_basis': 'opend_snapshot_update_time',
+        'quote_retrieved_at': snap.get('quote_retrieved_at'),
         'price_source': f'{prefix}:{state or "no_state"}',
         'current_price': snap.get('last_price'),
         'change': snap.get('change'),
@@ -480,8 +490,9 @@ def refresh_watchlist_quotes() -> int:
             "current_price": q.get("current_price"),
             "prev_close": q.get("prev_close"),
             "change_pct": q.get("change_pct"),
-            "as_of": q.get("quote_time") or "",
+            "as_of": opend_quote_time(q.get("quote_time")),
             "quote_source": q.get("price_source") or "",
+            **{k: q[k] for k in QUOTE_CLOCK_FIELDS if k in q},
         }
         n += 1
     if n:
@@ -510,6 +521,7 @@ def read_rows_from_state() -> List[dict]:
             '币种': broker.get('currency', 'USD'),
             'synthetic': 'Y' if broker.get('synthetic') else '',
             'quote_time': broker.get('as_of') or '',
+            **{k: broker[k] for k in QUOTE_CLOCK_FIELDS if k in broker},
             'price_source': broker.get('quote_source') or 'moomoo',
             'current_price': broker.get('current_price') or '',
             'change_pct': broker.get('change_pct') or '',
@@ -604,6 +616,8 @@ def main(argv: List[str]) -> int:
             src = q.get('price_source', '')
 
         row['quote_time'] = q.get('quote_time', '')
+        for field in QUOTE_CLOCK_FIELDS:
+            row[field] = q.get(field)
         row['price_source'] = src
         row['current_price'] = fmt(cur)
         row['change'] = fmt(chg)

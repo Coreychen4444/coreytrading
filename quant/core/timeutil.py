@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from .market_sessions import session_close, session_open
+
 ET = ZoneInfo("America/New_York")
 SGT = ZoneInfo("Asia/Singapore")
 
@@ -46,17 +48,19 @@ def et_today() -> str:
 def et_session_state(now: datetime | None = None) -> str:
     """当前 ET 常规交易时段的状态: "pre" | "open" | "closed" | "weekend"。
 
-    只看钟点和星期, **不查假日表**—— 假日会被报成 pre/open, 靠"那天没有新 bar"
-    自然兜底; 半日市 (13:00 收) 会被报成 open 到 16:00, 属保守方向 (晚一小时
-    才认收盘, 不会把未完成 bar 当收盘)。
+    XNYS 常规现金股票日历为唯一时段来源，包含半日市与假日。
+    兼容原接口: "weekend" 表示所有休市日（包括工作日假日），"closed" 表示
+    交易日已收盘。无时区的旧调用仍按 ET 解读；带时区输入先转换为 ET。
+    日历不可用时抛错，不退回钟点/星期猜测。
     """
     n = now or datetime.now(ET)
-    if n.weekday() >= 5:
+    n = n.replace(tzinfo=ET) if n.tzinfo is None else n.astimezone(ET)
+    close = session_close(n.date())
+    if close is None:
         return "weekend"
-    m = n.hour * 60 + n.minute
-    if m < 9 * 60 + 30:
+    if n < session_open(n.date()):
         return "pre"
-    return "open" if m < 16 * 60 else "closed"
+    return "open" if n < close else "closed"
 
 
 def et_session_open(now: datetime | None = None) -> bool:

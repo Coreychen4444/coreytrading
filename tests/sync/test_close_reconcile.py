@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from quant.core import io_json
 from quant.sync import close_reconcile as cr
 
 
@@ -120,6 +121,7 @@ def test_apply_preserves_the_agent_block():
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     path = tmp_path / "positions.json"
 
     def _write(doc):

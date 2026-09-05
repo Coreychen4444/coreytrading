@@ -114,3 +114,20 @@ def test_latest_ledger_rows_keeps_last_with_spec(tmp_path):
     rows = C.latest_ledger_rows(p)
     assert set(rows) == {"SYN"} and rows["SYN"]["spec"] == {"x": 2}
     assert M.valuate is not None
+
+
+def test_default_scope_is_coverage_universe_and_all_inputs_is_the_table(monkeypatch):
+    """周复盘 `reconcile` (无 --tickers) 此前 = inputs.json 全表 →「17 票全 ⏳」里带着墓碑 ()。
+    缺省 / --all = 持仓 ∪ 候选 ∩ 已归原型; --all-inputs 才是全表; 显式 --tickers 不受范围限制。"""
+    import argparse
+    monkeypatch.setattr(C, "coverage_tickers", lambda: ["SYN", "NEWB", "NA1"])
+    inputs = {"tickers": {"SYN": {"archetype": "platform"}, "CYC": {"archetype": "semi_cyclical"},
+                          "NA1": {"archetype": "not_applicable"}}}
+
+    def ns(tickers=None, all=False, all_inputs=False):
+        return argparse.Namespace(tickers=tickers, all=all, all_inputs=all_inputs)
+
+    assert C._tickers(ns(), inputs) == ["SYN"]                    # NEWB 未归原型, NA1 不适用
+    assert C._tickers(ns(all=True), inputs) == ["SYN"]
+    assert C._tickers(ns(all_inputs=True), inputs) == ["CYC", "SYN"]
+    assert C._tickers(ns(tickers=["cyc"]), inputs) == ["CYC"]

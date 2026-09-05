@@ -39,11 +39,20 @@ VALUATION_INPUTS_PATH = VALUATION_DIR / "inputs.json"               # 人工区:
 VALUATIONS_PATH = VALUATION_DIR / "valuations.jsonl"                # 每次估值一行 = 可校准的预测账本
 VALUATION_CALIBRATION_PATH = VALUATION_DIR / "calibration.jsonl"    # 对账/回测校准结果 (每条预测 vs 实际一行)
 NAV_HISTORY_PATH = EVENTS_DIR / "nav_history.jsonl"
+# 外部现金流账本: 只收银证转账 (出入金),
+# 由 data/cash_flow_sync 从券商流水同步; NAV 区间变动必须剔它 (core/nav, report/nav_report)。
+CASH_FLOWS_PATH = EVENTS_DIR / "cash_flows.jsonl"
+CASH_FLOWS_SYNC_PATH = EVENTS_DIR / "cash_flows.sync.json"   # 同步到哪一天 (报告据此判「账本可能漏计」)
 DECISIONS_PATH = EVENTS_DIR / "decisions.jsonl"
 SCORES_PATH = JOURNALS_DIR / "scores.jsonl"
 
 TMP_DIR = ROOT / "tmp"
 HEARTBEAT_STATE_PATH = TMP_DIR / "heartbeat-state.json"
+AGENT_SPEC_DIR = ROOT / "agents"
+AGENT_ROUTES_PATH = AGENT_SPEC_DIR / "routing.json"
+AGENT_RUNS_DIR = ROOT / "var" / "agent-runs"
+AGENT_CONTROL_DIR = ROOT / "var" / "agent-control"
+ZONE_WRITER_PATH = ROOT / ".claude" / "skills" / "trading-analysis" / "scripts" / "update_position_zones.py"
 
 # Optional intelligence layer.  Everything below AI_NEWS_DIR is produced by a
 # separate, user-owned news/macro workflow that lives outside this repository:
@@ -77,3 +86,8 @@ def add_openapi_path() -> None:
     p = str(OPENAPI_SCRIPTS)
     if p not in sys.path:
         sys.path.insert(0, p)
+
+
+# Read-only scheduler metadata inventory; never credential or task body paths.
+CLAUDE_SCHEDULE_REGISTRY_ROOT = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
+CODEX_AUTOMATION_ROOT = Path.home() / ".codex" / "automations"

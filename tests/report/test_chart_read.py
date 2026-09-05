@@ -175,26 +175,28 @@ def test_posture_has_three_buckets_and_no_probability(report):
     assert not re.search(r"\b(概率|胜率|\d{1,3}%\s*(概率|可能))", seg)
 
 
-TG_LIMIT = 4096      # Telegram sendMessage 单条上限（tg_notify 只有 sendMessage）
-
-
 def test_digest_of_the_real_book_fits_one_message_and_a_big_book_still_ships(report):
     """扫描表是**唯一那条推送**（起不再推每票详情）。
 
-    全书 11 只实测 1.7k 字符 = 一条装得下。但"装得下"不能靠运气：票一多 /
-    某只票多两个形态就会越界，而越界的后果是**整条 400 拒收，一个字都不到**。
-    所以第二半钉的是 —— 超限时 `tg_notify.split_message` 必须能在**票的边界**
-    上拆开，且每条都合规。
+     起走富消息通道（一票一行的原生表格）：单条 32,768 字符 / 500 块，
+    全书 17 票远在其内。但"装得下"不能靠运气：把票数堆到必然越界时，`tg_rich.split_blocks`
+    必须在**表行边界**拆开、每条重复表头（半张表没有表头 = 读不出哪列是哪列）、行一条不丢。
     """
-    # 第五行「结构」进来后全书一度不是一条装得下；只剩结构行时又装得下 ——
-    # 保证不跟着行宽走：**单只票的块**远小于上限（拆条永远有边界可拆），且把票数堆到必然
-    # 越界时，拆出来的每条合规、整块不裂。票数由块长算出，不写死。
-    one = CR.digest([report])
-    assert tg._tg_len(one) < TG_LIMIT // 4
-    n = TG_LIMIT // tg._tg_len("\n".join(CR.digest_block(report))) + 2
-    parts = tg.split_message(CR.digest([report] * n))
-    assert len(parts) > 1 and all(tg._tg_len(p) <= TG_LIMIT for p in parts)
-    assert all("━━" in p for p in parts), "拆出来的每条都该带完整的票块，不是半只票"
+    from quant.ops import tg_rich
+    one = tg_rich.compile_blocks(CR.digest([report]))
+    assert tg_rich.char_len(one) < tg_rich.RICH_CHAR_BUDGET // 8
+    n = 60
+    parts = tg_rich.split_blocks(tg_rich.compile_blocks(CR.digest([report] * n)), max_blocks=25)
+    assert len(parts) > 1
+    rows, with_table = 0, 0
+    for p in parts:
+        tables = [b for b in p if b["type"] == "table"]
+        if not tables:                    # 预算很小时标题+图例可能单独成一条, 那条没有表是对的
+            continue
+        with_table += 1
+        assert all(t["cells"][0][0].get("is_header") for t in tables), "每条带表的都要带表头"
+        rows += sum(len(t["cells"]) - 1 for t in tables)
+    assert with_table > 1 and rows == n, "表被拆成多条, 行一条不丢"
 
 
 # 用户  明确点名不要的东西：这四类一旦回流，扫描表又会变成
@@ -209,15 +211,19 @@ def test_digest_carries_only_the_structure_line(report):
     """
     out = CR.digest([report])
     body = "\n".join(ln for ln in out.splitlines()
-                     if not ln.startswith(("[FYI]", "结构 = ", "顺序 = ")))
+                     if not ln.startswith(("## ", "> ", "| 票 ", "|---")))
     leaked = [w for w in BANISHED if w in body and w != "收盘"]
     assert not leaked, f"扫描表里漏进了不该有的东西: {leaked}"
     for gone in ("力果", "形态", "倾向", "机会"):
         assert gone not in body, f"「{gone}」退回详情页了，不该回流到推送: {body}"
-    block = CR.digest_block(report)
-    assert len(block) == 2 and block[0].startswith("━━ TEST ━━")
-    assert block[1] == CR.dow_digest_line(report["structure"]["dow"], label=False)
-    assert not block[1].startswith("结构 "), "票头下面只有这一行，标签就是重复"
+    row = CR.digest_row(report)
+    assert row.startswith("| **TEST** | ") and row.count(" | ") == 2          # 票 | 档 | 结构, 恰好三列
+    assert CR.dow_digest_line(report["structure"]["dow"], label=False) in row
+    assert "| 结构 " not in row, "票头旁边只有这一格，标签就是重复"
+    assert CR.digest_block(report) == [row]
+    lines = out.splitlines()
+    assert lines[0].startswith("## [FYI] 收盘判读") and lines[1].startswith("> 结构 = ")
+    assert lines[4:6] == list(CR.DIGEST_TABLE_HEADER)
 
 
 def test_detail_says_what_the_continuation_continues(report):
@@ -719,3 +725,75 @@ def test_digest_carries_the_weekly_level_token():
     ln = CR.dow_digest_line(dv)
     assert "周线级上涨·推进中(洗盘先验)" in ln
     assert not any(w in ln for w in BANISHED)
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. 全书人群 = 活着的卡（判读不能读已不存在的标的）
+# ══════════════════════════════════════════════════════════════
+
+def _book_docs(tmp_path, monkeypatch, positions, watchlist):
+    import json as _json
+    pos_p, wl_p = tmp_path / "positions.json", tmp_path / "watchlist.json"
+    pos_p.write_text(_json.dumps({"tickers": positions}))
+    wl_p.write_text(_json.dumps({"tickers": watchlist}))
+    monkeypatch.setattr(CR, "POSITIONS_PATH", pos_p)
+    monkeypatch.setattr(CR, "WATCHLIST_PATH", wl_p)
+
+
+def _card(**kw):
+    body = {"agent": {"zones": {"accumulation_zone_1": [1.0, 2.0]}}}
+    body.update(kw)
+    return body
+
+
+def test_book_excludes_moomoo_tombstones(tmp_path, monkeypatch):
+    """移出 moomoo 自选分组的卡 = 墓碑，不进全书。
+
+    源案例：几张 `moomoo_listed=false`
+    的卡照读了一整栏。`watchlist_sync` 移出分组时
+    **只翻 moomoo_listed，不动 status** —— 所以「排除 status=closed」一个都拦不住。
+    """
+    _book_docs(tmp_path, monkeypatch, {}, {
+        "LIVE": _card(status="watching", moomoo_listed=True),
+        "TOMB": _card(status="watching", moomoo_listed=False),
+    })
+    assert CR.book_tickers() == ["LIVE"]
+
+
+def test_book_excludes_flat_and_unmanaged_position_cards(tmp_path, monkeypatch):
+    """qty=0 的残卡（期权已平/清仓）与结构豁免层都不进全书。
+
+    `status` 是手工字段、两个方向都出过事，持仓判据只能是 `live_tickers`；
+    结构豁免层「不进任何 task 输出」(position-tiers.md)。
+    """
+    _book_docs(tmp_path, monkeypatch, {
+        "HELD": _card(status="active", broker={"qty": 5}),
+        "FLAT": _card(status="active", broker={"qty": 0}),
+        "SPCX": _card(status="active", broker={"qty": 9},
+                      instrument={"role": "commemorative_hold"}),
+    }, {})
+    assert CR.book_tickers() == ["HELD"]
+
+
+def test_book_excludes_reference_tickers(tmp_path, monkeypatch):
+    """参考票（SPY/QQQ/SMH/SOXX）是基准不是标的 —— 与 gate 阶梯表同一条判据。"""
+    _book_docs(tmp_path, monkeypatch, {}, {
+        "REAL": _card(status="watching", moomoo_listed=True),
+        "SPY": _card(status="watching", moomoo_listed=True,
+                     instrument={"role": "volume_reference"}),
+    })
+    assert CR.book_tickers() == ["REAL"]
+
+
+def test_book_never_hand_copies_the_candidate_predicate():
+    """判别式必须来自 `core.holdings`，不许在本模块再抄一份。
+
+    `moomoo_listed` 这条判据此前手抄在 11 个模块里，第 12 处（外部 prompt）漏了，
+    第 13 处就是本模块。收拢之后再抄 = 这条红。
+    """
+    body = SRC_READ.split("def book_tickers", 1)[1].split("\ndef ", 1)[0]
+    code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+    code = re.sub(r'""".*?"""', "", code, flags=re.S)        # docstring 里说得起，代码里抄不得
+    assert "moomoo_listed" not in code, "book_tickers 又手抄了一份候选判别式"
+    for fn in ("live_tickers", "is_managed", "is_candidate", "is_traded"):
+        assert fn in code, f"book_tickers 没用 core.holdings.{fn}"
