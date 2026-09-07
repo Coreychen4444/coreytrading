@@ -103,3 +103,14 @@ def test_cli_main_syncs_via_state_io(tmp_path, monkeypatch, capsys):
     assert VS.main(["--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["synced"] == ["positions:GOOGL"] and "pos" in written and "wl" not in written
+
+
+def test_mirror_backfills_model_contract_even_if_text_and_timestamp_are_unchanged():
+    pos, wl = _docs()
+    row = _row()
+    VS.sync_cards(pos, wl, {"GOOGL": row})
+    row.update(model_version="v4.2", fair_value_basis="base_case_intrinsic_dcf", price_time="2026-09-01T20:00:00Z")
+    result = VS.sync_cards(pos, wl, {"GOOGL": row})
+    assert result["synced"] == ["positions:GOOGL"]
+    assert pos["tickers"]["GOOGL"]["agent"]["valuation"]["model_version"] == "v4.2"
+    assert VS.sync_cards(pos, wl, {"GOOGL": row})["synced"] == []

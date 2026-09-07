@@ -11,7 +11,7 @@ Applied when: 分析单日大幅异动、zone update 前、下"技术破位 / �
 ## 信息源（情报层收拢：零自行拉取）
 1. **tape 定时点**（永远第一步）：60m K 线 `quant/decision/tape_check.py` / `get_kline.py --ktype 60m`，钉住异动发生的时段；任何归因必须与 tape 时点绑得上。
 2. **大盘 / 板块**：kline 缓存 QQQ / SPY / SMH / SOXX + NDX / SPX / SOX / VIX（`market/klines/*.jsonl`），判"全板块 vs 个股独立"。
-3. **事件叙事**：只读 operator 配置的情报归档（可选的 `ai_news/reports/`，最近两日）；持仓自家财报用 `quant/data/earnings_calendar.py`。归档没有或未配置 = **触发源未知**（合法输出）；不做 WebSearch / 社媒补查，不编造归因。
+3. **事件叙事**：只读 operator 配置的情报归档（可选的 `trade/intelligence/reports/`，最近两日）；持仓自家财报用 `quant/data/earnings_calendar.py`。归档没有或未配置 = **触发源未知**（合法输出）；不做 WebSearch / 社媒补查，不编造归因。
 4. **机械校验**：`quant/decision/catalyst_check.py <T> --date ...`（日期绑定 + tape 否定 + 板块残差）；|单日| > 5% 归因必跑。
 5. 恐慌代理：VIX 水平与 Δ、大盘直线下杀无反抽、防御轮动（`regime_score.py`）。
 

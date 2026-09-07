@@ -54,7 +54,11 @@ class InputPaths:
     valuation_inputs: Path = p.VALUATION_INPUTS_PATH
     fundamentals: Path = p.FUNDAMENTALS_DIR
     macro: Path = p.MACRO_CURRENT_PATH
-    reports: Path = p.AI_NEWS_DIR / "reports"
+    macro_snapshots: Path = p.MACRO_SNAPSHOTS_DIR
+    valuation_overlays: Path = p.VALUATION_OVERLAYS_PATH
+    response_events: Path = p.VALUATION_RESPONSE_EVENTS_PATH
+    response_queries: Path = p.VALUATION_RESPONSE_QUERIES_PATH
+    reports: Path = p.INTELLIGENCE_REPORTS_DIR
 
 
 def _object(value):
@@ -251,9 +255,25 @@ def repaint_targets(capture_or_snapshot):
     return deepcopy(_object(snapshot.get("data")).get("repaint_targets") or [])
 
 
+def _macro_market_view(documents):
+    """Three recent captures for interpretation; full archive remains host-owned."""
+    def capture_time(document):
+        stamp = document.get("generated_at_utc") or document.get("generated_at") or document.get("captured_at")
+        if isinstance(stamp, dict):
+            stamp = stamp.get("utc")
+        return _timestamp(stamp) or datetime.min.replace(tzinfo=timezone.utc)
+    kept = sorted(documents, key=capture_time)[-3:]
+    return deepcopy(kept), {
+        "total_snapshots": len(documents), "included_snapshots": len(kept),
+        "full_archive_hash": canonical_hash(documents),
+        "limitation": "Recent source captures only. The host retains all captures for calculation; "
+                      "repeated observations are not independent evidence or a historical event dataset."}
+
+
 def _valuation_view(value):
     """Bound model context without changing the complete archived evidence."""
     view = deepcopy(value)
+    view["market_snapshots"], view["market_snapshot_coverage"] = _macro_market_view(value.get("market_snapshots") or [])
     for ticker, bundle in _object(view.get("fundamentals")).items():
         if not isinstance(bundle, dict) or not isinstance(bundle.get("quarters"), list):
             continue
@@ -303,7 +323,7 @@ def _reports(reader, directory, now):
         if not match or match[1] > now.astimezone(ET).date().isoformat():
             continue
         ref = "intelligence_report:" + path.name
-        content = reader.read(path, ref, "ai_news", text=True)
+        content = reader.read(path, ref, "intelligence", text=True)
         if content is None:
             continue
         # Date in canonical owner filename is a report date, not a retrieval or
@@ -347,7 +367,7 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     expected = latest_completed_session(now)
     minimum = session_close(expected)
     # Read the intelligence prior first, respecting the repository's ownership.
-    macro = reader.read(paths.macro, "macro", "ai_news")
+    macro = reader.read(paths.macro, "macro", "intelligence")
     macro_error = None
     if macro is not None:
         if validate_macro_document(macro) or macro.get("example_only") is True:
@@ -376,6 +396,14 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     calendar = reader.read(paths.earnings, "earnings", "earnings_calendar") or {}
     valuation_rows = reader.read(paths.valuations, "valuations", "valuation", jsonl=True) or []
     valuation_inputs = reader.read(paths.valuation_inputs, "valuation_inputs", "valuation") or {}
+    valuation_overlays = reader.read(paths.valuation_overlays, "valuation_overlays", "intelligence", jsonl=True) or []
+    response_events = reader.read(paths.response_events, "response_events", "valuation", jsonl=True) or []
+    response_queries = reader.read(paths.response_queries, "response_queries", "valuation") or {}
+    market_snapshots = []
+    for path in sorted(Path(paths.macro_snapshots).rglob("*.json"))[-30:]:
+        document = reader.read(path, "macro_snapshot:" + path.stem, "intelligence")
+        if isinstance(document, dict):
+            market_snapshots.append(document)
     reports = _reports(reader, paths.reports, now)
     events = []
     event_files = sorted(Path(paths.events).glob("????-??/trades.jsonl"))
@@ -421,6 +449,7 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     for t in _object(_object(book_doc).get("tickers")):
         market_names.add((parse_occ(t) or {}).get("underlying") or t)
     cards, market, entries, fundamentals, valuations = {}, {}, {}, {}, {}
+    company_context, valuation_quotes = {}, {}
     market_times = []
     for ticker in sorted(market_names):
         rows = reader.read(Path(paths.klines) / (ticker + ".jsonl"), "bars:" + ticker, "kline_cache", jsonl=True)
@@ -439,6 +468,20 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
                           "atr20": atr[-1] if atr else None}
         if ticker not in selected:
             continue
+        funda = reader.read(Path(paths.fundamentals) / (ticker + ".json"), "fundamentals:" + ticker, "fundamentals")
+        fundamentals[ticker] = funda
+        freshness["fundamentals"][ticker] = _fresh(_object(funda).get("fetched_at"), now, minimum,
+                                                   purpose="cached market inputs; quarterly statements remain dated background")
+        row = next((r for r in reversed(valuation_rows) if r.get("ticker") == ticker), None)
+        valuations[ticker] = row
+        freshness["valuations"][ticker] = _fresh(_object(row).get("timestamp"), now, minimum,
+                                                 purpose="valuation generation only; price_time/fundamentals_fetched_at retained")
+        # The daily price comes from the already refreshed completed bars, not
+        # the weekly financial cache. Capture time does not establish a past vintage.
+        if bars:
+            valuation_quotes[ticker] = {"price": bars[-1]["close"], "as_of": completed_at,
+                "captured_at": now.isoformat(), "source": "bars:" + ticker,
+                "basis": "latest locally captured completed XNYS close; not a live quote"}
         resolved_bucket = (bucket if scope == "card" and bucket else
                            "positions" if ticker in live and ticker in pos_cards else "watchlist")
         card = (pos_cards if resolved_bucket == "positions" else wl_cards).get(ticker)
@@ -453,6 +496,17 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
             whole = positions if resolved_bucket == "positions" else watchlist
             if canonical_hash(whole) != raw_hash:
                 raise ValueError("card source contains fields that cannot be forwarded; host-only revision required")
+        profile = _object(_object(card.get("agent")).get("company_profile"))
+        company_context[ticker] = {
+            "profile": {k: deepcopy(profile[k]) for k in (
+                "business_model", "financing_notes", "notes_as_of", "balance_sheet",
+                "fundamentals_ttm", "source", "fetched_at") if k in profile},
+            "source_ref": resolved_bucket,
+            "model_inputs": deepcopy(_object(valuation_inputs.get("tickers")).get(ticker)),
+            "limitations": "Profile amounts ending _m are USD millions only where currency declares USD. "
+                "Same broker facts are not independent evidence; prose is not a numeric transmission. "
+                "notes_as_of is a date, not verified publication time; this context cannot amend the financial baseline.",
+        }
         zone = _object(_object(card.get("agent")).get("zones"))
         guard = _object(_object(guards.get("positions")).get(ticker))
         price, price_basis = sizing.line_price(zone.get("accumulation_zone_1"), market[ticker]["price"])
@@ -486,14 +540,6 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
                           "entry_stop": {"value": stop, "basis": stop_basis},
                           "holding_stop": {"receipt": holding_stop, "cached_guard": guard},
                           "earnings_state": ev}
-        funda = reader.read(Path(paths.fundamentals) / (ticker + ".json"), "fundamentals:" + ticker, "fundamentals")
-        fundamentals[ticker] = funda
-        freshness["fundamentals"][ticker] = _fresh(_object(funda).get("fetched_at"), now, minimum,
-                                                   purpose="cached market inputs; quarterly statements remain dated background")
-        row = next((r for r in reversed(valuation_rows) if r.get("ticker") == ticker), None)
-        valuations[ticker] = row
-        freshness["valuations"][ticker] = _fresh(_object(row).get("timestamp"), now, minimum,
-                                                 purpose="valuation generation only; price_time/fundamentals_fetched_at retained")
     input_times = {"positions_doc": _object(positions).get("generated_at"), "nav": account.get("logged_at"),
                    "power_room": account.get("logged_at"), "market": _oldest(market_times),
                    "entries": _oldest([_object(positions).get("generated_at"), _object(watchlist).get("generated_at")])}
@@ -540,8 +586,12 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     receipts["receipt_id"] = canonical_hash({k: v for k, v in receipts.items() if k != "receipt_id"})
     data = {"scope": scope, "selected_tickers": selected, "cards": cards,
             "macro": macro, "intelligence_reports": reports,
-            "valuation": {"latest": valuations, "fundamentals": fundamentals,
-                          "inputs": {"as_of": valuation_inputs.get("as_of"), "tickers": {
+            "company_context": company_context, "macro_market_evidence": market_snapshots,
+            "valuation": {"latest": valuations, "fundamentals": fundamentals, "quotes": valuation_quotes,
+                          "market_snapshots": market_snapshots, "overlays": valuation_overlays,
+                          "response_events": [r for r in response_events if r.get("ticker") in selected],
+                          "response_queries": {t: response_queries[t] for t in selected if t in response_queries},
+                          "inputs": {"as_of": valuation_inputs.get("as_of"), "market": valuation_inputs.get("market"), "tickers": {
                               t: _object(valuation_inputs.get("tickers")).get(t) for t in selected}}},
             "portfolio_inputs": bundle, "portfolio_risk_receipts": receipts,
             "holding_risk_inputs": holding_risk,
@@ -558,15 +608,17 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         data["ticker"] = selected[0]
     refs = sorted(reader.sources) + ["portfolio_risk_receipts"]
     shared = make_snapshot(data, evidence_refs=refs, now=now, ttl_s=ttl_s)
-    role_keys = {"macro": ("macro", "intelligence_reports", "selected_tickers"),
+    role_keys = {"macro": ("macro", "intelligence_reports", "selected_tickers", "company_context", "macro_market_evidence"),
                  "technical": ("cards", "macro", "selected_tickers", "repaint_targets"),
                  "risk": ("portfolio_inputs", "portfolio_risk_receipts", "holding_risk_inputs", "power_room_receipt", "selected_tickers"),
-                 "valuation": ("valuation", "macro", "intelligence_reports", "selected_tickers")}
+                 "valuation": ("valuation", "macro", "intelligence_reports", "selected_tickers", "company_context")}
     snapshots = {}
     for role, keys in role_keys.items():
         view = {k: data[k] for k in keys}
         if role == "valuation":
             view["valuation"] = _valuation_view(data["valuation"])
+        if role == "macro":
+            view["macro_market_evidence"], view["macro_market_coverage"] = _macro_market_view(data["macro_market_evidence"])
         if role == "technical" and scope != "card":
             view["cards"] = _technical_overview(data["cards"])
             view["technical_view"] = {

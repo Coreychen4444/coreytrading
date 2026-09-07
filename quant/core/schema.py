@@ -121,10 +121,10 @@ def _validate_regime(block: Any, p: str, *, is_last: bool) -> list[str]:
     return errors
 
 
-# ── company_profile (, 用户: 配合 ai_news 利率传导链) ─────
+# ── company_profile (用户: 配合情报层利率传导链) ─────
 #
 # agent.company_profile = 公司层事实底座 (商业模式 + 资产负债表 + TTM 资本强度),
-# 消费者是 ai_news 宏观 agent 的公司暴露卡 (§7)。零授权效力。
+# 消费者是 市场情报采集任务 的公司暴露卡 (§7)。零授权效力。
 # 所有权分区: 机器区 (balance_sheet/fundamentals_ttm/source/fetched_at,
 # company_profile_sync 覆盖) / 人工区 (business_model/financing_notes/notes_as_of,
 # prose 模式写)。这里只拦结构性破坏 —— 数字口径归写侧模块 docstring。

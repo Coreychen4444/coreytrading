@@ -10,14 +10,14 @@
 原型 (`ARCHETYPES`) 的每个参数都是**声明**, 不是拟合: 数字来自估值常识 (Damodaran/McKinsey
 的口径), 未经本仓校准 —— `valuations.jsonl` 攒够样本后才有资格调。
 
-人工区文件 = `trade/us_stock/valuation/inputs.json`:
+人工区文件 = `trade/valuation/inputs.json`:
     {"tickers": {"GOOGL": {"archetype": "platform", "rationale": "...",
                            "overrides": {...}, "news_overlay": [...]}}}
   overrides 只认 `OVERRIDE_KEYS`; news_overlay 每条 = {date, source, driver, delta, note[, valid_until]}
-  = 用户 **手写**的增量新闻 (reliability=manual, 缺 valid_until 即不过期), driver 只认
+  = operator **手写**的增量新闻 (reliability=manual, 缺固定 valid_until 不应用), driver 只认
   `OVERLAY_DRIVERS` (= EPS_DRIVERS ∪ PE_DRIVERS, 与雷达写的 overlays.jsonl 同一词表, 见 overlays.py)。
   读不认识的键 = 报错, 不静默忽略 —— 写错键名等于没写, 比没写更坏。
-  ⚠️ 雷达自动的新闻→驱动走 `ai_news/valuation/overlays.jsonl`, 不走本文件。
+  ⚠️ 雷达自动的新闻→驱动走 `trade/intelligence/valuation/overlays.jsonl`, 不走本文件。
 
 🚨 零授权效力: 本层不被 sizing/entry_guard/exit_guard import, 不写 positions/watchlist。
 
@@ -58,11 +58,9 @@ from quant.core.paths import VALUATION_INPUTS_PATH  # noqa: E402
 #                   None = WACC+2pp (无护城河假设)
 # s2c_default       销售/投入资本比缺省 (历史算不出时用; 再投资 = Δ收入 / s2c)
 # s2c_floor         销售/资本比地板: 扩产期 (产能先于收入) 的当前值不是稳态, 低于地板取地板
-# engine_weights    v3: fcf_dcf (本仓 DCF = 自己的判断) 与 street (卖方一致目标价按 r_e 折现 12 个月 = 机构口径) 的加权;
-#                   无目标价 (n<3) 时 street 自动 0 权。旧 EPS×PE 引擎降为交叉显示不进权重
+# engine_weights    兼容字段；公允价值固定为 DCF，卖方只作外部参考。
 # scenario          熊/牛情景相对基准的偏移: g0 ∓, 终点利润率 ∓, WACC ±, (周期票) 利润率回归年数 ∓
-#                   ⚠️ 回测校准 (calibrate backtest, 4 季前向, 设计 §10.4): 原 ±5pp 只盖住周期票 31% /
-#                   平台 53% 的实现增速; 按「±1.5Δ 内 ≈75%」定宽 → 周期 g±20/m±10, 平台 g±10/m±6, 软件 g±15/m±8
+#                   声明压力幅度，不代表已验证的概率覆盖率。
 # base_confidence   原型先验置信 (2 高 / 1 中 / 0 低), 与数据质量旗标合成最终置信
 # ── v2 ( 夜, 用户: 「NBIS 才 19 MU 才 232 严重滞后」; 参照 Damodaran + 开源 DCF 通行做法) ──
 # industry_beta     Damodaran 行业 levered β (半导体 1.52 / 软件 1.28–1.69 / 计算机 1.35)。v3 起**只用行业 β**
@@ -81,7 +79,7 @@ ARCHETYPES: dict[str, dict] = {
         "revenue_method": "actual", "revenue_fade_years": 1,
         "industry_beta": 1.30, "margin_window_q": 40, "growth_cap_after": 0.25,
         "ronic_cap": 0.25, "s2c_default": 2.5, "s2c_floor": None,
-        "engine_weights": {"fcf_dcf": 0.5, "street": 0.5},
+        "engine_weights": {"fcf_dcf": 1.0, "street": 0.0},
         "scenario": {"growth": 0.10, "margin": 0.06, "wacc": 0.005},
         "base_confidence": 2,
     },
@@ -94,7 +92,7 @@ ARCHETYPES: dict[str, dict] = {
         "revenue_method": "actual", "revenue_fade_years": 3,
         "industry_beta": 1.52, "margin_window_q": 20, "growth_cap_after": 0.30,
         "ronic_cap": 0.20, "s2c_default": 1.5, "s2c_floor": None,
-        "engine_weights": {"fcf_dcf": 0.5, "street": 0.5},
+        "engine_weights": {"fcf_dcf": 1.0, "street": 0.0},
         "scenario": {"growth": 0.20, "margin": 0.10, "wacc": 0.005, "margin_fade_years": 2},
         "base_confidence": 1,
     },
@@ -107,7 +105,7 @@ ARCHETYPES: dict[str, dict] = {
         "revenue_method": "actual", "revenue_fade_years": 1,
         "industry_beta": 1.69, "margin_window_q": 40, "growth_cap_after": 0.60,
         "ronic_cap": None, "s2c_default": 0.8, "s2c_floor": 0.8,
-        "engine_weights": {"fcf_dcf": 0.5, "street": 0.5},
+        "engine_weights": {"fcf_dcf": 1.0, "street": 0.0},
         "scenario": {"growth": 0.15, "margin": 0.10, "wacc": 0.010},
         "base_confidence": 0,
     },
@@ -120,7 +118,7 @@ ARCHETYPES: dict[str, dict] = {
         "revenue_method": "actual", "revenue_fade_years": 1,
         "industry_beta": 1.45, "margin_window_q": 40, "growth_cap_after": 0.40,
         "ronic_cap": 0.20, "s2c_default": 2.0, "s2c_floor": 1.5,
-        "engine_weights": {"fcf_dcf": 0.5, "street": 0.5},
+        "engine_weights": {"fcf_dcf": 1.0, "street": 0.0},
         "scenario": {"growth": 0.15, "margin": 0.08, "wacc": 0.005},
         "base_confidence": 1,
     },
@@ -146,6 +144,7 @@ OVERRIDE_KEYS = frozenset({
     "history_start", "beta", "wacc", "probabilities", "engine_weights", "tax_rate",
     "revenue_method", "revenue_fade_years", "trend_min_r2", "growth_cap_after", "use_consensus",
     "industry_beta", "margin_window_q",
+    "probability_basis",
 })
 # 新闻→估值驱动词表 (overlays.py 契约与 model.apply_overlays_* 共用; 语义见 model.py 顶部)
 EPS_DRIVERS = frozenset({"revenue_base", "growth_start", "target_margin", "margin_start",
@@ -163,7 +162,7 @@ def _validate_ticker_entry(ticker: str, e: dict) -> None:
         raise ValueError(f"{ticker}: archetype {arch!r} 不在 {sorted(ARCHETYPES)}")
     if not str(e.get("rationale") or "").strip():
         raise ValueError(f"{ticker}: 缺 rationale —— 原型归属是判断, 判断要留痕")
-    unknown = set(e) - {"archetype", "rationale", "overrides", "news_overlay", "notes"}
+    unknown = set(e) - {"archetype", "rationale", "overrides", "news_overlay", "notes", "transmissions", "rate_exposure"}
     if unknown:
         raise ValueError(f"{ticker}: 不认识的键 {sorted(unknown)}")
     ov = e.get("overrides") or {}
@@ -172,8 +171,18 @@ def _validate_ticker_entry(ticker: str, e: dict) -> None:
         raise ValueError(f"{ticker}: overrides 里不认识的键 {sorted(bad)}; 只认 {sorted(OVERRIDE_KEYS)}")
     if "probabilities" in ov:
         p = ov["probabilities"]
-        if set(p) != {"bear", "base", "bull"} or abs(sum(p.values()) - 1.0) > 1e-6:
+        import math
+        if (not isinstance(p, dict) or set(p) != {"bear", "base", "bull"}
+                or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 or v > 1 for v in p.values())
+                or abs(sum(p.values()) - 1.0) > 1e-6):
             raise ValueError(f"{ticker}: probabilities 必须含 bear/base/bull 且和为 1")
+        if not isinstance(ov.get("probability_basis"), str) or not ov["probability_basis"].strip():
+            raise ValueError(f"{ticker}: probabilities require probability_basis")
+    if "transmissions" in e:
+        from quant.core.valuation_contracts import validate_transmissions
+        validate_transmissions(e["transmissions"])
+    if "rate_exposure" in e and not isinstance(e["rate_exposure"], dict):
+        raise ValueError("rate_exposure must be an explicit sourced object")
     if "revenue_method" in ov and ov["revenue_method"] not in ("actual", "trend"):
         raise ValueError(f"{ticker}: revenue_method 只认 actual|trend")
     if "engine_weights" in ov:
@@ -182,8 +191,9 @@ def _validate_ticker_entry(ticker: str, e: dict) -> None:
             raise ValueError(f"{ticker}: engine_weights 必须含 fcf_dcf/street 且非负")
     for i, o in enumerate(e.get("news_overlay") or []):
         need = {"date", "source", "driver", "delta", "note"}
-        if not isinstance(o, dict) or not (need <= set(o)) or not (set(o) <= need | {"valid_until"}):
-            raise ValueError(f"{ticker}: news_overlay[{i}] 必须有键 {sorted(need)} (可选 valid_until)")
+        optional = {"valid_until", "as_of", "baseline_id", "start_year", "end_year"}
+        if not isinstance(o, dict) or not (need <= set(o)) or not (set(o) <= need | optional):
+            raise ValueError(f"{ticker}: news_overlay[{i}] 必须有键 {sorted(need)} (可选 {sorted(optional)})")
         if o["driver"] not in OVERLAY_DRIVERS:
             raise ValueError(f"{ticker}: news_overlay[{i}].driver {o['driver']!r} 不在 {sorted(OVERLAY_DRIVERS)}")
         if not isinstance(o["delta"], (int, float)):
@@ -216,6 +226,7 @@ def resolve(ticker: str, inputs: dict) -> dict:
     entry = (inputs.get("tickers") or {}).get(ticker.upper())
     if entry is None:
         raise KeyError(f"{ticker}: inputs.json 没有归原型 —— 先在人工区写 archetype + rationale")
+    _validate_ticker_entry(ticker, entry)
     arch = entry["archetype"]
     params = copy.deepcopy(ARCHETYPES[arch])
     prov = [f"archetype={arch} ({entry.get('rationale')})"]
@@ -229,6 +240,8 @@ def resolve(ticker: str, inputs: dict) -> dict:
         "archetype": arch, "label": params.pop("label"), "params": params,
         "overrides": overrides, "news_overlay": overlay, "provenance": prov,
         "notes": entry.get("notes"),
+        "transmissions": copy.deepcopy(entry.get("transmissions") or []),
+        "rate_exposure": copy.deepcopy(entry.get("rate_exposure")),
     }
 
 
@@ -260,6 +273,10 @@ def set_entry(ticker: str, archetype: str, rationale: str, *, overrides: dict | 
         entry["overrides"] = merged
     if prev.get("news_overlay"):
         entry["news_overlay"] = prev["news_overlay"]
+    if "transmissions" in prev:
+        entry["transmissions"] = prev["transmissions"]
+    if "rate_exposure" in prev:
+        entry["rate_exposure"] = prev["rate_exposure"]
     if notes is not None:
         entry["notes"] = notes
     elif prev.get("notes"):

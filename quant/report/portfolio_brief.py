@@ -33,7 +33,7 @@ from quant.core.occ import is_option_ticker
 from quant.core.num import coerce_float as normalize_num
 from quant.core.occ import parse_occ
 from quant.core.paths import (
-    EVENTS_DIR, HEARTBEAT_STATE_PATH, HOLDING_ROOT, IV_HISTORY_DIR,
+    EVENTS_DIR, HEARTBEAT_STATE_PATH, PORTFOLIO_ROOT, IV_HISTORY_DIR,
     KLINE_CACHE_DIR, NAV_HISTORY_PATH, SCORES_PATH, VALUATION_INPUTS_PATH,
 )
 from quant.core.sizing import regime_lines
@@ -45,8 +45,8 @@ from quant.decision import entry_guard as _eg  # noqa: E402
 from quant.core import dow as _dow  # noqa: E402  (短期道氏结构位 = 清单排序键)
 
 STATE_PATH = HEARTBEAT_STATE_PATH
-STATE_POSITIONS_PATH = HOLDING_ROOT / "state/positions.json"
-STATE_WATCHLIST_PATH = HOLDING_ROOT / "state/watchlist.json"
+STATE_POSITIONS_PATH = PORTFOLIO_ROOT / "state/positions.json"
+STATE_WATCHLIST_PATH = PORTFOLIO_ROOT / "state/watchlist.json"
 TOP_MOVERS_COUNT = 3
 # Edge-triggered alerts: first occurrence fires; persisting condition re-confirms
 # at most every 24h (was: re-fired every 4h, contradicting heartbeat.md 边沿触发)
@@ -1666,7 +1666,8 @@ def valuation_fyi_map(pos_doc: Optional[dict], wl_doc: Optional[dict]) -> Dict[s
             v = ((card or {}).get("agent") or {}).get("valuation") or {}
             line = str(v.get("fyi") or "").strip()
             if line and tk not in out:
-                out[str(tk).upper()] = line
+                out[str(tk).upper()] = (line + f" · 历史镜像 {v.get('model_version') or '旧版/版本未标注'}"
+                                       f" · 估值日 {v.get('as_of') or '未知'}（本次未重算）")
     return out
 
 
@@ -2230,7 +2231,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
                           + "; ".join(stale_print)
                           + " → 用**反应日收盘**那根 bar 全重画 (盘前照 print 画 = "
                             "未完成 bar 当收盘 + 提前画白画率 40%); **全重画含 thesis "
-                            "情报腿** (print 事实读 ai_news 归档 [FYI] — zones-only "
+                            "情报腿** (print 事实读情报归档 [FYI] — zones-only "
                             "只消音本判据, thesis 仍停在 print 前, MRVL 9/01 案); "
                             "授权不受影响, 财报只压 T+0 size 不压参与")
             triggers.append({"ticker": "INFRA", "type": "card_stale_earnings",

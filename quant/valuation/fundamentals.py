@@ -7,7 +7,7 @@ OpenD 全部给得出 ( 实测: GOOGL/MU/NBIS/AAOI 季度 50 条一页, 2014 起
 5Y; 目标价高/均/低)。本模块只做一件事: 把它们拉下来、按季对齐、落成一份自描述的 JSON,
 模型层 (`quant/valuation/model.py`) 只读这份缓存, 不知道 OpenD 存在。
 
-缓存 = `trade/us_stock/market/fundamentals/<TICKER>.json` (可重拉, 不入 git, 与 klines
+缓存 = `trade/market/fundamentals/<TICKER>.json` (可重拉, 不入 git, 与 klines
 同款约定)。每次估值把用到的驱动数字快照进 `valuations.jsonl`, 所以缓存不入 git 不丢收据。
 
 字段 taxonomy (field_id 是 moomoo 归一化 key, 跨公司稳定; ⚠️ 同一 id 在不同报表里复用,
@@ -40,6 +40,8 @@ from datetime import datetime, timezone
 from quant.core.io_json import atomic_write_json, iter_jsonl, read_json  # noqa: E402
 from quant.core.paths import FUNDAMENTALS_DIR  # noqa: E402
 from quant.core.timeutil import now_utc_iso  # noqa: E402
+from quant.core.agent_contracts import canonical_hash  # noqa: E402
+from quant.core.valuation_contracts import finite  # noqa: E402
 
 STATEMENT_INCOME = 1
 STATEMENT_BALANCE = 2
@@ -84,7 +86,7 @@ def _items_by_id(report: dict) -> dict[int, float]:
     out: dict[int, float] = {}
     for it in report.get("item_list") or []:
         fid, val = it.get("field_id"), it.get("data")
-        if isinstance(fid, int) and isinstance(val, (int, float)):
+        if type(fid) is int and finite(val):
             out[fid] = float(val)
     return out
 
@@ -118,6 +120,9 @@ def parse_quarters(income: list[dict], balance: list[dict], cashflow: list[dict]
             "fiscal_year": r.get("fiscal_year"),
             "quarter": r.get("financial_type"),
             "period_end": r.get("date_time_str"),
+            "period_end_basis": "provider_calendar_date_unverified_against_filing",
+            "provider_period_timestamp": r.get("date_time"),
+            "available_at": None,
             "_ts": r.get("date_time") or 0,
         }
         for k, fid in INCOME_FIELDS.items():
@@ -148,9 +153,17 @@ def parse_snapshot(raw: dict) -> dict:
         v = raw.get(src)
         if k == "update_time":
             out[k] = str(v) if v is not None else None
+            if out[k]:
+                try:
+                    from quant.core.timeutil import ET
+                    stamp = datetime.fromisoformat(out[k])
+                    # This adapter requests US equities; OpenD quote times are ET.
+                    out[k] = (stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=ET)).isoformat()
+                except ValueError:
+                    out[k] = None
             continue
         try:
-            out[k] = float(v) if v is not None and v == v else None  # NaN 守卫
+            out[k] = float(v) if finite(v) else None
         except (TypeError, ValueError):
             out[k] = None
     return out
@@ -195,18 +208,16 @@ def parse_sector(pe_raw: dict | None, ps_raw: dict | None) -> dict | None:
 
 
 def parse_forward(pe_raw: dict | None, ps_raw: dict | None, snap: dict) -> dict:
-    """OpenD 估值接口的 forward_value = 现价 / 一致前瞻 EPS (PE) 与 市值 / 一致前瞻收入 (PS) →
-    反推出**卖方一致前瞻** EPS 与收入 ( 实测: MU fwd PE 6.49 → EPS $144 vs TTM $45,
-    fwd PS 4.53 → 收入 $233B vs TTM $90B; NBIS fwd PS 7.69 → $7.1B vs TTM $1.4B)。
-    这是模型 v1 「严重滞后」的病根: 全用 TTM 往后推, 街上看到的是 2–5 倍的前瞻。
-    ⚠️ OpenD 未声明 forward 的期限 (NTM 还是下一财年), 当作「约 12 个月后」用, 差异归校准。"""
+    """反推前瞻 EPS/收入的外部参考；未知期限与会计口径不能充当十二个月基准。"""
     px, mcap = snap.get("last_price"), snap.get("total_market_val")
     def _fwd(raw):
         t = (raw or {}).get("trend") or {}
         v = t.get("forward_value")
-        return float(v) if isinstance(v, (int, float)) and v == v else None
+        return float(v) if finite(v) else None
     fpe, fps = _fwd(pe_raw), _fwd(ps_raw)
     out = {"forward_pe": fpe, "forward_ps": fps, "forward_eps": None, "forward_revenue": None,
+           "horizon_months": None, "earnings_basis": None,
+           "limitations": ["provider horizon and earnings basis unverified; not a forecast anchor"],
            "as_of": ((pe_raw or {}).get("last_update_time_str") or (ps_raw or {}).get("last_update_time_str")),
            "source": "OpenD get_valuation_detail forward_value (PE/PS) 反推"}
     if fpe and fpe > 0 and px:
@@ -359,8 +370,51 @@ def bundle_path(ticker: str, cache_dir: Path | None = None) -> Path:
 
 def save_bundle(bundle: dict, cache_dir: Path | None = None) -> Path:
     p = bundle_path(bundle["ticker"], cache_dir)
+    # Retain observations before replacing the mutable latest cache. These are
+    # capture vintages, not reconstructed historical disclosure timestamps.
+    history = p.parent / "snapshots" / p.stem
+    if p.exists():
+        previous = read_json(p)
+        prior_path = history / (canonical_hash(previous) + ".json")
+        if not prior_path.exists():
+            atomic_write_json(prior_path, previous)
+    archive = history / (canonical_hash(bundle) + ".json")
+    if not archive.exists():
+        atomic_write_json(archive, bundle)
     atomic_write_json(p, bundle)
     return p
+
+
+def load_vintage(ticker: str, *, as_of: str, cache_dir: Path | None = None) -> dict | None:
+    """Latest captured bundle available by cutoff, with no revised-latest fallback."""
+    cutoff = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    if cutoff.tzinfo is None:
+        raise ValueError("vintage cutoff requires timezone")
+    latest = bundle_path(ticker, cache_dir)
+    paths = list((latest.parent / "snapshots" / latest.stem).glob("*.json"))
+    if latest.exists():
+        paths.append(latest)
+    candidates = []
+    for path in paths:
+        bundle = read_json(path)
+        try:
+            stamp = datetime.fromisoformat(bundle["fetched_at"].replace("Z", "+00:00"))
+            if bundle.get("evidence_prepared_at"):
+                prepared = datetime.fromisoformat(bundle["evidence_prepared_at"].replace("Z", "+00:00"))
+                if prepared.tzinfo is None:
+                    continue
+                stamp = max(stamp, prepared)
+            if bundle.get("ticker") == ticker.upper() and stamp.tzinfo is not None and stamp <= cutoff:
+                candidates.append((stamp, canonical_hash(bundle), bundle))
+        except (KeyError, ValueError, TypeError):
+            continue
+    if not candidates:
+        return None
+    latest_stamp = max(r[0] for r in candidates)
+    newest = {digest: b for stamp, digest, b in candidates if stamp == latest_stamp}
+    if len(newest) != 1:
+        raise ValueError("conflicting bundles at the same capture time")
+    return next(iter(newest.values()))
 
 
 def bundle_age_hours(bundle: dict, now: datetime | None = None) -> float | None:

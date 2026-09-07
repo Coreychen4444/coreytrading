@@ -20,7 +20,7 @@ trend-exit-system.md 的硬线变成 heartbeat/overnight 每轮巡逻的机械�
 均值回归是统计倾向不是担保; 想赌修复用重进协议, 不是不卖。
 
 State: state/exit_guards.json (script-owned)。Canonical 规则:
-Public schema: trade/us_stock/strategy/trend-exit-system.example.md.
+Public schema: trade/strategy/trend-exit-system.example.md.
 The active rule document is the ignored private copy without `.example`.
 
 CLI:
@@ -41,7 +41,6 @@ from quant.core import env, technical  # noqa: F401  (.env → os.environ)
 
 import argparse
 import json
-import subprocess
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
@@ -91,7 +90,7 @@ PARAMS = {
     "opt_s3_iv_drop": 8.0,          # advisory 只播不裁: IV 自入场 -8pts 且未 +1N
 }
 
-POSITIONS_REL = "trade/us_stock/holding/state/positions.json"
+from quant.data.position_history import list_position_commits, position_at
 
 
 # ── 纯计算层 (测试覆盖) ──────────────────────────────────────────
@@ -455,16 +454,12 @@ def git_hwm_backfill() -> Dict[str, Tuple[float, str]]:
     没有这步, 现有赢家的 HWM 从今天起算会低估地板。失败静默降级 (seed=当前)。"""
     best: Dict[str, Tuple[float, str]] = {}
     try:
-        shas = subprocess.check_output(
-            ["git", "log", "--format=%H", "--", POSITIONS_REL],
-            cwd=ROOT, text=True, timeout=60).split()
+        shas = [sha for sha, _ in list_position_commits(ROOT)]
     except Exception:
         return best
     for sha in shas:
         try:
-            doc = json.loads(subprocess.check_output(
-                ["git", "show", f"{sha}:{POSITIONS_REL}"],
-                cwd=ROOT, text=True, timeout=30))
+            doc = position_at(sha, ROOT)
         except Exception:
             continue
         for tk, body in (doc.get("tickers") or {}).items():

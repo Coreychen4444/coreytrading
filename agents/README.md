@@ -4,6 +4,8 @@
 
 ## 架构与权限
 
+市场情报采集任务是四个冻结输入角色的上游，不是 macro worker 的另一种运行模式。它是用户自有的可选工作流，本仓不包含其采集与投递流程：证据与发布数据在 `trade/intelligence/`（公开仓只有 README 与合成示例），共用方法（若配置）在 `agents/methods/`，缺失时角色输入把它们记为 `optional_methods_missing`，不臆造。
+
 ```mermaid
 flowchart TD
     Trigger[交互任务 / 现有定时触发器] --> Due[交易所日历与任务依赖]
@@ -14,10 +16,12 @@ flowchart TD
     Jobs --> Host
     Host --> Macro[宏观]
     Host --> Technical[技术]
-    Host --> Valuation[估值]
+    Daily[独立每日估值任务] --> VMacro[宏观情景研究]
+    VMacro --> Calculation[宿主情景计算]
+    Calculation --> Valuation[估值]
+    Valuation --> VReport[独立估值报告]
     Macro --> Risk[风控与仓位]
     Technical --> Risk
-    Valuation --> Risk
     Technical --> Proposal[单卡结构化提案]
     Proposal --> Review[另一 provider 复核]
     Review --> Submit[政策 / 时效 / revision / prepared 收据]
@@ -35,7 +39,7 @@ flowchart TD
 | Inputs | 读取已有来源、计算机械收据、冻结共享与角色视图 | `quant/ops/agent_inputs.py`、`quant/ops/agent_evidence.py` |
 | Runner | CLI、登录复用、进程隔离、结构化返回、用量 | `quant/ops/agent_runners.py` |
 | Controller | 幂等、租约、结果校验、复核与提交收据 | `quant/ops/agent_runtime.py` |
-| Workflow | 并行研究、风险汇总、最多一轮定向追问 | `quant/ops/agent_workflow.py` |
+| Workflow | 按 trading / valuation / full 限定角色、最多一轮追问 | `quant/ops/agent_workflow.py` |
 | Jobs | briefing/postclose/weekly/chart 与单卡受控重画 | `quant/ops/agent_jobs.py` |
 | Submit | 白名单、独立复核、时效、卡片 revision、旧 writer | `quant/ops/agent_submit.py` |
 | Health | 全局额度、进程与业务租约、健康扫描、告警与恢复记录 | `quant/ops/agent_health.py` |
@@ -87,12 +91,12 @@ flowchart TD
 
 | 角色视图 | 主要内容 |
 |---|---|
-| 宏观 | 有效宏观先验、已有情报归档、研究范围 |
+| 宏观 | 有效宏观先验、已有情报归档、原始宏观观测及质量标记、公司业务/融资资料、研究范围 |
 | 技术 | 卡片、完整日线、技术指标、机械 level map、重画队列及宏观 FYI |
 | 风控 | 组合输入、已有公式计算的风险与 sizing 收据、购买力来源收据 |
-| 估值 | 估值账本、财务缓存与人工输入、宏观和情报 FYI |
+| 估值 | 估值账本、财务缓存与人工输入、独立日线收盘参考价、公司业务/融资资料、宏观和情报 FYI |
 
-共享快照保留完整捕获材料，各角色视图保持自己的 `snapshot_id/input_hash`、相同来源引用与来源身份。估值模型视图保留最近八季字段，并显式注明省略的历史覆盖范围与完整归档 hash；不能把截取视图当作全周期证据。缺失和未知不以 0、cash 或默认系数补齐。
+宏观和估值角色只展示最近三份宏观快照，并保留完整归档哈希及截取说明；宿主计算仍读取完整捕获集。共享快照保留完整捕获材料，各角色视图保持自己的 `snapshot_id/input_hash`、相同来源引用与来源身份。估值模型视图保留最近八季字段，并显式注明省略的历史覆盖范围与完整归档 hash；不能把截取视图当作全周期证据。缺失和未知不以 0、cash 或默认系数补齐。
 
 技术角色的组合概览保留最近 60 根日线，完整 260 根窗口仍用于机械结构计算和共享归档；单卡研究保留完整窗口。风控视图额外携带整个受管持仓的 `holding_risk_inputs`，包括期权自身退出规则、可用 Greeks 与 guard 状态；不能用精简金额计算行替代退出风险证据。分配给其他角色的材料不等于整个系统缺少该材料，跨域问题通过定向请求处理。
 
@@ -100,7 +104,9 @@ flowchart TD
 
 快照包含 `snapshot_id / input_hash / as_of / expires_at / evidence_refs / data`。默认研究有效期一小时；过期重新捕获与研究，不能修改旧快照续期。输出区分 observation、hypothesis、risk、unknown，引用必须来自输入；契约通过不等于事实或判断正确。
 
-Workflow 先让宏观、技术、估值并行分析，再让风控读取原证据与三份报告。定向请求按目标合并去重，最多一轮，未处理请求保留。共享来源和模型转述不算新增独立证据。组合工作流只产出研究，单卡更新走独立技术提案与复核。
+Workflow 按 purpose 明确分域：trading = 宏观与技术先研究、风控汇总；valuation = 宏观→宿主情景计算→估值；full 仅供显式交互研究。定时 briefing/weekly 固定 trading，不能通过追问启动估值；独立每日任务固定 valuation，不能扩展到技术/风控。数值计算使用完整冻结财务历史，八季视图只供模型解释。宏观失败时仍保留有来源的基准和机械敏感度并标明缺失；后续追问产生新情景时标 partial，须另次显式运行。最多一轮定向请求，未处理项与越域请求留在收据中，共享来源不计为独立证据。
+
+独立日更入口为 `quant/ops/valuation_daily.py --run --json`，任务规范 `tasks/codex/valuation-daily.md`。在私有运行仓的本地环境按 operator 时区每日运行（参考 08:00），含休市日；自行刷新已有公司/日线来源，宏观归档只读。独立租约、每日去重、输入/计算/研究报告存于 `var/valuation-daily/`；latest 指向最近尝试，失败不回退旧报告。`--preview` 仅计算已有缓存，不写文件或调用模型；当日重试须显式 `--run --retry`。盘前和周复盘均不拼接估值段落、不刷新估值账本或镜像。旧账本保留兼容对账，日更冻结预测归独立归档。
 
 从仓库根目录运行；以下查看路由、schema 和捕获摘要不调用模型：
 
@@ -116,7 +122,7 @@ Workflow 先让宏观、技术、估值并行分析，再让风控读取原证�
 
 ## 生产任务、日历与依赖
 
-`agent_jobs` 负责领域任务：briefing/weekly 使用四角色协作，postclose 使用技术与风控，chart 使用技术角色，heartbeat 更新健康记录。briefing/postclose 在申请写卡时根据确定性重画队列处理至多两张卡，剩余队列保留；每张卡都重新捕获、独立复核和受控提交，部分完成不会伪装成全部成功。
+`agent_jobs` 负责领域任务：briefing/weekly 使用宏观、技术、风控协作，postclose 使用技术与风控，chart 使用技术角色，heartbeat 更新健康记录。briefing/postclose 在申请写卡时根据确定性重画队列处理至多两张卡，剩余队列保留；每张卡都重新捕获、独立复核和受控提交，部分完成不会伪装成全部成功。
 
 `pipeline` 在退出评估和机械 regime 转移后运行 agents 阶段，再运行提醒线、白名单和入场计划等后续阶段。定时任务外层负责唤醒与既有报告投递，不再次代替技术角色画卡。`card_autopaint` 负责缺卡检测与后台派发，实际单卡链路也进入 `agent_jobs.run_card()`。
 

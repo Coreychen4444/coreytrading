@@ -70,9 +70,51 @@ def test_selected_research_keeps_complete_book_and_canonical_calculators(source)
                                 atr_of=lambda t: bundle["market"][t]["atr20"])
     assert data["portfolio_risk_receipts"]["usage"]["values"] == expected
     assert expected["used_gross"] == pytest.approx(.15)
-    assert out["summary"]["source_status_counts"]["missing"] == 1
+    assert out["summary"]["source_status_counts"]["missing"] == 4
     for snapshot in [out["snapshot"], *out["snapshots"].values()]:
         validate_snapshot(snapshot, now=NOW)
+
+
+def test_private_company_context_and_macro_observations_reach_both_research_roles(source):
+    doc = json.loads(source.watchlist.read_text())
+    profile = {"business_model": "synthetic business", "financing_notes": "fixed debt after hedges",
+               "notes_as_of": "2026-09-04", "balance_sheet": {"currency": "USD", "current_debt_m": 2},
+               "source": "synthetic", "fetched_at": SOURCE}
+    doc["tickers"]["SYN"]["agent"]["company_profile"] = profile
+    write(source.watchlist, doc)
+    macro = {"generated_at_utc": SOURCE, "metrics": {"US2Y": {"value": 4, "unit": "percent"}}}
+    write(source.macro_snapshots / "sample.json", macro)
+    out = capture(source, tickers=["SYN"])
+    for role in ("macro", "valuation"):
+        context = out["snapshots"][role]["data"]["company_context"]["SYN"]
+        assert context["profile"] == profile and context["source_ref"] == "watchlist"
+        assert "prose is not a numeric transmission" in context["limitations"]
+    assert out["snapshots"]["macro"]["data"]["macro_market_evidence"] == [macro]
+    assert out["snapshot"]["data"]["valuation"]["quotes"]["SYN"]["source"] == "bars:SYN"
+
+
+def test_missing_technical_card_does_not_hide_available_financial_bundle(source):
+    out = capture(source, tickers=["SECOND"])
+    doc = json.loads(source.positions.read_text())
+    del doc["tickers"]["SECOND"]
+    write(source.positions, doc)
+    out = capture(source, tickers=["SECOND"])
+    assert out["snapshot"]["data"]["cards"]["SECOND"]["status"] == "missing"
+    assert out["snapshot"]["data"]["valuation"]["fundamentals"]["SECOND"]["ticker"] == "SECOND"
+
+
+def test_macro_interpretation_view_is_bounded_but_host_keeps_all_observations(source):
+    for i in range(8):
+        write(source.macro_snapshots / f"sample-{i}.json", {
+            "generated_at_utc": f"2026-09-04T{i:02d}:00:00Z", "metrics": {"US10Y": {"value": 4 + i / 100}}})
+    out = capture(source)
+    full = out["snapshot"]["data"]["valuation"]["market_snapshots"]
+    macro = out["snapshots"]["macro"]["data"]
+    valuation = out["snapshots"]["valuation"]["data"]["valuation"]
+    assert len(full) == 8 and len(macro["macro_market_evidence"]) == len(valuation["market_snapshots"]) == 3
+    assert macro["macro_market_coverage"]["full_archive_hash"] == canonical_hash(full)
+    assert valuation["market_snapshot_coverage"]["total_snapshots"] == 8
+    assert macro["macro_market_evidence"][-1]["metrics"]["US10Y"]["value"] == 4.07
 
 
 def test_capture_does_not_write_and_does_not_read_disk_backed_calculator_defaults(source, monkeypatch):

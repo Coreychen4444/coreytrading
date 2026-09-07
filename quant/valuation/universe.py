@@ -3,7 +3,7 @@
 源案例: `valuate.py --all` 与 `calibrate.py reconcile` 曾按 inputs.json **全表**跑, 周复盘 §7 因此列出了
 已移出自选分组的墓碑卡与纪念仓 (「不进任何 task 输出」)。inputs.json 是人工区: 删条目会丢 archetype / overrides / news_overlay
 (那是资产, 票回来还要用), 所以范围不能由它定义 —— 它只回答「这票**怎么**估」; 「估**哪些**」归持仓 /
-候选判据, 与 `ops/ainews_universe` 同一个真源。
+候选判据, 与 `ops/intelligence_universe` 同一个真源。
 范围内没归原型的票由 valuate 报错不跑 (= 人工区待补), 不是静默跳过。
 
 🚨 零授权效力: 只读两个 state 文件取**名字**, 不写、不 import sizing/entry_guard/exit_guard;

@@ -22,10 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from quant.core import technical  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-OPT_DIR = ROOT / "trade/us_stock/market/option_klines"
-KL = ROOT / "trade/us_stock/market/klines"
-DEEP = ROOT / "trade/us_stock/market/klines_deep"
-DEFAULT_MANIFEST = ROOT / "trade/us_stock/knowledge/research/longcall_replay/campaigns.json"
+OPT_DIR = ROOT / "trade/market/option_klines"
+KL = ROOT / "trade/market/klines"
+DEEP = ROOT / "trade/market/klines_deep"
+DEFAULT_MANIFEST = ROOT / "trade/knowledge/research/longcall_replay/campaigns.json"
 DEFAULT_REPORT = ROOT / "tmp/backtest/longcall_historical_replay_report.md"
 R = 0.045
 WHIPSAW_DAYS = 60

@@ -7,7 +7,7 @@
 其中第一处进了**定时任务的 live 副本**，也就是说 briefing 每天都在引用一个不存在的文件。
 路径改名不报错、不崩溃，只是慢慢地把文档变成假的。
 
-外加一条 live 定时任务的对账 —— `tasks/` 是真源，`~/.claude/scheduled-tasks/` 是任务系统
+外加一条 live 定时任务的对账 —— `tasks/claude/` 是真源，`~/.claude/scheduled-tasks/` 是任务系统
 实际读取的副本，两者脱钩过一次，跑了 2 个月旧版没人发现（见 tasks/README.md）。
 """
 import os
@@ -32,7 +32,10 @@ SCAN = [
     *(ROOT / "quant").rglob("*.py"),
     *(ROOT / "tests").rglob("*.py"),
     *(ROOT / "tests").rglob("*.md"),
-    *(ROOT / "tasks").glob("*.md"),
+    *(ROOT / "tasks").rglob("*.md"),
+    *(ROOT / "agents").rglob("*.md"),
+    ROOT / "docs" / "intelligence-architecture.md",
+    ROOT / "trade" / "intelligence" / "README.md",
     *(ROOT / ".claude" / "rules").glob("*.md"),
     *ROOT.glob("README*.md"),
     ROOT / "quant" / "README.md",
@@ -73,10 +76,10 @@ def test_every_internal_path_reference_resolves():
 
 # ── live 定时任务对账 ──────────────────────────────────────────────
 
-# 全量 = tasks/*.md（README 除外）。 由 3 个补到 6 个 —— 此前
+# 全量 = tasks/claude/*.md（Claude 任务住 tasks/claude/，Codex 住 tasks/codex/）。由 3 个补到 6 个 —— 此前
 # gate-ladder-report / postclose-transition / chart-read 三个新任务不在名单里，
 # 于是 chart-read 的 live 副本比 repo 少一整节没人发现（同一天还发现它压根没注册）。
-TASKS = {p.stem for p in (ROOT / "tasks").glob("*.md") if p.stem != "README"}
+TASKS = {p.stem for p in (ROOT / "tasks" / "claude").glob("*.md") if p.stem != "README"}
 
 
 @pytest.mark.skipif(not CHECK_LIVE_TASKS or not LIVE_TASKS.exists(),
@@ -84,20 +87,20 @@ TASKS = {p.stem for p in (ROOT / "tasks").glob("*.md") if p.stem != "README"}
 @pytest.mark.parametrize("name", sorted(TASKS))
 @pytest.mark.host_state
 def test_live_scheduled_task_matches_repo(name):
-    """`tasks/` 是真源，live 副本必须逐字节一致。
+    """`tasks/claude/` 是真源，live 副本必须逐字节一致。
 
     脱钩不会报错 —— 定时任务照跑，只是跑的是旧版。 前就这样跑了 2 个月。
     改了 repo 记得: cp tasks/<name>.md ~/.claude/scheduled-tasks/<name>/SKILL.md
     """
-    repo = ROOT / "tasks" / f"{name}.md"
+    repo = ROOT / "tasks" / "claude" / f"{name}.md"
     live = LIVE_TASKS / name / "SKILL.md"
-    assert repo.exists(), f"tasks/{name}.md 不存在"
+    assert repo.exists(), f"tasks/claude/{name}.md 不存在"
     assert live.exists(), f"live 副本缺失: {live}"
     # 末尾换行不算脱钩：app UI 里保存一次任务会把 SKILL.md 的结尾换行去掉
     # （chart-read 实证），那是保存动作的副产品不是内容漂移。
     assert live.read_text().rstrip("\n") == repo.read_text().rstrip("\n"), (
         f"live 副本与 repo 脱钩了 —— 定时任务正在跑旧版。同步:\n"
-        f"    cp tasks/{name}.md {live}")
+        f"    cp tasks/claude/{name}.md {live}")
 
 
 @pytest.mark.skipif(not LIVE_TASKS.exists(), reason="本机没有 live 定时任务目录")

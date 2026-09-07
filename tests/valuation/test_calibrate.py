@@ -131,3 +131,8 @@ def test_default_scope_is_coverage_universe_and_all_inputs_is_the_table(monkeypa
     assert C._tickers(ns(all=True), inputs) == ["SYN"]
     assert C._tickers(ns(all_inputs=True), inputs) == ["CYC", "SYN"]
     assert C._tickers(ns(tickers=["cyc"]), inputs) == ["CYC"]
+
+
+def test_missing_probabilities_are_unscored():
+    assert C.score_band("base", {}) is None
+    assert C.score_band("above_bull", {}) is None

@@ -1,6 +1,6 @@
 ---
 name: trading-analysis
-description: Structured multi-step technical + risk analysis for a stock or listed ticker using the workspace workflow. Use when the user asks to analyze a stock, compare long/short cases, produce a trade plan, or requests `/analyze [ticker]`. Best for US/HK listed equities and current holdings. Combines (1) the project contract and trading rules, (2) current price context from moomoo OpenAPI (via OpenD), the `trade/us_stock/holding/state/positions.json` broker block, or a Stooq fallback, (3) [FYI] intelligence ONLY from the operator's optional local intelligence archive (this skill never fetches news, social posts or macro data), and (4) a final risk-reviewed action recommendation. Also use it to produce dynamic execution zones (accumulation/trim/no-chase/invalidation) and refresh `positions.json` (active) or `watchlist.json` (candidates) `agent.zones` after analysis.
+description: Structured multi-step technical + risk analysis for a stock or listed ticker using the workspace workflow. Use when the user asks to analyze a stock, compare long/short cases, produce a trade plan, or requests `/analyze [ticker]`. Best for US listed equities and current holdings. Combines (1) the project contract and trading rules, (2) current price context from moomoo OpenAPI (via OpenD), the `trade/portfolio/state/positions.json` broker block, or a Stooq fallback, (3) [FYI] intelligence ONLY from the operator's optional local intelligence archive under `trade/intelligence/reports/` (this skill never fetches news, social posts or macro data), and (4) a final risk-reviewed action recommendation. Also use it to produce dynamic execution zones (accumulation/trim/no-chase/invalidation) and refresh `positions.json` (active) or `watchlist.json` (candidates) `agent.zones` after analysis.
 ---
 
 # Trading Analysis
@@ -19,19 +19,19 @@ Use in this order:
    - 行情脚本：`.claude/skills/openapi/scripts/quote/get_snapshot.py`、`get_stock_quote.py`、`get_kline.py`（一律用隔离环境的解释器跑）
    - 持仓查询：`.claude/skills/openapi/scripts/trade/get_portfolio.py`
    - 连接配置：OpenD 本机 `127.0.0.1:11111`，可选 RSA 加密（详见 `.claude/rules/tools-environment.md`）
-2. `trade/us_stock/holding/state/positions.json` 的 `tickers["<T>"].broker`（current_price / change_pct / as_of / unrealized_pnl_usd 等）
-3. 本地缓存：`trade/us_stock/market/klines/<T>.jsonl`（`quant/data/kline_cache.py` 增量维护）+ `market/iv_history/<T>.jsonl`（IV percentile：`quant/data/iv_logger.py --percentile <T>`，样本 <60 会明示不可靠）
+2. `trade/portfolio/state/positions.json` 的 `tickers["<T>"].broker`（current_price / change_pct / as_of / unrealized_pnl_usd 等）
+3. 本地缓存：`trade/market/klines/<T>.jsonl`（`quant/data/kline_cache.py` 增量维护）+ `market/iv_history/<T>.jsonl`（IV percentile：`quant/data/iv_logger.py --percentile <T>`，样本 <60 会明示不可靠）
 4. `python3 .claude/skills/openapi/scripts/trade/get_portfolio.py --currency USD --json`（刷新持仓 + 行情；非港币计价账户必须传 `--currency USD`，否则 server 默认 HKD）；持仓写回用 `quant/sync/stock_fetch.py`
 5. Stooq fallback (only if OpenD down)
 
 ### News / sentiment（情报层收拢：本 skill 零自行拉取）
-情报（新闻 / 宏观叙事 / 社媒情绪）由 operator 自有的可选情报工作区负责获取。本 skill 只做技术分析 + 风控，情报侧唯一动作 = **只读**该归档（若配置，`ai_news/reports/` 最近 1-2 日目录，找该 ticker / 其产业链相关条目）：
+情报（新闻 / 宏观叙事 / 社媒情绪）由 operator 自有的可选情报工作区负责获取。本 skill 只做技术分析 + 风控，情报侧唯一动作 = **只读**该归档（若配置，`trade/intelligence/reports/` 最近 1-2 日目录，找该 ticker / 其产业链相关条目）：
 - 归档有 → [FYI] 引用（带日期+来源），零解读，不驱动授权
 - 归档没有或未配置 → 写「情报层：无输入」，**不做 web_search / 不搜社媒**
 - 用户在对话里贴的研报 / 新闻可以用（用户提供 ≠ 本 skill 拉取）
 
 ### Rules / behavior context
-CLAUDE.md 与 `.claude/rules/` 已自动加载；额外读 operator 的私有策略规则（由 `trade/us_stock/strategy/*.example.md` 派生，先看该目录 README）：
+CLAUDE.md 与 `.claude/rules/` 已自动加载；额外读 operator 的私有策略规则（由 `trade/strategy/*.example.md` 派生，先看该目录 README）：
 - trading-rules（master index = 全决策栈入口）
 - pre-trade-checklist
 - 两阶段入场规则（若 operator 维护）
@@ -45,11 +45,11 @@ Before analysis:
 2. Read the private pre-trade checklist if the user is preparing to trade.
 3. Read the private entry rules if the analysis may lead to an entry/add decision.
 4. Refresh quotes: 港股优先 moomoo OpenAPI；美股 `python3 quant/sync/stock_fetch.py`（写 broker block 到 state/positions.json，底层按账户传 `--currency USD`）。
-5. Read `trade/us_stock/holding/state/positions.json` 的 `tickers["<TICKER>"]`：取 `broker`（行情）+ `agent.zones / thesis / lots / pending_orders`。如果 ticker 不在 positions 里，看 `state/watchlist.json` 是否有候选 entry。
+5. Read `trade/portfolio/state/positions.json` 的 `tickers["<TICKER>"]`：取 `broker`（行情）+ `agent.zones / thesis / lots / pending_orders`。如果 ticker 不在 positions 里，看 `state/watchlist.json` 是否有候选 entry。
 6. Determine whether the ticker belongs to:
    - `current` = real active holding（在 positions.json 且 broker.qty != 0）
    - `watchlist` = intended entry but not yet held（在 watchlist.json，或 positions.json 里 broker == null / qty == 0）
-7. Optional — 读 `trade/us_stock/holding/analysis/<TICKER>/`（示例 `analysis.example.md`）看是否有先前分析积累（frontmatter `last_updated` 判断新鲜度）。
+7. Optional — 读 `trade/portfolio/analysis/<TICKER>/`（示例 `analysis.example.md`）看是否有先前分析积累（frontmatter `last_updated` 判断新鲜度）。
 8. Search durable memory only when it adds useful prior context (past thesis, prior mistakes, existing position context, repeated lessons). Avoid fishing for noise.
 
 ## Dynamic execution-zone policy
@@ -114,8 +114,8 @@ Default to:
 
 ### Write-back policy
 After analysis, if the zones are specific enough to be actionable, update the matching v2 state file via the bundled script (which writes only `agent.zones` / `thesis` / `action` / `key_risk` / `invalid_if` and preserves `broker` / `lots` / `pending_orders` / `exit_info`):
-- active holdings → `--bucket current` writes `trade/us_stock/holding/state/positions.json`
-- not-yet-held ideas → `--bucket watchlist` writes `trade/us_stock/holding/state/watchlist.json`
+- active holdings → `--bucket current` writes `trade/portfolio/state/positions.json`
+- not-yet-held ideas → `--bucket watchlist` writes `trade/portfolio/state/watchlist.json`
 
 Writes to local live state require explicit user authorization; analysis alone is read-only. Use the bundled script:
 - `.claude/skills/trading-analysis/scripts/update_position_zones.py`
@@ -243,7 +243,7 @@ For HK stocks, use `HK.{CODE}` prefix instead.
 - 4h 视角用 60m 自行聚合（morning 09:30-13:30 / afternoon 13:30-16:00），SDK 无原生 4h
 - ⚠️ 盘前时段 snapshot 的 `prev_close_price` = **前前交易日**收盘（last_price 才是最近收盘）——对照日线核对，别把上一交易日收盘当再前一日收盘
 
-If K-line fetch fails, fall back to local cache `trade/us_stock/market/klines/{TICKER}.jsonl`, then to positions.json broker block, and mark depth as **待核实**.
+If K-line fetch fails, fall back to local cache `trade/market/klines/{TICKER}.jsonl`, then to positions.json broker block, and mark depth as **待核实**.
 
 **真实指标不用手算**：`python3 quant/core/technical.py {TICKER}` 输出 RSI/MACD/Bollinger/均线/量比 + K 线形态 + 见底信号评分。"Do not fake MACD/RSI" 的正解是跑它，不是跳过。
 

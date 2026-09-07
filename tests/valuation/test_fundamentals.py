@@ -52,7 +52,7 @@ def test_parse_snapshot_guards_nan_and_maps_fields():
     s = F.parse_snapshot({"last_price": 10.0, "total_market_val": 1e9, "dividend_ratio_ttm": float("nan"),
                           "update_time": "2026-09-01 16:00:00", "outstanding_shares": 1e8})
     assert s["last_price"] == 10.0 and s["total_market_val"] == 1e9 and s["outstanding_shares"] == 1e8
-    assert s["dividend_ratio_ttm"] is None and s["update_time"] == "2026-09-01 16:00:00"
+    assert s["dividend_ratio_ttm"] is None and s["update_time"] == "2026-09-01T16:00:00-04:00"
     assert s["pe_ttm"] is None
 
 
@@ -98,3 +98,29 @@ def test_fetch_bundle_requires_income_statement():
             return []
     with pytest.raises(RuntimeError):
         F.fetch_bundle("SYN", Empty())
+
+
+def test_capture_vintages_survive_refresh_and_do_not_leak_later_revisions(tmp_path):
+    from copy import deepcopy
+    first = F.fetch_bundle("SYN", FakeSource(), quarters=8)
+    first["fetched_at"] = "2026-08-01T00:00:00Z"
+    F.save_bundle(first, tmp_path)
+    revised = deepcopy(first)
+    revised["fetched_at"] = "2026-09-01T00:00:00Z"
+    revised["quarters"][-1]["revenue"] *= 2
+    F.save_bundle(revised, tmp_path)
+    F.save_bundle(revised, tmp_path)
+    assert len(list((tmp_path / "snapshots" / "SYN").glob("*.json"))) == 2
+    assert F.load_vintage("SYN", as_of="2026-08-15T00:00:00Z", cache_dir=tmp_path) == first
+    assert F.load_vintage("SYN", as_of="2026-07-15T00:00:00Z", cache_dir=tmp_path) is None
+    assert F.load_bundle("SYN", cache_dir=tmp_path) == revised
+
+
+def test_parser_rejects_boolean_infinite_fields_and_preserves_unverified_period_metadata():
+    inc, bal, cf = make_reports(n_q=4)
+    bal[-1]["item_list"] = [{"field_id": 8003, "data": True}, {"field_id": 8058, "data": float("inf")}]
+    row = F.parse_quarters(inc, bal, cf)[-1]
+    assert row["cash_sti"] is None and row["current_debt"] is None
+    assert row["available_at"] is None and row["provider_period_timestamp"]
+    assert "unverified" in row["period_end_basis"]
+    assert F.parse_snapshot({"update_time": "2026-01-05 16:00:00"})["update_time"].endswith("-05:00")

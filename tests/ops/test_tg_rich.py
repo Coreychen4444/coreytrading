@@ -223,6 +223,6 @@ def test_blocks_to_text_keeps_every_word_in_legacy_subset():
 
 
 def test_payload_disables_entity_autodetection_and_is_a_copy():
-    blocks = R.compile_blocks("看 ai_news/reports 与 2@98.7")
+    blocks = R.compile_blocks("看 trade/intelligence/reports 与 2@98.7")
     pl = R.to_payload(blocks)
     assert pl["skip_entity_detection"] is True and pl["blocks"] == blocks and pl["blocks"] is not blocks

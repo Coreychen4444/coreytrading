@@ -41,20 +41,28 @@ def test_zero_authority_is_pinned_in_every_docstring():
         assert "零授权效力" in p.read_text(encoding="utf-8"), p.name
 
 
-def test_risk_free_reads_latest_macro_snapshot_or_falls_back(tmp_path):
-    assert valuate.risk_free_from_macro(tmp_path)["rf"] == valuate.FALLBACK_RF
-    assert "兜底" in valuate.risk_free_from_macro(tmp_path)["basis"]
+def test_risk_free_reads_observation_time_or_reports_unknown(tmp_path):
+    assert valuate.risk_free_from_macro(tmp_path)["rf"] is None
+    assert valuate.risk_free_from_macro(tmp_path)["status"] == "unknown"
     d = tmp_path / "2026-09"
     d.mkdir()
     (d / "macro-20260901T000000Z.json").write_text(json.dumps({"metrics": {"US10Y": {"value": 4.10, "as_of": "2026-08-30", "source": {"identifier": "DGS10"}}}}))
     (d / "macro-20260902T000000Z.json").write_text(json.dumps({"metrics": {"US10Y": {"value": 4.75, "as_of": "2026-08-31", "source": {"identifier": "DGS10"}}}}))
     (d / "macro-20260903T000000Z.json").write_text("not json")
-    r = valuate.risk_free_from_macro(tmp_path)
-    assert r["rf"] == pytest.approx(0.0475) and "DGS10" in r["basis"] and "20260902" in r["basis"]
+    r = valuate.risk_free_from_macro(tmp_path, as_of="2026-09-03")
+    assert r["rf"] == pytest.approx(0.0475) and r["source"]["identifier"] == "DGS10" and r["as_of"] == "2026-08-31"
 
 
 @pytest.fixture
 def world(tmp_path, inputs_doc, monkeypatch):
+    from datetime import datetime, timezone
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 2, 12, tzinfo=timezone.utc).astimezone(tz)
+    monkeypatch.setattr(fundamentals, "datetime", FrozenDateTime)
+    monkeypatch.setattr(fundamentals, "now_utc_iso", lambda: "2026-09-02T12:00:00Z")
+    monkeypatch.setattr(valuate, "now_et_iso", lambda: "2026-09-02T12:00:00Z")
     kdir = tmp_path / "klines"
     kdir.mkdir()
     tk, spy = make_klines(beta=1.3)
@@ -82,10 +90,11 @@ def test_run_orchestrates_fetch_model_ledger_and_skips_not_applicable(world):
     assert "UNKNOWN" in out["errors"] and "inputs.json 没有归原型" in out["errors"]["UNKNOWN"]
     assert not any(c[1].endswith("NA1") for c in src.calls), "不适用的票不该去拉 OpenD"
     assert by["SYN"]["fair_value"] > 0 and by["SYN"]["cost_of_capital"]["beta"] == pytest.approx(1.30)   # 合成 K 线 13 个月 → 行业 β
-    assert by["SYN"]["anchor"]["consensus_revenue"] and by["SYN"]["anchor"]["forward"]["forward_revenue"] == pytest.approx(50.0 * 100e6 / 4.0)
+    assert not by["SYN"]["anchor"]["consensus_revenue"] and by["SYN"]["anchor"]["forward"]["forward_revenue"] == pytest.approx(50.0 * 100e6 / 4.0)
     assert by["SYN"]["rf_basis"] == "参数 --rf"
     rows = [json.loads(l) for l in world["ledger"].read_text().splitlines()]
-    assert [r["ticker"] for r in rows] == ["SYN", "CYC"] and out["written_count"] == 2
+    assert [r["ticker"] for r in rows] == ["SYN", "CYC", "UNKNOWN"] and out["written_count"] == 3
+    assert rows[-1]["status"] == "unknown" and rows[-1]["fair_value"] is None
     for k in ("price", "fair_value", "verdict", "ratio", "confidence", "scenarios", "spec", "drivers", "implied_cagr", "rf_basis"):
         assert k in rows[0]
     # 第二次跑走缓存, 不再拉 OpenD
@@ -99,6 +108,58 @@ def test_run_reports_fetch_failure_per_ticker(world):
     out = valuate.run(["SYN"], inputs=world["inputs"], source=FakeSource(fail={"SYN"}), cache_dir=world["cache"],
                       kdir=world["kdir"], snapshots_dir=world["snap"], rf=0.045)
     assert out["results"] == [] and "fundamentals" in out["errors"]["SYN"]
+
+
+@pytest.mark.parametrize("invalid", ["future_capture", "future_disclosure", "stale_period", "identity"])
+def test_weekly_uses_the_same_availability_checks_as_daily(world, invalid):
+    from tests.valuation.conftest import make_bundle
+    bundle = make_bundle()
+    if invalid == "future_capture":
+        bundle["fetched_at"] = "2027-01-01T00:00:00Z"
+    elif invalid == "future_disclosure":
+        bundle["quarters"][-1]["available_at"] = "2027-01-01T00:00:00Z"
+    elif invalid == "identity":
+        bundle["ticker"] = "OTHER"
+    else:
+        for row in bundle["quarters"]:
+            row["period_end"] = "2000-01-01"
+    world["cache"].mkdir()
+    (world["cache"] / "SYN.json").write_text(json.dumps(bundle))
+    out = valuate.run(["SYN"], inputs=world["inputs"], cache_dir=world["cache"], rf=.045,
+                      max_age_hours=None, kdir=world["kdir"], snapshots_dir=world["snap"])
+    assert out["results"] == [] and "SYN" in out["errors"]
+
+
+def test_weekly_supplements_market_inputs_and_intraday_overlay_cutoff(world):
+    from tests.valuation.conftest import make_bundle
+    from tests.valuation.test_evidence import supplement
+    bundle = make_bundle()
+    bundle["quarters"][-1]["lt_investments"] = None
+    record = supplement()
+    record.update(available_at="2026-08-01T00:00:00Z", reviewed_at="2026-09-01T00:00:00Z")
+    bundle["balance_evidence"] = [record]
+    world["cache"].mkdir()
+    (world["cache"] / "SYN.json").write_text(json.dumps(bundle))
+    world["inputs"]["market"] = {"rf": .042, "erp": .05, "basis": "synthetic dated assumptions", "as_of": "2026-09-01T00:00:00Z"}
+    world["inputs"]["tickers"]["SYN"]["news_overlay"] = [{"date": "2026-09-01", "source": "synthetic",
+        "driver": "pe_multiplier", "delta": .1, "note": "synthetic", "as_of": "2026-09-02T13:00:00Z",
+        "valid_until": "2026-09-03"}]
+    out = valuate.run(["SYN"], inputs=world["inputs"], cache_dir=world["cache"], max_age_hours=None,
+                      kdir=world["kdir"], snapshots_dir=world["snap"], as_of="2026-09-02T12:00:00Z")
+    assert out["rf"]["rf"] == .042 and out["erp"] == .05
+    result = out["results"][0]
+    assert result["balance_evidence"]["applied"] and result["news"]["applied"] == []
+
+
+def test_failed_update_supersedes_old_price_in_private_mirror(world):
+    from quant.sync.valuation_sync import latest_rows, block_from_row
+    world["ledger"].write_text(json.dumps({"ticker": "SYN", "timestamp": "2026-09-01", "fair_value": 123}) + "\n")
+    out = valuate.run(["SYN"], inputs=world["inputs"], source=FakeSource(fail={"SYN"}), cache_dir=world["cache"],
+        snapshots_dir=world["snap"], rf=.045, write=True, ledger_path=world["ledger"])
+    assert out["written_count"] == 1
+    block = block_from_row(latest_rows(world["ledger"])["SYN"])
+    assert block["fair_value"] is None and "估值未知" in block["fyi"]
+    assert block["model_version"] == model.MODEL_VERSION
 
 
 def test_render_and_path_table_carry_the_essentials(world):
@@ -154,11 +215,11 @@ def test_run_applies_overlays_from_file_and_preserves_macro_context(world, tmp_p
     ovp = tmp_path / "overlays.jsonl"
     ovp.write_text("\n".join(json.dumps(r) for r in [
         {"id": "o1", "date": "2026-09-01", "ticker": "SYN", "source": "https://ir", "reliability": "company_official",
-         "channel": "eps", "driver": "revenue_base", "delta": 0.10, "valid_until": "next_print", "note": "订单 +10% 收入"},
+         "channel": "eps", "driver": "revenue_base", "delta": 0.10, "valid_until": "2026-10-30", "note": "订单 +10% 收入"},
         {"id": "o2", "date": "2026-09-01", "ticker": "SYN", "source": "blog", "reliability": "rumor",
          "channel": "pe", "driver": "pe_multiplier", "delta": -0.2, "valid_until": "2026-12-01", "note": "传闻"},
         {"id": "o3", "date": "2026-09-01", "ticker": "MACRO", "source": "https://bls", "reliability": "official_data",
-         "channel": "pe", "driver": "scenario_tilt", "delta": -0.05, "valid_until": "next_tier1", "note": "宏观偏空"},
+         "channel": "pe", "driver": "scenario_tilt", "delta": -0.05, "valid_until": "2026-09-04", "note": "宏观偏空"},
     ]) + "\n")
     mp = tmp_path / "current.json"
     mp.write_text(json.dumps({"run_id": "macro-x", "risk_environment": {"level": "adverse", "score": -1},
@@ -172,7 +233,7 @@ def test_run_applies_overlays_from_file_and_preserves_macro_context(world, tmp_p
     ids = {o["id"] for o in r["news"]["applied"]}
     assert ids == {"o1", "o3"} and r["news"]["ignored"][0]["id"] == "o2"
     assert r["news"]["applied"][0]["resolved_until"] in ("2026-10-30", "2026-09-04")
-    assert r["cost_of_capital"]["erp_tilt"] == 0.0 and r["scenarios"]["probabilities"]["bear"] == pytest.approx(0.30)
+    assert r["cost_of_capital"]["erp_tilt"] == 0.0 and r["scenarios"]["probabilities"] == {}
     assert r["cost_of_capital"]["erp"] == pytest.approx(r0["cost_of_capital"]["erp"])
     assert r["fair_value"] != r0["fair_value"] and r0["news"]["applied"] == []
     txt = valuate.render(r)

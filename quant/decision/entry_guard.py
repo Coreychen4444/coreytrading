@@ -790,7 +790,7 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
                      risk_stop=_rs, exposure=book.exposure_of(tk),
                      gate_no=gate_count(card))
     caps["risk_stop"], caps["risk_stop_basis"] = _rs, _rs_basis
-    # 期权资格闸 (当前配置; 公开 schema 见 trade/us_stock/strategy/options/):
+    # 期权资格闸 (当前配置; 公开 schema 见 trade/strategy/options/):
     # ① gate1 起可期权 (OPTION_MIN_GATE=1) —— 见底条件 = 第一个给 cap 的 gate, 与正股
     #    同一套资格 (cap>0 + 结构修复 + 未过期 + z1/z2 限价), 不是"随意开仓";
     # ② IV 硬门槛 (sizing.long_call_iv_gate) —— 见底点是 IV 峰值, 高 IV 票 gate1 一律正股;

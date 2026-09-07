@@ -54,7 +54,7 @@ def test_load_inputs_missing_file_is_empty(tmp_path):
 
 def test_resolve_merges_defaults_overrides_overlay_with_provenance(tmp_path):
     doc = {"tickers": {"T": {"archetype": "semi_cyclical", "rationale": "周期", "overrides": {"target_margin": 0.2},
-                             "news_overlay": [{"date": "2026-09-01", "source": "ai_news/reports/x.md", "driver": "growth_start",
+                             "news_overlay": [{"date": "2026-09-01", "source": "trade/intelligence/reports/x.md", "driver": "growth_start",
                                                "delta": 0.05, "note": "指引上调"}]}}}
     (tmp_path / "inputs.json").write_text(json.dumps(doc))
     r = A.resolve("T", A.load_inputs(tmp_path / "inputs.json"))

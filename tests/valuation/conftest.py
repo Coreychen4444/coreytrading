@@ -53,7 +53,7 @@ def make_bundle(ticker="SYN", price=50.0, pe_hist=None, forward=None, **kw):
     return {
         "ticker": ticker, "fetched_at": "2026-09-02T00:00:00Z", "source": "synthetic",
         "quarters": rows,
-        "snapshot": {"last_price": price, "update_time": "2026-09-01 16:00:00", "pe_ttm": 20.0, "pe_static": 22.0,
+        "snapshot": {"last_price": price, "update_time": "2026-09-01T16:00:00-04:00", "pe_ttm": 20.0, "pe_static": 22.0,
                      "pb": 5.0, "total_market_val": price * shares, "outstanding_shares": shares, "issued_shares": shares,
                      "eps_ttm_snapshot": 2.5, "dividend_ratio_ttm": 0.0, "high_52w": price * 1.2, "low_52w": price * 0.8},
         "valuation_pe": pe_hist if pe_hist is not None else

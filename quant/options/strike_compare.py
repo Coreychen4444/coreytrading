@@ -30,7 +30,7 @@ CLI:
     python3 quant/options/strike_compare.py --strikes 60:13.90 70:11.10 \
         --targets 100 --exit-dte 90 --exit-iv 55 --entry-iv 88 [--json]
 
-The public schema is trade/us_stock/strategy/options/leaps-call-template.example.md;
+The public schema is trade/strategy/options/leaps-call-template.example.md;
 active methodology belongs in the ignored private copy without `.example`.
 """
 from __future__ import annotations

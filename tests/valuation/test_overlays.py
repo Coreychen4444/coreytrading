@@ -61,27 +61,36 @@ def test_active_filters_by_ticker_date_expiry_reliability_and_scope():
     a = O.active_overlays(rows, ticker="AMZN", archetype="platform", as_of="2026-09-02",
                           next_print_day="2026-10-30", next_tier1_day="2026-09-04")
     ids = {o["id"] for o in a["applied"]}
-    assert ids == {"ok", "np", "macro_all", "macro_tk"}
-    assert {i["id"]: i["reason"] for i in a["ignored"]}.keys() == {"expired", "old", "rumor"}
-    by = {o["id"]: o for o in a["applied"]}
-    assert by["np"]["resolved_until"] == "2026-10-30" and by["macro_all"]["resolved_until"] == "2026-09-04"
+    assert ids == {"ok", "macro_tk"}
+    assert {i["id"]: i["reason"] for i in a["ignored"]}.keys() == {"expired", "old", "rumor", "np", "macro_all"}
     assert a["flags"] == []
-    # next_print 解析不了 → 仍应用但打旗; 到了反应日次日 → 过期
+    # 未固定的期限不应用；固定期限不会被最新日历顺延。
     b = O.active_overlays([rec(id="np", channel="eps", driver="revenue_base", delta=0.05, valid_until="next_print")],
                           ticker="AMZN", archetype="platform", as_of="2026-09-02")
-    assert [o["id"] for o in b["applied"]] == ["np"] and any("next_print 未解析" in f for f in b["flags"])
-    c = O.active_overlays([rec(id="np", channel="eps", driver="revenue_base", delta=0.05, valid_until="next_print")],
-                          ticker="AMZN", archetype="platform", as_of="2026-10-31", next_print_day="2026-10-30")
+    assert b["applied"] == [] and b["ignored"]
+    c = O.active_overlays([rec(id="np", channel="eps", driver="revenue_base", delta=0.05, valid_until="next_print", resolved_until="2026-10-30")],
+                          ticker="AMZN", archetype="platform", as_of="2026-10-31", next_print_day="2027-02-01")
     assert c["applied"] == [] and c["ignored"][0]["reason"].startswith("已到期")
 
 
 def test_manual_records_follow_same_contract():
     m = O.manual_records("MU", [{"date": "2026-09-01", "source": "s", "driver": "growth_start", "delta": 0.02, "note": "n"},
                                {"date": "2026-09-01", "source": "s", "driver": "erp", "delta": 0.01, "note": "n", "valid_until": "2026-10-01"}])
-    for r in m:
-        O.validate_record(r)
-    assert m[0]["channel"] == "eps" and m[0]["reliability"] == "manual" and m[0]["valid_until"] == "2099-12-31"
+    with pytest.raises(ValueError, match="valid_until"):
+        O.validate_record(m[0])
+    O.validate_record(m[1])
+    assert m[0]["channel"] == "eps" and m[0]["reliability"] == "manual" and m[0]["valid_until"] is None
     assert m[1]["channel"] == "pe" and m[1]["valid_until"] == "2026-10-01"
+
+
+def test_manual_finite_effects_keep_baseline_and_cannot_arrive_early():
+    rows = O.manual_records("SYN", [{"date": "2026-09-01", "source": "synthetic", "driver": "net_interest_after_tax",
+        "delta": 100, "note": "synthetic", "valid_until": "2026-10-01", "as_of": "2026-09-02T13:00:00Z",
+        "baseline_id": "baseline", "start_year": 1, "end_year": 1}])
+    assert rows[0]["end_year"] == 1
+    assert not O.active_overlays(rows, ticker="SYN", archetype="platform", as_of="2026-09-02T12:00:00Z", baseline_id="baseline")["applied"]
+    assert O.active_overlays(rows, ticker="SYN", archetype="platform", as_of="2026-09-02T14:00:00Z", baseline_id="baseline")["applied"]
+    assert not O.active_overlays(rows, ticker="SYN", archetype="platform", as_of="2026-09-02T14:00:00Z", baseline_id="other")["applied"]
 
 
 def test_add_and_cancel_are_append_only_and_validated(tmp_path):
@@ -103,7 +112,7 @@ def test_cli_add_list_cancel(tmp_path, monkeypatch, capsys):
     p = tmp_path / "overlays.jsonl"
     monkeypatch.setattr(O, "VALUATION_OVERLAYS_PATH", p)
     assert O.main(["add", "--ticker", "macro", "--date", "2026-09-01", "--source", "https://fed", "--reliability", "official_data",
-                   "--channel", "pe", "--driver", "erp", "--delta", "0.005", "--valid-until", "next_tier1", "--note", "adverse",
+                   "--channel", "pe", "--driver", "erp", "--delta", "0.005", "--valid-until", "2026-12-01", "--note", "adverse",
                    "--scope-archetypes", "semi_cyclical", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ticker"] == "MACRO" and out["scope"] == {"archetypes": ["semi_cyclical"]}
@@ -115,3 +124,22 @@ def test_cli_add_list_cancel(tmp_path, monkeypatch, capsys):
     assert O.main(["cancel", "--id", out["id"], "--note", "撤"]) == 0
     capsys.readouterr()
     assert O.main(["list", "--json"]) == 0 and json.loads(capsys.readouterr().out) == []
+
+
+def test_future_cancellation_cannot_rewrite_historical_visibility():
+    rows = [rec(id="timed", as_of="2026-09-01T12:00:00Z"),
+            {"id": "timed", "kind": "cancel", "note": "withdrawn",
+             "as_of": "2026-09-03T12:00:00Z"}]
+    before = O.active_overlays(rows, ticker="AMZN", archetype="platform", as_of="2026-09-02")
+    after = O.active_overlays(rows, ticker="AMZN", archetype="platform", as_of="2026-09-04")
+    assert len(before["applied"]) == 1 and after["applied"] == []
+
+
+def test_finite_effect_requires_matching_baseline_and_fixed_expiry(tmp_path):
+    record = rec(driver="revenue_base", channel="eps", delta=.1, start_year=1, end_year=2, baseline_id="a")
+    result = O.active_overlays([record], ticker="AMZN", archetype="platform",
+                              as_of="2026-09-02", baseline_id="b")
+    assert result["applied"] == [] and result["ignored"]
+    with pytest.raises(ValueError):
+        O.add_record(rec(valid_until="next_print"), path=tmp_path / "events.jsonl")
+    assert not (tmp_path / "events.jsonl").exists()

@@ -1,44 +1,13 @@
 #!/usr/bin/env python3
-"""overlays.py — 新闻 → 估值驱动的结构化契约 (`ai_news/valuation/overlays.jsonl`)。
+"""Structured news overlays with visibility, expiry and finite effects; 零授权效力.
 
-为什么存在 (用户): 「有些订单新闻会影响 EPS, 有些新闻会影响 PE, 估值需要跟随这些
-可靠的新闻变化而不是一成不变, 宏观新闻亦是如此」。情报层收拢 () 之后本仓不读新闻,
-读新闻的是 ai_news 雷达 (Claude 定时任务 ai-news-radar; 前是 Codex)。雷达每轮本来就按
-`直接EPS / 间接EPS / PE / ERP` 四栏推演
-(PROMPT.md §5.1, 框架 §8), 只是落在 markdown 表格里, 机器读不到。本文件把那一栏变成机器可读的
-**一行 JSON**: 哪只票、哪条新闻、哪个通道 (eps|pe)、哪个驱动、多少 delta、可靠度、到期日、出处。
-估值层每次估值把当时**有效**的 overlay 加在驱动上, 应用了哪些逐条进输出与账本。
-
-所有权: 雷达 (或 用户 手动) 通过本模块 CLI `add` 写入 —— 只校验通过才 append, 文件在
-`ai_news/` 内 (雷达 §0 硬边界: 只写 ai_news/; 与 macro_state.py commit 同款「经写入器」);
-估值层只读。撤销 = 追加 `cancel` 记录, 不改历史行 (append-only)。
-
-一条记录:
-    {"id": "-AMZN-ftc-suit", "kind": "overlay", "date": "",
-     "as_of": "T22:30:00+08:00", "ticker": "AMZN", "scope": null,
-     "source": "https://...", "reliability": "filing", "channel": "pe",
-     "driver": "pe_multiplier", "delta": -0.05, "valid_until": "",
-     "direction": -1, "confidence": "中", "note": "FTC 诉讼: 监管折价 5% (推导: ...)", "run_id": "..."}
-
-通道与驱动 (词表在 archetypes.EPS_DRIVERS / PE_DRIVERS, 语义在 model.apply_overlays_*):
-  eps  revenue_base(×1+δ) · growth_start · target_margin · margin_start · share_change_rate
-       · net_interest_after_tax($) · tax_rate
-  pe   erp · rf · wacc · terminal_growth · pe_multiplier(×1+δ) · scenario_tilt(概率从熊搬到牛)
-可靠度门: 只有 filing / company_official / official_data / major_wire / manual 会被应用;
-  analyst / rumor 只记录不应用 (列在 ignored 里, 让人看得见)。
-到期: 具体日期 | next_print (该票下一个财报反应日: TTM 一落地就吸收了订单, 再加就是重复计量)
-  | next_tier1 (下一个 Tier-1 宏观事件日)。解析不了 → 仍应用但打旗; 任何记录距 date 超 180 天一律过期。
-MACRO 记录 (ticker="MACRO") 作用于全部票, `scope` 可限 archetypes / tickers。
-
-🚨 零授权效力: 本层不被 sizing/entry_guard/exit_guard import, 不写 positions/watchlist。
-
-CLI:
-    python3 quant/valuation/overlays.py add --ticker AMZN --date --source URL \\
-        --reliability filing --channel pe --driver pe_multiplier --delta -0.05 \\
-        --valid-until --note "..." [--direction -1 --confidence 中 --run-id R] [--json]
-    python3 quant/valuation/overlays.py add --ticker MACRO --scope-archetypes semi_cyclical ai_infra_capex ...
-    python3 quant/valuation/overlays.py list [--ticker T] [--as-of YYYY-MM-DD] [--json]
-    python3 quant/valuation/overlays.py cancel --id ID --note "..."
+The reader never writes the intelligence archive. Explicit CLI add/cancel writes
+are append-only and require caller authorization. Reliability gates do not prove
+a coefficient. New records require a fixed date/timestamp; legacy next_print or
+next_tier1 applies only with a previously pinned resolved_until. Missing expiry
+never rolls forward with the latest calendar. Finite revenue/margin/interest
+shocks specify start_year/end_year and the matching fundamentals baseline hash.
+See quant/valuation/README.md for units, baseline absorption and limitations.
 """
 from __future__ import annotations
 
@@ -51,11 +20,13 @@ import argparse
 import hashlib
 import json
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+import math
 
 from quant.core.io_json import append_jsonl, iter_jsonl  # noqa: E402
 from quant.core.paths import VALUATION_OVERLAYS_PATH  # noqa: E402
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
+from quant.core.timeutil import ET
 from quant.valuation.archetypes import ARCHETYPES, EPS_DRIVERS, PE_DRIVERS  # noqa: E402
 
 RELIABILITY = ("filing", "company_official", "official_data", "major_wire", "analyst", "rumor", "manual")
@@ -87,12 +58,14 @@ def validate_record(r: dict) -> None:
         raise ValueError(f"kind {kind!r} 不在 {KINDS}")
     if not str(r.get("note") or "").strip():
         raise ValueError(f"{rid}: 缺 note (数字怎么来的一句话)")
+    if "as_of" in r and _moment(r["as_of"]) is None:
+        raise ValueError(f"{rid}: invalid as_of timestamp")
     if kind == "cancel":
         return
     for k in ("date", "ticker", "source", "reliability", "channel", "driver", "delta", "valid_until"):
         if k not in r:
             raise ValueError(f"{rid}: 缺 {k}")
-    if not _DATE.match(str(r["date"])):
+    if not _DATE.match(str(r["date"])) or _moment(r["date"]) is None:
         raise ValueError(f"{rid}: date 必须 YYYY-MM-DD")
     t = r["ticker"]
     if not isinstance(t, str) or t != t.upper() or not t:
@@ -106,16 +79,24 @@ def validate_record(r: dict) -> None:
     if drv not in allowed:
         raise ValueError(f"{rid}: driver {drv!r} 不属于 {r['channel']} 通道 {sorted(allowed)}")
     d = r["delta"]
-    if not isinstance(d, (int, float)) or isinstance(d, bool):
+    if not isinstance(d, (int, float)) or isinstance(d, bool) or not math.isfinite(d):
         raise ValueError(f"{rid}: delta 必须是数")
     bound = DELTA_BOUNDS.get(drv)
     if bound is not None and abs(d) > bound:
         raise ValueError(f"{rid}: |delta| {d} 超过 {drv} 的上限 {bound} (单位写错? 小数不是百分数)")
     vu = str(r["valid_until"])
-    if vu not in VALID_UNTIL_SYMBOLS and not _DATE.match(vu):
+    if vu not in VALID_UNTIL_SYMBOLS and _moment(vu) is None:
         raise ValueError(f"{rid}: valid_until 必须 YYYY-MM-DD 或 {VALID_UNTIL_SYMBOLS}")
     if _DATE.match(vu) and vu < str(r["date"]):
         raise ValueError(f"{rid}: valid_until 早于 date")
+    if "start_year" in r or "end_year" in r:
+        first, last = r.get("start_year"), r.get("end_year")
+        if type(first) is not int or type(last) is not int or not 1 <= first <= last <= 30:
+            raise ValueError(f"{rid}: invalid cash-flow years")
+        if not r.get("baseline_id"):
+            raise ValueError(f"{rid}: finite effects require baseline_id")
+        if drv not in ("revenue_base", "margin_start", "net_interest_after_tax"):
+            raise ValueError(f"{rid}: driver does not support finite-year effects")
     if t == MACRO:
         sc = r.get("scope")
         if sc is not None:
@@ -141,10 +122,29 @@ def load_records(path: Path | None = None) -> list[dict]:
     return list(iter_jsonl(Path(path or VALUATION_OVERLAYS_PATH)))
 
 
-def collapse(records: list[dict]) -> dict[str, dict]:
+def _moment(value):
+    try:
+        if _DATE.fullmatch(str(value)):
+            return datetime.combine(date.fromisoformat(value), time.max, tzinfo=ET)
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def collapse(records: list[dict], *, as_of: str | None = None) -> dict[str, dict]:
     """按 id 去重: 后写的赢; cancel 移除。返回 id → overlay 记录 (不含 cancel)。"""
     out: dict[str, dict] = {}
-    for r in records:
+    visible = []
+    cutoff = _moment(as_of) if as_of is not None else None
+    for index, record in enumerate(records):
+        known = _moment(record.get("as_of") or record.get("date"))
+        if as_of is not None and (cutoff is None or known is None or known > cutoff):
+            continue
+        visible.append((known, index, record))
+    if cutoff is not None:
+        visible.sort(key=lambda item: (item[0], item[1]))
+    for _, _, r in visible:
         rid = r.get("id")
         if not rid:
             continue
@@ -159,9 +159,9 @@ def _resolve_until(r: dict, next_print_day: str | None, next_tier1_day: str | No
     """→ (到期日 or None, 旗标 or None)。"""
     vu = str(r.get("valid_until") or "")
     if vu == "next_print":
-        return (next_print_day, None) if next_print_day else (None, "到期日 next_print 未解析 (财报日历无该票下一反应日)")
+        return (r.get("resolved_until"), "legacy next_print requires a pinned expiry")
     if vu == "next_tier1":
-        return (next_tier1_day, None) if next_tier1_day else (None, "到期日 next_tier1 未解析 (宏观状态无下一事件)")
+        return (r.get("resolved_until"), "legacy next_tier1 requires a pinned expiry")
     return (vu or None, None)
 
 
@@ -179,21 +179,36 @@ def _in_scope(r: dict, ticker: str, archetype: str | None) -> bool:
 
 
 def active_overlays(records: list[dict], *, ticker: str, archetype: str | None, as_of: str,
-                    next_print_day: str | None = None, next_tier1_day: str | None = None) -> dict:
+                    next_print_day: str | None = None, next_tier1_day: str | None = None,
+                    baseline_id: str | None = None) -> dict:
     """当时有效的 overlay: applied (可靠且未到期) / ignored (可靠度不够 或 到期) / flags。"""
     day = str(as_of)[:10]
     applied, ignored, flags = [], [], []
-    for rid, r in sorted(collapse(records).items()):
+    cutoff = _moment(as_of)
+    if cutoff is None:
+        raise ValueError("invalid overlay cutoff")
+    for rid, r in sorted(collapse(records, as_of=as_of).items()):
         if not _in_scope(r, ticker, archetype):
             continue
         if str(r.get("date")) > day:
+            continue
+        try:
+            validate_record(r)
+        except ValueError as exc:
+            ignored.append({"id": rid, "reason": str(exc)})
+            continue
+        if r.get("baseline_id") and r["baseline_id"] != baseline_id:
+            ignored.append({"id": rid, "reason": "baseline mismatch or unknown; absorption review required"})
             continue
         try:
             age = (date.fromisoformat(day) - date.fromisoformat(str(r["date"]))).days
         except ValueError:
             age = None
         until, flag = _resolve_until(r, next_print_day, next_tier1_day)
-        if until is not None and until < day:
+        if until is None or _moment(until) is None:
+            ignored.append({"id": rid, "reason": flag or "expiry unknown"})
+            continue
+        if _moment(until) < cutoff or ("T" in until and _moment(until) == cutoff):
             ignored.append({"id": rid, "reason": f"已到期 {until}"})
             continue
         if age is not None and age > MAX_AGE_DAYS:
@@ -209,14 +224,15 @@ def active_overlays(records: list[dict], *, ticker: str, archetype: str | None, 
 
 
 def manual_records(ticker: str, entries: list[dict]) -> list[dict]:
-    """inputs.json 里 用户 手写的 news_overlay → 同一契约 (reliability=manual, 不过期)。"""
+    """Manual entries keep the same explicit expiry, visibility and finite-year contract."""
     out = []
     for i, o in enumerate(entries or []):
         drv = o["driver"]
         out.append({"id": f"manual-{ticker}-{i}-{drv}", "kind": "overlay", "date": o["date"], "ticker": ticker,
                     "source": o["source"], "reliability": "manual",
-                    "channel": "eps" if drv in EPS_DRIVERS else "pe", "driver": drv, "delta": float(o["delta"]),
-                    "valid_until": o.get("valid_until") or "2099-12-31", "note": o["note"]})
+                    "channel": "eps" if drv in EPS_DRIVERS else "pe", "driver": drv, "delta": o["delta"],
+                    "valid_until": o.get("valid_until"), "note": o["note"],
+                    **{k: o[k] for k in ("as_of", "baseline_id", "start_year", "end_year") if k in o}})
     return out
 
 
@@ -226,6 +242,8 @@ def add_record(r: dict, path: Path | None = None) -> dict:
     r = dict(r)
     r.setdefault("kind", "overlay")
     r.setdefault("as_of", now_et_iso())
+    if r.get("valid_until") in VALID_UNTIL_SYMBOLS:
+        raise ValueError("new overlays require a fixed expiry, not a rolling event symbol")
     if r["kind"] == "overlay" and not r.get("id"):
         r["id"] = make_id(r)
     validate_record(r)
@@ -248,7 +266,7 @@ def describe(r: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="新闻→估值驱动 overlay 契约 (ai_news/valuation/overlays.jsonl)")
+    ap = argparse.ArgumentParser(description="新闻→估值驱动 overlay 契约 (trade/intelligence/valuation/overlays.jsonl)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("add")
     a.add_argument("--ticker", required=True)
@@ -264,6 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--confidence")
     a.add_argument("--run-id")
     a.add_argument("--id")
+    a.add_argument("--baseline-id")
+    a.add_argument("--start-year", type=int)
+    a.add_argument("--end-year", type=int)
     a.add_argument("--scope-archetypes", nargs="*")
     a.add_argument("--scope-tickers", nargs="*")
     a.add_argument("--json", action="store_true")
@@ -280,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         r = {"ticker": args.ticker.upper(), "date": args.date, "source": args.source, "reliability": args.reliability,
              "channel": args.channel, "driver": args.driver, "delta": args.delta, "valid_until": args.valid_until,
              "note": args.note}
-        for k in ("direction", "confidence", "run_id", "id"):
+        for k in ("direction", "confidence", "run_id", "id", "baseline_id", "start_year", "end_year"):
             v = getattr(args, k)
             if v is not None:
                 r[k] = v

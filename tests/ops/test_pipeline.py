@@ -24,6 +24,20 @@ def keys(mode):
     return [s.key for s in pipeline.plan(mode)]
 
 
+def test_daily_pipeline_does_not_attach_valuation(monkeypatch, capsys):
+    brief = {"alerts": ["synthetic exit"], "exit_guards": {"SYN": {"stop": 80}}}
+    stages = {"brief": brief, "agents": {"status": "completed"}}
+    monkeypatch.setattr(pipeline, "plan", lambda mode: [s for s in pipeline.STAGES if s.key in stages])
+    monkeypatch.setattr(pipeline, "opend_alive", lambda: True)
+    monkeypatch.setattr(pipeline, "handle_opend_recovered", lambda send: False)
+    monkeypatch.setattr(pipeline, "et_session_state", lambda: "pre")
+    monkeypatch.setattr(pipeline, "run_stage", lambda s, extra: {"ok": True, "data": stages[s.key]})
+    assert pipeline.main(["--mode", "briefing", "--no-notify", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)["stages"]["brief"]["data"]
+    assert result == brief
+    assert "valuation_calculations" not in result
+
+
 # ── 顺序不变量 ────────────────────────────────────────────────────
 
 def test_brief_consumes_everything_so_it_runs_after_the_collectors():

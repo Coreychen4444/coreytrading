@@ -1,0 +1,16 @@
+{
+  "synthetic": true,
+  "ticker": "SYNTH_STOCK",
+  "cik": 1,
+  "identity_basis": "Fictional issuer registry; replace only after verifying actual ticker and CIK",
+  "reviewed_at": "2099-01-05T12:00:00Z",
+  "provider_period_end": "2098-12-30",
+  "period_end": "2098-12-31",
+  "period_basis": "Fictional filing cover and matching fiscal quarter; never automatically shift all provider dates",
+  "fields": {
+    "current_debt": {
+      "concepts": ["us-gaap:SyntheticShortBorrowing", "us-gaap:SyntheticCurrentMaturity"],
+      "basis": "Fictional disjoint and complete current debt components; not real taxonomy tags"
+    }
+  }
+}

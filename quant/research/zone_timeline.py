@@ -22,7 +22,7 @@ import subprocess
 
 from quant.core.paths import ROOT  # noqa: E402
 
-POS_RELPATH = "trade/us_stock/holding/state/positions.json"
+from quant.data.position_history import list_position_commits, position_at
 
 ZONE_KEYS = ("accumulation_zone_1", "accumulation_zone_2", "trim_zone",
              "no_chase_above", "stop_level", "valid_until", "methodology")
@@ -30,25 +30,13 @@ ZONE_KEYS = ("accumulation_zone_1", "accumulation_zone_2", "trim_zone",
 
 def list_commits() -> list[tuple[str, str]]:
     """[(sha, iso_date)] oldest→newest touching positions.json."""
-    out = subprocess.run(
-        ["git", "log", "--reverse", "--format=%H %cI", "--", POS_RELPATH],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-).stdout
-    rows = []
-    for line in out.strip().splitlines():
-        sha, _, ts = line.partition(" ")
-        rows.append((sha, ts))
-    return rows
+    return list_position_commits(ROOT, reverse=True)
 
 
 def zones_at(sha: str) -> dict[str, dict]:
     try:
-        blob = subprocess.run(
-            ["git", "show", f"{sha}:{POS_RELPATH}"],
-            cwd=ROOT, capture_output=True, text=True, check=True,
-).stdout
-        doc = json.loads(blob)
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        doc = position_at(sha, ROOT)
+    except (subprocess.CalledProcessError, ValueError):
         return {}
     out = {}
     for tk, body in (doc.get("tickers") or {}).items():

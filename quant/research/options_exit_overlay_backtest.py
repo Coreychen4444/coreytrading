@@ -20,12 +20,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from quant.core import technical  # noqa: E402
-from quant.core.paths import ROOT  # noqa: E402
+from quant.core.paths import ROOT, KLINE_CACHE_DIR, OPTION_KLINE_DIR, EVENTS_DIR, POSITIONS_PATH  # noqa: E402
 
-KLINE_DIR = ROOT / "trade/us_stock/market/klines"
-EVENTS_GLOB = str(ROOT / "trade/us_stock/holding/events/*/trades.jsonl")
+KLINE_DIR = KLINE_CACHE_DIR
+EVENTS_GLOB = str(EVENTS_DIR / "*/trades.jsonl")
 REPORT = ROOT / "tmp/backtest/options_exit_overlay_report.md"
-DEFAULT_CONFIG = ROOT / "trade/us_stock/knowledge/research/options_exit_overlay/config.json"
+DEFAULT_CONFIG = ROOT / "trade/knowledge/research/options_exit_overlay/config.json"
 R = 0.045  # 无风险利率常数 (§5)
 
 WINNER_MIN = 0.40   # final ≥ +40% → 赢家 (C2)
@@ -132,7 +132,7 @@ def tau_years(date: str, expiry: str) -> float:
     return max(0.0, (d1 - d0).days / 365.0)
 
 
-OPT_KLINE_DIR = ROOT / "trade/us_stock/market/option_klines"
+OPT_KLINE_DIR = OPTION_KLINE_DIR
 
 
 def rebuild_real(trip: dict, klines: list[dict]) -> list[dict] | None:
@@ -324,7 +324,7 @@ def main(argv=None):
     # 未平仓 campaign 的出场锚来自 ignored positions state。
     for t in trips:
         if t["open"]:
-            pos = json.load(open(ROOT / "trade/us_stock/holding/state/positions.json"))
+            pos = json.load(open(POSITIONS_PATH))
             t["mark"] = pos["tickers"][t["sym"]]["broker"]["current_price"]
     dailies, srcs, calib = {}, {}, []
     for t in trips:

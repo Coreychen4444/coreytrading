@@ -24,9 +24,9 @@ from quant.ops.agent_runtime import load_routes, run_role, submit_run
 from quant.ops.agent_workflow import run_workflow
 
 TASKS = {
-    "briefing": "生成盘前领域复核：宏观只提供先验，技术检查价格结构，估值只给FYI，风控引用机械收据检查组合约束与未知项。不要提出跨多票写卡参数；待重画由独立单卡任务处理。",
+    "briefing": "生成盘前领域复核：宏观只提供先验，技术检查价格结构，风控引用机械收据检查组合约束与未知项。不要提出跨多票写卡参数；待重画由独立单卡任务处理。",
     "postclose": "复核最新完整收盘后的价格结构与失效条件，指出需要重画的卡及证据缺口。保留退出与授权约束；此组合报告不直接提出写卡参数。",
-    "weekly": "完成每周组合研究：汇总宏观先验、价格结构、估值证据与机械风控收据，列出分歧、风险和下周观察条件。业绩只引用已扣除外部现金流的指标；没有指标则明确未知。",
+    "weekly": "完成每周组合研究：汇总宏观先验、价格结构与机械风控收据，列出分歧、风险和下周观察条件。业绩只引用已扣除外部现金流的指标；没有指标则明确未知。",
     "chart": "提供技术结构判读：形态作为假设并附失效条件，引用冻结日线与技术指标；不提出写卡、交易金额、股数或入场授权。",
 }
 
@@ -149,7 +149,7 @@ def run_job(kind: str, *, apply=False, routes=None, run_dir=None, control_dir=No
                 return (run_role_fn or run_role)(*args, **kwargs, control_dir=control)
             workflow = (workflow_fn or run_workflow)(TASKS[kind], capture["snapshot"],
                                                      routes=routes, run_dir=root, run_role_fn=dispatch,
-                                                     role_snapshots=capture["snapshots"])
+                                                     role_snapshots=capture["snapshots"], purpose="trading")
             artifact = root / "workflows" / (job_id + ".json")
             atomic_write_json(artifact, workflow)
             job.update(status=workflow["status"], workflow_artifact=str(artifact),

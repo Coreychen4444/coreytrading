@@ -4,13 +4,13 @@
 为什么存在 (用户): 「大致算出股价, 判断高估还是低估」。本模块是编排与渲染:
   1. 原料   `fundamentals.load_bundle` (缺/过期 → `--refresh` 从 OpenD 重拉)
   2. 原型   `archetypes.resolve` (人工区 inputs.json: 商业模式 + 覆盖 + 增量新闻 overlay)
-  3. 市场   rf = ai_news 宏观快照的 US10Y (FRED DGS10, 只读; 情报层收拢后本仓不自拉宏观),
+  3. 市场   rf = 情报层宏观快照的 US10Y (FRED DGS10, 只读; 情报层收拢后本仓不自拉宏观),
             ERP 显式参数与有效 overlay；current.json 风险标签只作上下文，β 从 K 线缓存对 SPY 回归
-  3b. 新闻  `ai_news/valuation/overlays.jsonl` (雷达经 overlays.py add 写) + inputs.json 手写条目
+  3b. 新闻  `trade/intelligence/valuation/overlays.jsonl` (雷达经 overlays.py add 写) + inputs.json 手写条目
             → `overlays.active_overlays` 按票/到期/可靠度筛出当时有效的, 交给模型分四段应用;
             应用了哪些、忽略了哪些 (可靠度不够/到期) 逐条进输出与账本
   4. 模型   `model.valuate` (纯函数)
-  5. 出口   文本报告 / `--json` / `--write` 追加 `trade/us_stock/valuation/valuations.jsonl`
+  5. 出口   文本报告 / `--json` / `--write` 追加 `trade/valuation/valuations.jsonl`
             (每行 = 一次预测的完整输入快照, 财报后可对账 → 校准)
 
 🚨 零授权效力: 本层不被 sizing/entry_guard/exit_guard import, 不写 positions/watchlist,
@@ -39,34 +39,34 @@ from quant.core.paths import (KLINE_CACHE_DIR, MACRO_CURRENT_PATH, MACRO_SNAPSHO
                               VALUATION_OVERLAYS_PATH, VALUATIONS_PATH)
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
 from quant.valuation import archetypes, fundamentals, model, overlays  # noqa: E402
+from quant.valuation.assessment import market_rate, _timestamp, prepare_company, with_quote, resolve_market
+from quant.core.valuation_contracts import finite
+from quant.valuation import scenarios
+from quant.core.agent_contracts import canonical_hash
 from quant.valuation.universe import coverage_tickers  # noqa: E402  (--all 的范围 = 持仓 ∪ 候选)
 
-DEFAULT_ERP = 0.0423         # 股权风险溢价 = Damodaran 美股隐含 ERP 4.23% (ERP 2026 Edition, SSRN 6361419)
-FALLBACK_RF = 0.045          # 宏观快照缺失时的兜底 (必须播报)
+DEFAULT_ERP = model.DEFAULT_ERP
 BETA_BENCHMARK = "SPY"
 DEFAULT_MAX_AGE_HOURS = 24.0
 
 
 # ── 市场参数 ────────────────────────────────────────────────────────
 
-def risk_free_from_macro(snapshots_dir: Path | None = None) -> dict:
-    """最新宏观快照的 US10Y (FRED DGS10)。找不到 → 兜底值并写明。"""
+def risk_free_from_macro(snapshots_dir: Path | None = None, *, as_of: str | None = None) -> dict:
+    """按 US10Y 观测时点选取有效利率；缺失或过期则返回未知。"""
     d = Path(snapshots_dir or MACRO_SNAPSHOTS_DIR)
-    files = sorted(d.rglob("*.json")) if d.exists() else []
-    for p in reversed(files):
+    files = sorted(d.rglob("*.json"))[-30:] if d.exists() else []
+    documents = []
+    for p in files:
         try:
-            doc = read_json(p)
-            m = (doc.get("metrics") or {}).get("US10Y") or {}
-            v = m.get("value")
-            if isinstance(v, (int, float)) and 0 < v < 20:
-                return {"rf": float(v) / 100.0, "basis": f"{p.name} US10Y {v:.2f}% as_of {m.get('as_of')} ({(m.get('source') or {}).get('identifier')})"}
+            documents.append(read_json(p))
         except Exception:  # noqa: BLE001 — 坏文件跳过找上一份
             continue
-    return {"rf": FALLBACK_RF, "basis": f"⚠️ 宏观快照无 US10Y, 兜底 {FALLBACK_RF:.2%}"}
+    return market_rate(documents, as_of=as_of or now_et_iso())
 
 
 def macro_context_from_current(path: Path | None = None) -> dict | None:
-    """ai_news/macro/current.json → {risk_level, risk_score, run_id, generated_at, next_tier1_day}。缺/坏 → None。"""
+    """trade/intelligence/macro/current.json → {risk_level, risk_score, run_id, generated_at, next_tier1_day}。缺/坏 → None。"""
     p = Path(path or MACRO_CURRENT_PATH)
     if not p.exists():
         return None
@@ -162,9 +162,13 @@ def render(res: dict) -> str:
         cross.append(f"EV/前瞻收入 {res['anchor']['ev_to_forward_sales']:.1f}× vs 板块 PS 5Y 中位 {sec['ps_median5y']:.1f}×")
     if cross:
         lines.append("交叉: " + " · ".join(cross))
-    w = b["weights"]
-    lines.append(f"加权 (DCF {w['fcf_dcf']:.0%} / 街 {w['street']:.0%}): 基准 {_px(sc['base'])} · 熊 {_px(sc['bear'])} ({sc['probabilities']['bear']:.0%})"
-                 f" / 牛 {_px(sc['bull'])} ({sc['probabilities']['bull']:.0%}) → 概率加权公允 {_px(res['fair_value'])}")
+    lines.append(f"基准DCF公允 {_px(res['fair_value'])} · 压力情景 熊 {_px(sc['bear'])} / 牛 {_px(sc['bull'])} (不是概率分位)")
+    target = res.get("market_target_12m") or {}
+    lines.append(f"12个月盈利条件价格 {_px(target.get('price'))} · EPS {_px(target.get('eps'))} · PE {target.get('pe')} · 非命中承诺")
+    if res.get("scenario_expected_value") is not None:
+        lines.append(f"显式概率加权 {_px(res['scenario_expected_value'])} · 依据 {res.get('scenario_probability_basis')}")
+    for sensitivity in res.get("sensitivities") or []:
+        lines.append(f"条件敏感度 {sensitivity['scenario']['label']}: 公允 {_px(sensitivity.get('fair_value'))} · {sensitivity['status']}")
     inv = []
     N = imp["horizon_years"]
     if not imp.get("growth_creates_value"):
@@ -199,7 +203,7 @@ def render(res: dict) -> str:
             head += f" · {len(nw['ignored'])} 条未用 ({'; '.join(i['id'] + ': ' + i['reason'] for i in nw['ignored'][:3])})"
         lines.append(head + (" — " + " | ".join(parts) if parts else ""))
         lines.append(f"  宏观→PE: {nw.get('erp_tilt_basis')} · overlay Δrf {_pct(nw.get('rf_delta') or 0,2)} Δerp {_pct(nw.get('erp_delta') or 0,2)}"
-                     f" · PE 倍数 ×{nw.get('pe_mult', 1.0):.3f} · 情景概率 熊/基/牛 {nw['probabilities']['bear']:.0%}/{nw['probabilities']['base']:.0%}/{nw['probabilities']['bull']:.0%}")
+                     f" · PE 倍数 ×{nw.get('pe_mult', 1.0):.3f} · 概率 {nw.get('probabilities') or '无依据，未赋值'}")
     lines.append(f"判定: 现价 vs 公允 {_pct(v['ratio'])} → **{v['label']}**{low} · 置信 {cf['tier']} (原型 {res['archetype']}"
                  + (f"; {'; '.join(cf['reasons'])}" if cf["reasons"] else "") + ")")
     if res.get("flags"):
@@ -226,10 +230,10 @@ def digest(results: list[dict], *, rf: dict | None = None, erp: float | None = N
     live = [r for r in results if not r.get("skipped") and r.get("fair_value")]
     live.sort(key=lambda r: (r["verdict"]["ratio"] if r["verdict"]["ratio"] is not None else 1e9))
     mc = macro or {}
-    head = "📐 估值一览 (DCF 与卖方目标价各半, 判断层)"
+    head = "📐 估值一览 (基准DCF；卖方独立参考，判断层)"
     ctx = []
     if rf:
-        ctx.append(f"rf {rf['rf']:.2%}")
+        ctx.append(f"rf {_pct(rf.get('rf'),2)}")
     if erp is not None:
         ctx.append(f"ERP {erp:.2%}")
     if mc.get("risk_level"):
@@ -276,8 +280,14 @@ def ledger_row(res: dict, rf_basis: str) -> dict:
         return {"timestamp": now_et_iso(), "ticker": res["ticker"], "skipped": True, "reason": res["reason"]}
     b = res["base"]
     return {
-        "timestamp": now_et_iso(), "ticker": res["ticker"], "model_version": res.get("model_version"), "price": res["price"], "price_time": res.get("price_time"),
+        "timestamp": res.get("calculated_at") or now_et_iso(), "ticker": res["ticker"], "model_version": res.get("model_version"), "price": res["price"], "price_time": res.get("price_time"),
+        "status": "computed", "fundamentals_hash": res.get("fundamentals_hash"),
+        "balance_evidence": res.get("balance_evidence"), "quote_evidence": res.get("quote_evidence"),
         "archetype": res["archetype"], "fair_value": res["fair_value"], "verdict": res["verdict"]["label"],
+        "fair_value_basis": res.get("fair_value_basis"), "market_target_12m": res.get("market_target_12m"),
+        "scenario_expected_value": res.get("scenario_expected_value"),
+        "scenario_probability_basis": res.get("scenario_probability_basis"),
+        "sensitivities": res.get("sensitivities"),
         "ratio": res["verdict"]["ratio"], "confidence": res["confidence"]["tier"],
         "scenarios": res["scenarios"], "dcf_per_share": b["dcf"]["per_share"],
         "eps_pe_per_share": b["eps_pe"]["per_share"] if b["eps_pe"] else None,
@@ -300,13 +310,42 @@ def ledger_row(res: dict, rf_basis: str) -> dict:
 
 # ── 编排 ────────────────────────────────────────────────────────────
 
+def _write_failures(errors: dict, stamp: str, path: Path | None) -> int:
+    """Persist abstentions so a failed update cannot leave a prior price current."""
+    for ticker, reason in errors.items():
+        append_jsonl(Path(path or VALUATIONS_PATH), {
+            "timestamp": stamp, "ticker": ticker, "model_version": model.MODEL_VERSION,
+            "status": "unknown", "reason": reason, "fair_value": None, "price": None,
+            "verdict": "无法判定", "confidence": "低", "authority": "analysis_only"}, lock=False)
+    return len(errors)
+
+
 def run(tickers: list[str], *, inputs: dict, refresh: bool = False, max_age_hours: float | None = DEFAULT_MAX_AGE_HOURS,
-        rf: float | None = None, erp: float = DEFAULT_ERP, write: bool = False, source=None,
+        rf: float | None = None, erp: float | None = None, write: bool = False, source=None,
         cache_dir: Path | None = None, kdir: Path | None = None, snapshots_dir: Path | None = None,
         ledger_path: Path | None = None, overlays_path: Path | None = None, macro_current_path: Path | None = None,
         calendar: dict | None = None, as_of: str | None = None, deep_dir: Path | None = None) -> dict:
-    rfi = {"rf": rf, "basis": "参数 --rf"} if rf is not None else risk_free_from_macro(snapshots_dir)
-    day = as_of or et_today()
+    stamp = _timestamp(as_of or now_et_iso())
+    if stamp is None:
+        raise ValueError("invalid valuation cutoff")
+    rfi, default_erp, _ = resolve_market(inputs, as_of=stamp.isoformat(),
+        observed_rate=risk_free_from_macro(snapshots_dir, as_of=stamp.isoformat()))
+    if rf is not None:
+        if not finite(rf):
+            raise ValueError("finite risk-free assumption required")
+        rfi = {"rf": rf, "basis": "参数 --rf", "status": "assumption", "as_of": stamp.isoformat()}
+    erp = default_erp if erp is None else erp
+    if not finite(erp) or erp < 0:
+        raise ValueError("invalid ERP")
+    if rfi["rf"] is None:
+        errors = {t: rfi["basis"] for t in tickers}
+        written = _write_failures(errors, as_of or now_et_iso(), ledger_path) if write else 0
+        return {"rf": rfi, "erp": erp, "results": [], "errors": errors,
+                "written": write, "written_count": written, "macro_context": None, "overlay_records": 0}
+    stamp = _timestamp(as_of) if as_of else None
+    if as_of and stamp is None:
+        raise ValueError("invalid valuation cutoff")
+    valuation_cutoff = stamp.isoformat() if stamp else now_et_iso()
     records = overlays.load_records(overlays_path or VALUATION_OVERLAYS_PATH)
     macro_ctx = macro_context_from_current(macro_current_path)
     cal = calendar if calendar is not None else load_calendar()
@@ -329,6 +368,8 @@ def run(tickers: list[str], *, inputs: dict, refresh: bool = False, max_age_hour
     if stale:
         r = fundamentals.refresh(stale, source=source, cache_dir=cache_dir)
         errors.update({t: f"fundamentals: {e}" for t, e in r["errors"].items()})
+    # Default cutoff follows collection, so freshly fetched evidence is available.
+    valuation_cutoff = stamp.isoformat() if stamp else now_et_iso()
     for t in tickers:
         if t in errors:
             continue
@@ -336,20 +377,29 @@ def run(tickers: list[str], *, inputs: dict, refresh: bool = False, max_age_hour
             bundle = fundamentals.load_bundle(t, cache_dir=cache_dir)
             if bundle is None:
                 raise RuntimeError("无基本面缓存且拉取失败")
+            bundle, supplements = prepare_company(bundle, ticker=t, as_of=valuation_cutoff)
             resolved = archetypes.resolve(t, inputs)
             recs = records + overlays.manual_records(t, resolved["news_overlay"])
-            act = overlays.active_overlays(recs, ticker=t, archetype=resolved["archetype"], as_of=day,
+            act = overlays.active_overlays(recs, ticker=t, archetype=resolved["archetype"], as_of=valuation_cutoff,
+                                           baseline_id=canonical_hash(bundle),
                                            next_print_day=next_print_day(t, cal),
                                            next_tier1_day=(macro_ctx or {}).get("next_tier1_day"))
-            res = model.valuate(bundle, resolved, rf=rfi["rf"], erp=erp, beta=beta_for(t, kdir, deep_dir),
-                                overlays=act, macro_context=macro_ctx, forward=bundle.get("forward"))
+            calculation_bundle, quote = with_quote(bundle, None, as_of=valuation_cutoff)
+            res = model.valuate(calculation_bundle, resolved, rf=rfi["rf"], erp=erp, beta=beta_for(t, kdir, deep_dir),
+                                overlays=act, macro_context=macro_ctx, forward=bundle.get("forward"), as_of=valuation_cutoff)
             res["rf_basis"] = rfi["basis"]
+            res.update(calculated_at=valuation_cutoff, balance_evidence=supplements, quote_evidence=quote,
+                       fundamentals_hash=canonical_hash(bundle))
+            res["sensitivities"] = [scenarios.evaluate(res, case) for case in
+                                    scenarios.sensitivities(len(res["base"]["path"]), "fundamentals:" + t)]
             results.append(res)
             if write:
                 append_jsonl(Path(ledger_path or VALUATIONS_PATH), ledger_row(res, rfi["basis"]), lock=False)
                 written += 1
         except Exception as e:  # noqa: BLE001 — 单票失败不炸整轮
             errors[t] = f"{type(e).__name__}: {e}"
+    if write:
+        written += _write_failures(errors, valuation_cutoff, ledger_path)
     return {"rf": rfi, "erp": erp, "results": results, "errors": errors, "written": write, "written_count": written,
             "macro_context": macro_ctx, "overlay_records": len(records)}
 
@@ -364,8 +414,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="inputs.json 全表 (含已移出自选/已平仓的票): 人工审视与校准用, 周复盘不用")
     ap.add_argument("--refresh", action="store_true", help="强制从 OpenD 重拉基本面")
     ap.add_argument("--max-age-hours", type=float, default=DEFAULT_MAX_AGE_HOURS)
-    ap.add_argument("--rf", type=float, help="无风险利率 (小数); 缺省读 ai_news 宏观快照 US10Y")
-    ap.add_argument("--erp", type=float, default=DEFAULT_ERP)
+    ap.add_argument("--rf", type=float, help="无风险利率 (小数); 缺省读情报层宏观快照 US10Y")
+    ap.add_argument("--erp", type=float, help="显式 ERP 假设；缺省读取 inputs.market 或模型声明值")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--path", action="store_true", help="附逐年路径表")
     ap.add_argument("--digest", action="store_true", help="只输出一览 (周复盘/Telegram 用, 一票一行)")
@@ -392,9 +442,9 @@ def main(argv: list[str] | None = None) -> int:
                 "results": [{k: v for k, v in r.items() if k != "base"} | ({"dcf": r["base"]["dcf"], "eps_pe": r["base"]["eps_pe"], "street": r["base"].get("street"), "weights": r["base"]["weights"]} if not r.get("skipped") else {})
                             for r in out["results"]]}
         print(json.dumps(slim, ensure_ascii=False, default=str))
-        return 0
+        return 1 if out["errors"] and not out["results"] else 0
     mc = out.get("macro_context") or {}
-    print(f"rf {out['rf']['rf']:.2%} ← {out['rf']['basis']} · ERP {out['erp']:.2%} · 宏观风险 {mc.get('risk_level') or '无'} "
+    print(f"rf {_pct(out['rf'].get('rf'),2)} ← {out['rf']['basis']} · ERP {out['erp']:.2%} (显式模型假设) · 宏观风险 {mc.get('risk_level') or '无'} "
           f"({mc.get('run_id') or '—'}) · overlay 记录 {out.get('overlay_records', 0)} 条")
     for r in out["results"]:
         print()

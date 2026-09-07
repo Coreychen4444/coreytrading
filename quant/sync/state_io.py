@@ -25,7 +25,7 @@ from typing import Any
 
 from quant.core import ledger as _ledger, occ as _occ, schema as _schema
 from quant.core.io_json import atomic_write_json, read_json, state_lock
-from quant.core.paths import EVENTS_DIR, HOLDING_ROOT, POSITIONS_PATH, STATE_DIR, WATCHLIST_PATH  # noqa: F401 (re-exported)
+from quant.core.paths import EVENTS_DIR, PORTFOLIO_ROOT, POSITIONS_PATH, STATE_DIR, WATCHLIST_PATH  # noqa: F401 (re-exported)
 from quant.core.timeutil import now_utc_iso as _now_iso
 
 

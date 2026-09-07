@@ -6,7 +6,7 @@
 import json
 
 from quant.core.io_json import atomic_write_json
-from quant.ops import ainews_universe as au
+from quant.ops import intelligence_universe as au
 
 
 POS = {"tickers": {

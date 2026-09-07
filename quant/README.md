@@ -12,12 +12,14 @@
    │           pipeline · card_autopaint · tg_notify · tg_rich（报告文本 → Rich Message blocks 编译器）
    │           agent_runtime / agent_runners / agent_workflow（角色与模型解耦，研究与提交分离）
    │           agent_jobs / agent_inputs / agent_dependency（生产入口、冻结证据与角色视图、同 session 上游屏障）
+   │           valuation_daily（独立日更估值：刷新/冻结/宏观→估值/去重/归档）
    │           agent_snapshots / agent_submit / agent_doctor / agent_health（快照、受控写卡、任务元数据盘点、健康与租约）
    │           agent_evidence（显式冻结组合输入 → 既有机械 sizing 收据，零取数/写入）
    ├── report  报告层（读时计算，不产生新状态）
    │           portfolio_brief · perf_report · gate_ladder_report · gate_audit
    │           chart_read（每日收盘判读，**判读层零授权效力**）
    │           nav_report（NAV 区间变动剔除外部现金流，周复盘 NAV 变动的唯一口径）
+   │           valuation_report（冻结估值收据 → 当轮 FYI，缺口不回退到旧价）
    ├── journal 账本写入层（prose-only 不算落库）
    │           annotate_event · decision_log
    ├── valuation 估值层（**判断层零授权效力**：读三表/快照/K 线/宏观快照，写自己的账本）
@@ -25,7 +27,9 @@
    │           archetypes（商业模式原型缺省 + 人工区 inputs.json 校验）
    │           model（FCFF-DCF · EPS×PE · 反向隐含 · 情景 · 久期，纯函数）
    │           valuate（CLI 编排/渲染/valuations.jsonl 账本）
-   │           overlays（新闻→驱动契约: 校验/生效筛选/CLI append）· calibrate（财报后对账 + 当时重估回测）
+   │           overlays（新闻→驱动契约: 校验/生效筛选/CLI append）· calibrate（财报后对账 + 非 PIT 的历史近似诊断）
+   │           assessment（冻结输入的每日计算收据）· scenarios（宏观/公司情景传导）· response（短期事件样本与滚动检验）
+   │           evidence（财报补充证据、前瞻时效和利息传导）· event_data（按真实交易日构建消息后日线样本）
    │           universe（估值层默认范围 = 持仓 ∪ 候选，只有名字，零授权效力）
    ├── decision 决策层（机械闸门）
    │           entry_guard · exit_guard · regime_transition · regime_score
@@ -40,6 +44,7 @@
    │           valuation_sync（valuations.jsonl 最新行 → agent.valuation 机器区；估值层不写 state，镜像归 sync）
    ├── data    把外部世界读进本地
    │           market_data · macro_fetch · earnings_calendar
+   │           sec_facts（显式 CIK 的 SEC 财务事实读取和披露日期筛选，不推断字段映射）
    │           kline_cache · iv_logger · nav_snapshot · skhy_premium
    │           cash_flow_sync（券商资金流水 → 外部现金流账本，只收出入金）
    └── core    纯共享库 · 单一真源 · 无副作用
@@ -48,7 +53,7 @@
                episodes · book · earnings · sectors · patterns（形态判别式，Lo 2000 工序）
                dow（短期道氏四步状态机，提供趋势终止观察与结构排序）
                market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
-               agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· motto（可选尾行，未配置即空）
+               agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· valuation_contracts（情景单位、期限与传导约束）· motto（可选尾行，未配置即空）
 
   research     验证层（可复用机械件/合成脚手架）—— 旁路，不参与实时决策
 ```
@@ -70,6 +75,8 @@
 | `research/` | 公开研究机械件与合成脚手架 | 只产出统计，不保存私人数据、结果或裁决 |
 
 ## 约定
+
+**市场情报**——本仓不采集新闻 / 宏观；情报数据目录 `trade/intelligence/`（公开仓只有 README 与合成示例）与运行状态 `var/intelligence/` 由用户自有的可选采集流程维护，交易代码只读。不把报告、任务或数据整包放进 quant；现有 `valuation/event_data.py` 继续服务估值，出现第二个实际消费者再提取通用实现。新代码层仍须通过依赖与测试镜像守卫，不预建空层。
 
 **领域 Agent**——职责定义在 `agents/`，运行方式见 `agents/README.md`。角色不拥有文件/券商写权限；
 `ops` 控制器选择 Claude/Codex runner，验证冻结输入与研究结果；技术提案仅经现有 writer 和 revision 检查落卡。
@@ -149,7 +156,7 @@ import」的成员，上面那条依赖规则当场要开例外；而且它是�
 |---|---|
 | `tests/test_layering.py` | 依赖单向向下（模块级零例外，lazy 向上须报备理由且名单不许腐烂）· 深度锁死两级 · bootstrap 唯一写法 · `core/` 内部相对 import · research 是旁路无人依赖 · 新层必须排进依赖序 |
 | `tests/test_module_coverage.py` | `quant/<层>/` ↔ `tests/<层>/` 镜像 · 新模块要么有测试要么进 `UNTESTED` 并写明原因 · 补了测试必须从名单删（棘轮，名单只能变短） |
-| `tests/test_repo_references.py` | 注释/文档/任务 prompt 里写的 `quant/` `tests/` `scripts/` 路径必须真的存在 · **live 定时任务副本与 `tasks/` 逐字节一致**（脱钩不会报错，只会静静跑旧版） |
+| `tests/test_repo_references.py` | 注释/文档/任务 prompt 里写的 `quant/` `tests/` `scripts/` 路径必须真的存在 · **live 定时任务副本与 `tasks/claude/` 逐字节一致**（脱钩不会报错，只会静静跑旧版） |
 
 两组守卫都做过变异测试：逐条制造违规，确认**每一条都真的会红**（一个只会绿的守卫比没有守卫更坏——
  就有一次冒烟检查因为 macOS 没有 `timeout` 而对 51 个入口全部"通过"）。

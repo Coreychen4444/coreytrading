@@ -47,7 +47,6 @@ UNTESTED: dict[str, str] = {
     "report/perf_report": "读时统计。**真缺口**: process×outcome 矩阵算错不会有人发现",
 
     # research —— 离线旁路层；待补测试的脚本需保留通用理由
-    "research/zone_timeline": "从 git 历史挖 zone 快照，输出报表；正确性靠人读 git log 复核",
     "research/pull_earnings_history": "需要 OpenD 财报端点的研究取数 CLI",
     "research/earnings_gate_backtest": "离线预注册回测；尚缺独立构造级覆盖",
     "research/repaint_trigger_backtest": "离线预注册回测；尚缺独立构造级覆盖",

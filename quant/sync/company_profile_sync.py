@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """company_profile_sync.py — OpenD 基本面 → agent.company_profile 机器区对账。
 
-为什么存在 (用户): ai_news 利率传导链 (canonical =
-ai_news/design/rate-to-equity-transmission-framework.md §7 公司暴露卡 / §14
-数据接口) 要求"必须读取资产负债表与现金流量表", 而宏观 agent (ai_news 雷达, 起
-= Claude 定时任务 ai-news-radar) 每轮只读
+为什么存在 (operator): 情报层利率传导链 (canonical =
+agents/methods/rate-to-equity-transmission-framework.md §7 公司暴露卡 / §14
+数据接口) 要求"必须读取资产负债表与现金流量表", 而宏观 agent (市场情报雷达) 每轮只读
 positions.json / watchlist.json 两个文件。本模块把 OpenD 结构化财报落到每张
 活跃正股卡的 `agent.company_profile`, 让传导推演在事件窗内直接取用公司层事实
 (净利息头寸/资本强度/融资依赖的原料), 不再现查、不从新闻正文抄数字。
@@ -17,7 +16,7 @@ positions.json / watchlist.json 两个文件。本模块把 OpenD 结构化财�
        notes_as_of 由 prose 写入自动盖当日。
 
 🚨 零授权效力: 本块不被 sizing/entry_guard/exit_guard import, 不影响
-cap/gate/zone/stop。消费者 = ai_news 宏观 agent (只读) 与人工复盘。
+cap/gate/zone/stop。消费者 = 市场情报采集任务 (只读) 与人工复盘。
 
 口径 (写死在此, 消费侧不要再猜):
   net_cash_ex_leases_m = cash_and_sti − (current_debt + lt_debt)

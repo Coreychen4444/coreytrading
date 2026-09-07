@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from quant.core.agent_contracts import CONTRACT_VERSION, ROLES
+from quant.core.agent_contracts import CONTRACT_VERSION, RESULT_SCHEMA_VERSION, ROLES
 from quant.core.io_json import atomic_write_json, read_json
 from quant.ops import agent_runtime as runtime
 from quant.ops.agent_snapshots import make_snapshot
@@ -47,7 +47,8 @@ def result_for(prompt):
     request = json.loads(prompt.split("\n", 1)[1])
     s, role = request["snapshot"], request["role"]
     target = request["review_target"]
-    return {"schema_version": CONTRACT_VERSION, "contract_version": CONTRACT_VERSION,
+    return {"schema_version": RESULT_SCHEMA_VERSION, "contract_version": CONTRACT_VERSION,
+            **({"valuation_scenarios": []} if role == "macro" else {}),
             "role": role, "snapshot_id": s["snapshot_id"], "input_hash": s["input_hash"],
             "generated_at": s["as_of"], "expires_at": s["expires_at"], "summary": "合成证据分析",
             "observations": [{"id": "f1", "kind": "fact", "text": "来自冻结证据",
@@ -419,15 +420,18 @@ def test_status_does_not_accept_arbitrary_file_path(tmp_path):
 
 def test_isolated_workers_receive_referenced_policy_and_actual_writer_contract():
     from quant.ops.agent_submit import FLAG_ARITY
-    for role, method in (("macro", "ai_news/design/macro-inference-contract.md"),
-                         ("valuation", "ai_news/valuation/README.md"),
-                         ("technical", "trade/us_stock/strategy/trading-rules.md"),
-                         ("risk", "trade/us_stock/strategy/trading-rules.md")):
+    for role, method in (("macro", "agents/methods/macro-inference-contract.md"),
+                         ("valuation", "agents/methods/news-valuation-overlay.md"),
+                         ("technical", "trade/strategy/trading-rules.md"),
+                         ("risk", "trade/strategy/trading-rules.md")):
         policy = runtime.policy_context(role)
         if (runtime.ROOT / method).exists():
             assert method in policy
         else:   # optional intelligence workspace absent: named, not fabricated
             assert method in policy["optional_methods_missing"] and method not in policy
+    for role in ("macro", "valuation"):
+        assert runtime.policy_context(role)["quant/valuation/README.md"] == (
+            runtime.ROOT / "quant/valuation/README.md").read_text()
     policy = runtime.policy_context("technical")
     assert policy["technical_proposal_contract"]["flag_arity"] == FLAG_ARITY
     assert "--ticker" not in policy["technical_proposal_contract"]["flag_arity"]

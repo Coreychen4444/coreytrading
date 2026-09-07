@@ -26,6 +26,7 @@ def snapshot():
 def result(role, snapshot):
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
+        **({"valuation_scenarios": []} if role == "macro" else {}),
         "contract_version": CONTRACT_VERSION,
         "role": role, "snapshot_id": snapshot["snapshot_id"],
         "input_hash": snapshot["input_hash"],

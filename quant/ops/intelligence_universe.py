@@ -22,8 +22,8 @@ active 持仓" "watchlist 取 watching 标的" —— 两条读的都是 `status
 仓位、授权。系统 python3 即可跑 (外部 runner 的 shell 里未必有本项目的 venv)。
 
 Usage:
-    python3 quant/ops/ainews_universe.py            # 一行, 直接贴进报告"覆盖窗口"行
-    python3 quant/ops/ainews_universe.py --json     # {"active", "watchlist", "excluded", "line", "as_of", ...}
+    python3 quant/ops/intelligence_universe.py            # 一行, 直接贴进报告"覆盖窗口"行
+    python3 quant/ops/intelligence_universe.py --json     # {"active", "watchlist", "excluded", "line", "as_of", ...}
 """
 
 import sys

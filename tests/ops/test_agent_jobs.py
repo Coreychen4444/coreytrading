@@ -118,3 +118,15 @@ def test_scheduled_holiday_skips_before_capture_or_state(tmp_path):
                        run_dir=tmp_path, control_dir=tmp_path / "control", capture_fn=unexpected)
     assert out["status"] == "skipped"
     assert list(tmp_path.iterdir()) == []
+
+
+def test_briefing_and_weekly_request_only_trading_workflow(tmp_path):
+    seen = []
+    def workflow(*args, **kwargs):
+        seen.append(kwargs['purpose'])
+        return {'status': 'completed', 'reports': {}, 'total_calls': 0}
+    for kind in ('briefing', 'weekly'):
+        out = jobs.run_job(kind, run_dir=tmp_path, control_dir=tmp_path / 'control',
+                           capture_fn=capture, workflow_fn=workflow)
+        assert out['status'] == 'completed' and 'valuation_calculations' not in out
+    assert seen == ['trading', 'trading']

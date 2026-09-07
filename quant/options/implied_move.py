@@ -16,7 +16,7 @@ Methodology:
 Step 0a: anchor = current spot (decision-time view, includes pre-drift + event)
 Step 0b: anchor = last close (pre-event view, only event move)
 
-The public schema is trade/us_stock/strategy/entry-timing-ev-framework.example.md;
+The public schema is trade/strategy/entry-timing-ev-framework.example.md;
 active methodology belongs in the ignored private copy without `.example`.
 """
 from __future__ import annotations

@@ -1,52 +1,13 @@
 #!/usr/bin/env python3
-"""model.py — 股价第一性原理的两个引擎 + 反向隐含 + 情景分布 (纯函数, 不碰网络不写 state)。
+"""Deterministic company valuation and conditional earnings prices (零授权效力).
 
-为什么存在 (用户): 「按股价第一性原理, 用 Σ FCF_t/(1+r)^t 或 EPS×PE, 根据商业模式、
-估值久期、资产负债表、经营周期、增量新闻大致算出股价, 判断高估还是低估」。五个输入在本模块的落点:
+FCFF-DCF is the intrinsic-value output. Sell-side targets and historical PE are
+comparisons only. Stress cases have no default probability; explicit probabilities
+require a basis. All rates are fractions, not percent numbers. Macro scenarios
+are computed by quant/valuation/scenarios.py using the same frozen baseline.
 
-  商业模式   → 原型参数 (`archetypes.py`): 预测期 N / 增速取法与衰减 / 利润率路径 / 引擎权重
-  估值久期   → **输出**不是输入: DCF 现金流的加权年限 + WACC +100bp 的价格弹性 (`dcf_value`)
-  资产负债表 → 权益桥 (EV + 现金短投 + 长期投资 − 有息债; 租赁不减, 经营租赁费用已在 EBIT 里)
-               + 净利息 (直接 EPS 通道) + 投入资本/ROIC/销售资本比 (再投资强度)
-  经营周期   → 营业利润率对历史中位的分位与回归路径 (周期票顶部 PE 最低是陷阱, 用归一化 EPS)
-  增量新闻   → 结构化 overlay (`overlays.py` 契约, 雷达每轮写 / 用户 手写) 分四段加在驱动上:
-               市场段 rf/erp/wacc (PE 通道: 贴现率·流动性·ERP) → 资本成本重算;
-               驱动段 revenue_base/growth_start/target_margin/margin_start/share_change_rate/
-                 net_interest_after_tax/tax_rate/terminal_growth (EPS 通道: 订单·指引·利润率·回购·融资);
-               倍数段 pe_multiplier (PE 通道: 监管·诉讼·资金流折价/溢价) → 引擎 B 的 PE 锚;
-               概率段 scenario_tilt (有量化依据的显式概率调整: 概率从熊搬到牛或反之)。
-               宏观风险环境 (ai_news/macro/current.json) 只保留为研究上下文，不自动改变 ERP、
-               折价或概率；数值调整来自显式参数及通过契约筛选的 overlay。本模块仍不读新闻正文——
-               新闻→数字是雷达/人的判断, 这里只保证每一个数字进来都带出处、有到期、可撤销。
-
-引擎 A  FCFF-DCF:  EV = Σ_{t=1..N} FCF_t/(1+WACC)^t + TV/(1+WACC)^N,
-                    FCF_t = NOPAT_t − Δ收入_t / 销售资本比, TV = NOPAT_N(1+gT)(1 − gT/RONIC_T)/(WACC − gT)
-引擎 B  EPS×PE:    P_0 = (EPS_T × PE_T + Σ DPS) / (1+r_e)^T, T = 3;
-                    EPS 用**核心口径** (营业利润 + 净利息)×(1−τ)/稀释股数, 剔 8022/8023 一次性损益
-                    (GOOGL 2026 实测: 报表 TTM EPS 被股权投资重估撑到静态 PE 的一半, 核心口径才能比);
-                    PE_T 锚 = 自身 5Y PE 均值 (均值回归) 与稳态合理 PE (1−gT/RONIC)(1+g)/(r_e−gT) 的高者
-反向隐含:            解 g0 使引擎 A = 现价 → 「市场在为多少增长定价」, 只需回答信不信
-情景:                熊/基/牛 (g0 ∓Δ, 终点利润率 ∓Δ, WACC ±Δ) × 概率 → 加权公允价 + 区间
-判定:                现价/加权公允 − 1 → 低估 / 偏低 / 合理 / 偏高 / 高估 (带置信与旗标)
-
-每个数都带出处 (`drivers[...]['basis']` / `provenance`), 缺什么写什么, 不静默填缺省。
-
-v2 ( 夜, 用户: 「NBIS 才 19 MU 才 232, 严重滞后」; 参照 Damodaran 与开源 DCF 的通行做法):
-  近端 = 一致预期  第 1 年收入/利润率锚定 OpenD forward PS/PE 反推的卖方一致前瞻 (`fundamentals.parse_forward`;
-                   MU 前瞻收入 $233B vs TTM $90B, EPS $144 vs $45 —— v1 全用 TTM 往后推, 这就是「滞后」),
-                   无一致预期 → 陡峭爬坡时用最近季年化, 否则 TTM×(1+g); 第 2 年起增速 = 历史趋势斜率封顶后衰减
-  资本成本         β = Damodaran 行业 levered β 与个股 5 年**月度**回归 β (Blume) 各半 (v1 一年日线回归在
-                   主升浪票上给 3–4, WACC 14% 把终值砍没), 夹逼 [0.8, 1.8]; ERP 4.23% (Damodaran 隐含)
-  终值/折现        稳态增速 3.5% (Damodaran: ≤ rf; 开源通行 3%); 中年折现 (t−0.5); 周期票利润率向近 5 年中位分 5 年回归
-  仍然不做         没有卖方一致预期的期限声明 (OpenD forward 未标 NTM/FY+1, 当 12 个月后用, 差异归校准)
-v3 (同夜, 用户: 「半导体还是离谱, MRVL/INTC 差太远」):
-  引擎 B = 卖方一致目标价  OpenD analyst consensus 的 低/均/高 目标价按 r_e 折现 12 个月 = **机构口径**的价值 (熊/基/牛 各取
-                   低/均/高); 与本仓 DCF 各半加权, 两者差距明示 —— 「DCF 说贵、街上说便宜」本身就是信息。旧 EPS×PE
-                   降为交叉显示。β 只用 Damodaran 行业 β (自下而上, 回归 β 噪声大), 个股月度回归作交叉。周期原型跑道
-                   10 年指数衰减 (半衰期 3 年)、年 2 起封顶 30%、RONIC 上限 20%。板块 PE/PS 5 年中位作交叉显示。
-
-🚨 零授权效力: 本层不被 sizing/entry_guard/exit_guard import, 不写 positions/watchlist,
-不产出股数/金额/cap。估值再便宜不解除 cap 0, 再贵不触发退出 —— 那是 zone 与退出栈的活。
+The earnings model uses a simplified reinvestment/payout path and must not be
+counted as an independent confirmation of the underlying cash-flow assumptions.
 """
 from __future__ import annotations
 
@@ -54,7 +15,8 @@ import math
 import statistics
 from typing import Callable
 
-MODEL_VERSION = "v3.1"           # : 保留 v3 引擎，取消宏观风险标签自动映射 ERP
+MODEL_VERSION = "v4.2"
+DEFAULT_ERP = 0.0423
 TTM_QUARTERS = 4
 MIN_CYCLE_QUARTERS = 12          # through_cycle 至少 3 年利润率历史, 否则退回 current 并打旗
 MIN_TREND_QUARTERS = 20          # 收入对数趋势至少 5 年 (20 个 TTM 点), 否则不用趋势
@@ -162,6 +124,12 @@ def derive_drivers(bundle: dict, params: dict, overrides: dict | None = None) ->
     rows = filter_history(bundle.get("quarters") or [], overrides.get("history_start"))
     if len(rows) < TTM_QUARTERS:
         raise ValueError(f"季度不足 {TTM_QUARTERS} 个 (有 {len(rows)}), 无法构成 TTM")
+    from datetime import date
+    periods = [date.fromisoformat(row["period_end"]) for row in rows]
+    if any(left >= right for left, right in zip(periods, periods[1:])):
+        raise ValueError("financial quarters must have unique ascending periods")
+    if any(not 60 <= (right - left).days <= 120 for left, right in zip(periods[-4:], periods[-3:])):
+        raise ValueError("TTM requires four consecutive fiscal quarters")
     k = len(rows) - 1
     snap = bundle.get("snapshot") or {}
     d: dict = {"quarters_used": len(rows), "history_span": f"{rows[0]['period']}–{rows[-1]['period']}",
@@ -252,10 +220,16 @@ def derive_drivers(bundle: dict, params: dict, overrides: dict | None = None) ->
 
     d["net_interest_ttm"] = net_int_ttm
     d["net_interest_annualized_median"] = net_int
+    d["net_interest_known"] = net_int is not None
+    if net_int is None:
+        flags.append("净利息缺失: EPS 与每股盈利目标价不可用；DCF 债务成本仍为显式代理假设")
     d["net_interest_after_tax"] = (net_int or 0.0) * (1 - tau)
     d["nopat_ttm"] = op * (1 - tau) if op > 0 else op
     d["core_net_income_ttm"] = (op + (net_int or 0.0)) * (1 - tau) if (op + (net_int or 0.0)) > 0 \
         else (op + (net_int or 0.0))
+    if net_int is None:
+        d["core_net_income_ttm"] = None
+        d["oneoff_ttm"] = d["oneoff_share_of_pretax"] = None
     d["reported_net_income_ttm"] = T("net_income")
 
     # 股本: 近 4 季 净利/稀释EPS 的中位 (稀释口径), 与快照流通股交叉校验
@@ -279,10 +253,15 @@ def derive_drivers(bundle: dict, params: dict, overrides: dict | None = None) ->
     else:
         raise ValueError("股本推不出来 (无有效 EPS 且快照无市值/流通股)")
     d["eps_reported_ttm"] = (d["reported_net_income_ttm"] / d["shares"]) if d["reported_net_income_ttm"] is not None else None
-    d["eps_core_ttm"] = d["core_net_income_ttm"] / d["shares"]
+    d["eps_core_ttm"] = d["core_net_income_ttm"] / d["shares"] if net_int is not None else None
 
     # 资产负债表 (最新季)
     last = rows[-1]
+    from quant.core.valuation_contracts import finite
+    missing_bridge = [key for key in ("cash_sti", "lt_investments", "current_debt", "lt_debt")
+                      if not finite(last.get(key)) or last[key] < 0]
+    if missing_bridge:
+        raise ValueError("equity bridge fields missing: " + ", ".join(missing_bridge))
     cash = last.get("cash_sti") or 0.0
     lti = last.get("lt_investments") or 0.0
     debt = (last.get("current_debt") or 0.0) + (last.get("lt_debt") or 0.0)
@@ -298,7 +277,8 @@ def derive_drivers(bundle: dict, params: dict, overrides: dict | None = None) ->
     # 投入资本 / ROIC / 销售资本比
     def ic_at(i: int, ex_goodwill: bool = False) -> float | None:
         r = rows[i]
-        if r.get("total_equity") is None:
+        if any(not finite(r.get(key)) for key in
+               ("total_equity", "cash_sti", "lt_investments", "current_debt", "lt_debt")):
             return None
         ic = (r["total_equity"] + (r.get("current_debt") or 0) + (r.get("lt_debt") or 0)
               + (r.get("current_lease") or 0) + (r.get("lt_lease") or 0)
@@ -354,7 +334,8 @@ def derive_drivers(bundle: dict, params: dict, overrides: dict | None = None) ->
     d["buyback_yield"] = (-nsi / mcap) if (nsi is not None and mcap) else None
     d["dividend_yield"] = (abs(div) / mcap) if (div is not None and mcap) else None
     d["dps_ttm"] = ttm_at(rows, k, "dps") if all(rows[i].get("dps") is not None for i in range(k - 3, k + 1)) else None
-    d["share_change_rate"] = _clamp(d["buyback_yield"], *SHARE_CHANGE_CLAMP) if d["buyback_yield"] is not None else 0.0
+    d["share_change_rate"] = 0.0
+    flags.append("股本保持当前稀释口径；历史回购不外推为免费股本缩减，未来融资与稀释未建模")
     d["flags"] = flags
     return d
 
@@ -433,7 +414,9 @@ def cost_of_capital(drivers: dict, *, rf: float, erp: float, beta: dict | None,
             (f" 夹逼到 {b:.2f}" if b != beta["adjusted"] else "") + f" ({beta['n_obs']} {beta['window']})"
     else:
         b, b_basis = 1.0, "缺省 1.0 (无行业 β 且回归不足)"
-    re = _clamp(rf + b * erp, rf + COST_OF_EQUITY_CLAMP[0], COST_OF_EQUITY_CLAMP[1])
+    if any(not math.isfinite(v) for v in (rf, erp, b)) or erp < 0 or b < 0:
+        raise ValueError("invalid capital cost inputs")
+    re = rf + b * erp
     debt = drivers.get("debt") or 0.0
     ie = drivers.get("net_interest_ttm")
     rd_basis = f"rf + 1.5pp"
@@ -446,11 +429,11 @@ def cost_of_capital(drivers: dict, *, rf: float, erp: float, beta: dict | None,
     mcap = drivers.get("mcap") or 0.0
     w_d = debt / (debt + mcap) if (debt + mcap) > 0 else 0.0
     wacc = (1 - w_d) * re + w_d * rd * (1 - tau)
-    wacc_floor = max(rf + 0.02, terminal_growth + 0.02)
-    wacc = max(wacc, wacc_floor)
     basis = f"WACC = {1-w_d:.0%}×r_e {re:.2%} + {w_d:.0%}×r_d {rd:.2%}×(1−τ)"
     if "wacc" in overrides:
         wacc, basis = float(overrides["wacc"]), "override"
+    if not math.isfinite(wacc) or wacc <= terminal_growth or re <= terminal_growth:
+        raise ValueError("capital cost must exceed terminal growth; revise explicit assumptions")
     return {"rf": rf, "erp": erp, "beta": b, "beta_basis": b_basis, "cost_of_equity": re,
             "cost_of_debt": rd, "cost_of_debt_basis": rd_basis, "debt_weight": w_d,
             "wacc": wacc, "wacc_basis": basis}
@@ -534,16 +517,18 @@ def resolve_base(drivers: dict, params: dict, overrides: dict, forward: dict | N
     """第 1 年锚点 (v2 核心): 收入与利润率优先取卖方一致前瞻, 其次最近季年化 (陡峭爬坡), 最后 TTM×(1+g)。
     第 2 年起增速 = 历史趋势/CAGR 判据 (resolve_growth_start) 封顶 growth_cap_after。"""
     fw = forward or {}
-    use_cons = bool(overrides.get("use_consensus", True))
+    use_cons = bool(overrides.get("use_consensus", True)) and fw.get("horizon_months") == 12
     rev = drivers["revenue_ttm"]
     tau = drivers["tax_rate"]
     flags: list[str] = []
+    if fw and fw.get("horizon_months") != 12:
+        flags.append("前瞻期限未验证为12个月: 仅保留参考，不作为预测锚")
     g0, g0_basis = resolve_growth_start(drivers, params, overrides)
     fwd_rev, fwd_eps = fw.get("forward_revenue"), fw.get("forward_eps")
     consensus_rev = bool(use_cons and fwd_rev and fwd_rev > 0)
     if consensus_rev:
         rev_1 = float(fwd_rev)
-        rev_basis = f"一致前瞻收入 ${rev_1/1e9:,.1f}B (TTM ×{rev_1/rev:.2f}, OpenD forward PS 反推)"
+        rev_basis = f"已声明12个月口径的前瞻收入 ${rev_1/1e9:,.1f}B (TTM ×{rev_1/rev:.2f})"
     elif drivers.get("runrate_vs_ttm") and drivers["runrate_vs_ttm"] > RUNRATE_RAMP:
         rev_1 = float(drivers["revenue_runrate"])
         rev_basis = f"最近季年化 ${rev_1/1e9:,.1f}B (TTM ×{rev_1/rev:.2f}; 陡峭爬坡且无一致预期)"
@@ -565,7 +550,11 @@ def resolve_base(drivers: dict, params: dict, overrides: dict, forward: dict | N
         g_after = _clamp(g_raw, params.get("growth_floor"), cap)
         if cap is not None and g_after != g_raw:
             g_after_basis += f", 封顶 {cap:.0%}"
-    consensus_eps = bool(use_cons and fwd_eps is not None and drivers.get("shares"))
+    consensus_eps = bool(use_cons and fw.get("earnings_basis") == "core"
+                         and drivers.get("net_interest_known", True)
+                         and fwd_eps is not None and drivers.get("shares"))
+    if use_cons and fwd_eps is not None and fw.get("earnings_basis") != "core":
+        flags.append("前瞻EPS核心口径未核验，不反推营业利润率")
     if consensus_eps:
         ni_1 = float(fwd_eps) * drivers["shares"]
         nopat_1 = ni_1 - (drivers.get("net_interest_after_tax") or 0.0)
@@ -620,8 +609,15 @@ def apply_overlays_market(rf: float, erp: float, overlays: list[dict], macro_con
 def apply_overlays_spec(spec: dict, overlays: list[dict]) -> dict:
     """驱动段: EPS 通道 + terminal_growth / wacc。乘法驱动 ×(1+δ), 其余加法。返回新 dict。"""
     p = dict(spec)
+    if "year_effects" in p:
+        p["year_effects"] = [dict(effect) for effect in p["year_effects"]]
     for o in overlays:
         drv, delta = o["driver"], float(o["delta"])
+        if drv == "share_change_rate" and delta != 0:
+            raise ValueError("share changes require a financed capital-allocation model")
+        if "start_year" in o:
+            p.setdefault("year_effects", []).append(dict(o))
+            continue
         if drv in MULTIPLICATIVE_DRIVERS and drv in p:
             p[drv] = p[drv] * (1 + delta)
         elif drv == "wacc":
@@ -630,7 +626,8 @@ def apply_overlays_spec(spec: dict, overlays: list[dict]) -> dict:
         elif drv in p and drv not in ("pe_multiplier", "erp", "rf", "scenario_tilt"):
             p[drv] = p[drv] + delta
     p["tax_rate"] = _clamp(p["tax_rate"], 0.0, 0.5)
-    p["terminal_growth"] = min(p["terminal_growth"], p["wacc"] - 0.02)
+    if p["terminal_growth"] >= min(p["wacc"], p["cost_of_equity"]):
+        raise ValueError("terminal growth must be below both discount rates")
     return p
 
 
@@ -680,20 +677,33 @@ def project(spec: dict) -> list[dict]:
     ms = [m1 + (mT - m1) * min(1.0, (t - 1) / f) if f > 1 else (m1 if t == 1 else mT) for t in range(1, n + 1)]
     tau, s2c = spec["tax_rate"], spec["sales_to_capital"]
     rev_prev, shares = spec["revenue_base"], spec["shares"]
+    base_rev_prev = rev_prev
     ratio, rf_y = float(spec.get("revenue_level_ratio", 1.0) or 1.0), max(1, int(spec.get("revenue_fade_years", 1) or 1))
     lvl_prev = 1.0
     out = []
     for t in range(1, n + 1):
         lvl = ratio ** min(1.0, t / rf_y)            # 收入水平向趋势线回归 (ratio<1 = 从峰值回落)
-        rev = rev_prev * (1 + gs[t - 1]) * (lvl / lvl_prev)
+        base_rev = base_rev_prev * (1 + gs[t - 1]) * (lvl / lvl_prev)
+        base_rev_prev = base_rev
+        rev, margin, interest_delta = base_rev, ms[t - 1], 0.0
+        for effect in spec.get("year_effects", []):
+            if effect["start_year"] <= t <= effect["end_year"]:
+                if effect["driver"] == "revenue_base":
+                    rev += base_rev * effect["delta"]
+                elif effect["driver"] == "margin_start":
+                    margin += effect["delta"]
+                elif effect["driver"] == "net_interest_after_tax":
+                    interest_delta += effect["delta"]
         lvl_prev = lvl
-        ebit = rev * ms[t - 1]
+        ebit = rev * margin
         nopat = ebit * (1 - tau) if ebit > 0 else ebit          # 亏损年不记税盾 (保守, 声明)
         reinvest = max(0.0, rev - rev_prev) / s2c
         fcf = nopat - reinvest
         shares = shares * (1 - spec.get("share_change_rate", 0.0))
-        eps = (nopat + spec.get("net_interest_after_tax", 0.0)) / shares
-        out.append({"year": t, "growth": gs[t - 1], "revenue": rev, "level": lvl, "margin": ms[t - 1], "nopat": nopat,
+        eps = (nopat + spec.get("net_interest_after_tax", 0.0) + interest_delta) / shares
+        if not spec.get("net_interest_known", True):
+            eps = None
+        out.append({"year": t, "growth": gs[t - 1], "revenue": rev, "level": lvl, "margin": margin, "nopat": nopat,
                     "reinvest": reinvest, "fcf": fcf, "shares": shares, "eps": eps,
                     "dps": spec.get("dps") or 0.0})
         rev_prev = rev
@@ -711,17 +721,34 @@ def _pv_sum(path: list[dict], rate: float) -> tuple[float, float]:
 
 
 def dcf_value(path: list[dict], *, wacc: float, terminal_growth: float, ronic_terminal: float,
-              cash_sti: float, lt_investments: float, debt: float, shares: float) -> dict:
+              cash_sti: float, lt_investments: float, debt: float, shares: float,
+              wacc_path: list[float] | None = None, terminal_wacc: float | None = None,
+              terminal_nopat: float | None = None) -> dict:
     n = path[-1]["year"]
-    nopat_n = path[-1]["nopat"]
+    nopat_n = path[-1]["nopat"] if terminal_nopat is None else terminal_nopat
+    rates = list(wacc_path) if wacc_path is not None else [wacc] * len(path)
+    term_rate = wacc if terminal_wacc is None else terminal_wacc
+    if (len(rates) != len(path) or shares <= 0 or ronic_terminal <= 0
+            or any(not math.isfinite(v) for v in (shares, ronic_terminal, cash_sti, lt_investments, debt, terminal_growth, nopat_n))
+            or any(not math.isfinite(x) or x <= -1 for x in rates)
+            or not math.isfinite(term_rate) or term_rate <= terminal_growth):
+        raise ValueError("invalid discount curve, shares or terminal spread")
     reinvest_rate = terminal_growth / ronic_terminal if ronic_terminal > 0 else 0.0
     fcf_next = nopat_n * (1 + terminal_growth) * (1 - reinvest_rate)
 
     def ev_at(rate: float) -> tuple[float, float, float, float]:
-        pv_exp, wt = _pv_sum(path, rate)
-        spread = rate - terminal_growth
-        tv = fcf_next / spread if spread > 0.005 else float("nan")
-        pv_tv = tv / (1 + rate) ** (n - MIDYEAR)      # 终值与中年现金流同拍
+        shift = rate - wacc
+        accum, pv_exp, wt = 1.0, 0.0, 0.0
+        for row, forward_rate in zip(path, rates):
+            period_rate = forward_rate + shift
+            discount = accum * (1 + period_rate) ** (1 - MIDYEAR)
+            present = row["fcf"] / discount
+            pv_exp += present
+            wt += (row["year"] - MIDYEAR) * present
+            accum *= 1 + period_rate
+        spread = term_rate + shift - terminal_growth
+        tv = fcf_next / spread if spread > 0 else float("nan")
+        pv_tv = tv / discount
         return pv_exp, pv_tv, wt, tv
 
     pv_exp, pv_tv, wt, tv = ev_at(wacc)
@@ -738,9 +765,10 @@ def dcf_value(path: list[dict], *, wacc: float, terminal_growth: float, ronic_te
     eff_dur = None
     if per_share and per_share > 0 and math.isfinite(per_share):
         up, dn = ps_at(wacc + 0.005), ps_at(wacc - 0.005)
-        eff_dur = (dn - up) / (2 * 0.005 * per_share)
+        eff_dur = (dn - up) / (2 * 0.005 * per_share) if math.isfinite(dn) and math.isfinite(up) else None
         sens = ps_at(wacc + 0.01) / per_share - 1
     return {"ev": ev, "pv_explicit": pv_exp, "pv_terminal": pv_tv, "terminal_value": tv,
+            "wacc_path": rates, "terminal_wacc": term_rate,
             "tv_share": (pv_tv / ev) if ev > 0 else None, "equity": equity, "per_share": per_share,
             "fcf_next": fcf_next, "ronic_terminal": ronic_terminal, "reinvest_rate_terminal": reinvest_rate,
             "duration_years": duration_years, "effective_duration": eff_dur,
@@ -755,7 +783,7 @@ def justified_pe(g: float, ronic: float, r: float) -> float | None:
 
 
 def path_justified_pe(path: list[dict], T: int, *, cost_of_equity: float, terminal_growth: float,
-                      ronic_terminal: float) -> float | None:
+                      ronic_terminal: float, terminal_eps: float | None = None) -> float | None:
     """T 年末的路径一致合理 PE: 之后各年 EPS × 派息率 (1 − 再投资/NOPAT, 同一条路径) 折现
     + 稳态终值, 除以 EPS_T。增速回到 gT 时退化为稳态式 (1 − gT/RONIC)(1+gT)/(r − gT)。"""
     eps_T = path[T - 1]["eps"]
@@ -767,9 +795,10 @@ def path_justified_pe(path: list[dict], T: int, *, cost_of_equity: float, termin
         payout = 1.0 - (row["reinvest"] / row["nopat"] if row["nopat"] > 0 else 1.0)
         v += row["eps"] * max(0.0, min(1.0, payout)) / (1 + r) ** (row["year"] - T)
     spread = r - terminal_growth
-    if spread <= 0.005 or path[-1]["eps"] <= 0:
+    final_eps = path[-1]["eps"] if terminal_eps is None else terminal_eps
+    if spread <= 0 or final_eps <= 0:
         return None
-    tv = path[-1]["eps"] * (1 + terminal_growth) * (1 - terminal_growth / ronic_terminal) / spread
+    tv = final_eps * (1 + terminal_growth) * (1 - terminal_growth / ronic_terminal) / spread
     v += tv / (1 + r) ** (n - T)
     return v / eps_T
 
@@ -816,8 +845,7 @@ def eps_pe_value(path: list[dict], *, cost_of_equity: float, terminal_growth: fl
 
 
 def street_value(consensus: dict | None, *, cost_of_equity: float, min_analysts: int = 3) -> dict | None:
-    """引擎 B (v3): 卖方一致目标价 (12 个月) 按 r_e 折现一年 → 今天的机构口径价值; 低/均/高 = 熊/基/牛。
-    已知偏差: 卖方目标价系统性高于现价 (文献 ~10–15%), 不修正, 明示。"""
+    """Sell-side target reference with an explicitly assumed twelve-month horizon."""
     c = consensus or {}
     n = c.get("total") or 0
     avg = c.get("average")
@@ -828,6 +856,27 @@ def street_value(consensus: dict | None, *, cost_of_equity: float, min_analysts:
     return {"target_avg": avg, "target_low": lo, "target_high": hi, "n": n, "as_of": c.get("update_time_str"),
             "per_share": avg / disc, "per_share_bear": lo / disc, "per_share_bull": hi / disc,
             "basis": f"卖方一致目标价 均 ${avg:,.0f} (低 ${lo:,.0f} / 高 ${hi:,.0f}, {n} 家, {c.get('update_time_str')}) 按 r_e {cost_of_equity:.1%} 折现 12 个月"}
+
+
+def earnings_target(path: list[dict], spec: dict, *, pe_mult: float = 1.0) -> dict:
+    """Twelve-month earnings price; no historical/analyst anchor or probability.
+
+    This simplified payout model is a conditional cross-check, not independent
+    evidence for the DCF. Cash/debt remain in the FCFF equity bridge only.
+    """
+    eps = path[0]["eps"]
+    if not spec.get("net_interest_known", True):
+        return {"status": "unknown", "horizon_months": 12, "eps": None, "pe": None,
+                "price": None, "reason": "net_interest_missing", "pe_multiplier": pe_mult}
+    pe = path_justified_pe(path, 1, cost_of_equity=spec["cost_of_equity"],
+                           terminal_growth=spec["terminal_growth"], ronic_terminal=spec["ronic_terminal"],
+                           terminal_eps=project({**spec, "year_effects": []})[-1]["eps"])
+    available = eps is not None and eps > 0 and pe is not None and pe > 0
+    return {"status": "conditional" if available else "unknown", "horizon_months": 12,
+            "eps": eps, "pe": pe * pe_mult if available else None,
+            "price": eps * pe * pe_mult if available else None,
+            "pe_multiplier": pe_mult,
+            "basis": "core EPS in forecast year 1 × remaining-path justified multiple; uncalibrated payout approximation"}
 
 
 def implied_param(target: float, spec: dict, value_fn: Callable[[dict], float], key: str,
@@ -870,7 +919,7 @@ def verdict(price: float, fair: float) -> dict:
             label = lab
             break
     return {"ratio": ratio, "label": label,
-            "basis": "现价/概率加权公允 − 1; 档位 ≤−25% 低估 / −10% 偏低 / ±10% 合理 / +10% 偏高 / ≥+25% 高估"}
+            "basis": "现价/基准DCF公允 − 1; 档位 ≤−25% 低估 / −10% 偏低 / ±10% 合理 / +10% 偏高 / ≥+25% 高估"}
 
 
 def confidence(base: int | None, *, tv_share: float | None, fcf_ttm: float | None,
@@ -900,28 +949,32 @@ def confidence(base: int | None, *, tv_share: float | None, fcf_ttm: float | Non
 
 def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict | None,
             price: float | None = None, overlays: dict | None = None, macro_context: dict | None = None,
-            forward: dict | None = None) -> dict:
+            forward: dict | None = None, as_of: str | None = None) -> dict:
     """bundle (fundamentals 缓存) + resolved (archetypes.resolve) + 市场参数 + 有效 overlay → 完整估值结果。
     `overlays` = overlays.active_overlays() 的输出 ({applied, ignored, flags}); `macro_context` =
-    {risk_level, risk_score, run_id, ...} 来自 ai_news/macro/current.json。`not_applicable` 原型直接返回说明。"""
+    {risk_level, risk_score, run_id, ...} 来自 trade/intelligence/macro/current.json。`not_applicable` 原型直接返回说明。"""
     params, overrides = resolved["params"], resolved["overrides"]
     ticker = bundle["ticker"]
-    if overlays is None:
-        # 直接调用 (不经 valuate.run) 时至少把 inputs.json 手写的 news_overlay 接上, 不让它静默失效
-        from quant.valuation import overlays as _ovmod   # 同层, 无环 (overlays 只依赖 archetypes)
-        from quant.core.timeutil import et_today as _today
-        overlays = _ovmod.active_overlays(_ovmod.manual_records(ticker, resolved.get("news_overlay") or []),
-                                          ticker=ticker, archetype=resolved["archetype"], as_of=_today())
-    ov = overlays
-    applied = list(ov.get("applied") or [])
     if resolved["archetype"] == "not_applicable":
         return {"ticker": ticker, "archetype": "not_applicable", "skipped": True,
                 "reason": resolved["provenance"][0]}
+    if overlays is None:
+        # 直接调用 (不经 valuate.run) 时至少把 inputs.json 手写的 news_overlay 接上, 不让它静默失效
+        from quant.valuation import overlays as _ovmod   # 同层, 无环 (overlays 只依赖 archetypes)
+        from quant.core.agent_contracts import canonical_hash
+        overlays = _ovmod.active_overlays(_ovmod.manual_records(ticker, resolved.get("news_overlay") or []),
+                                          ticker=ticker, archetype=resolved["archetype"],
+                                          as_of=as_of or bundle.get("fetched_at"), baseline_id=canonical_hash(bundle))
+    ov = overlays
+    applied = list(ov.get("applied") or [])
     d = derive_drivers(bundle, params, overrides)
     px = price if price is not None else d.get("price")
     if not px:
         raise ValueError(f"{ticker}: 无现价")
     flags = list(d["flags"]) + list(ov.get("flags") or [])
+    if "engine_weights" in overrides:
+        flags.append("旧 engine_weights 已停用: 公允价值仅使用 DCF")
+    flags.append("终值 RONIC、增长淡出及销售资本比为原型假设，尚未完成逐公司样本外验证")
     gT = float(overrides.get("terminal_growth", params["terminal_growth"]))
     mkt = apply_overlays_market(rf, erp, applied, macro_context)
     ib = overrides.get("industry_beta", params.get("industry_beta"))
@@ -930,6 +983,9 @@ def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict |
     coc.update({"rf_base": rf, "erp_base": erp, "rf_delta": mkt["rf_delta"], "erp_delta": mkt["erp_delta"],
                 "erp_tilt": mkt["erp_tilt"], "erp_tilt_basis": mkt["erp_tilt_basis"]})
     fw = forward if forward is not None else (bundle.get("forward") or {})
+    from quant.valuation.evidence import forward_at
+    fw, forward_flags = forward_at(fw, as_of=as_of or bundle.get("fetched_at"))
+    flags.extend(forward_flags)
     base_anchor = resolve_base(d, params, overrides, fw)
     flags += base_anchor["flags"]
     g0, g0_basis = base_anchor["growth_after"], base_anchor["growth_basis"]
@@ -956,6 +1012,7 @@ def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict |
         "margin_fade_years": int(overrides.get("margin_fade_years", params["margin_fade_years"])),
         "tax_rate": d["tax_rate"], "sales_to_capital": d["sales_to_capital"], "shares": d["shares"],
         "share_change_rate": d["share_change_rate"], "net_interest_after_tax": d["net_interest_after_tax"],
+        "net_interest_known": d["net_interest_known"],
         "dps": d.get("dps_ttm") or 0.0, "wacc": wacc, "cost_of_equity": coc["cost_of_equity"],
         "ronic_terminal": ronic_T,
         "revenue_level_ratio": lvl_ratio, "revenue_fade_years": lvl_fade,
@@ -968,33 +1025,39 @@ def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict |
     def dcf_ps(s: dict) -> float:
         p = project(s)
         return dcf_value(p, wacc=s["wacc"], terminal_growth=s["terminal_growth"],
-                         ronic_terminal=s["ronic_terminal"], **bridge)["per_share"]
+                         ronic_terminal=s["ronic_terminal"],
+                         terminal_nopat=project({**s, "year_effects": []})[-1]["nopat"], **bridge)["per_share"]
 
-    weights = dict(overrides.get("engine_weights", params["engine_weights"]))
     pe_hist = bundle.get("valuation_pe")
     street = street_value(bundle.get("consensus"), cost_of_equity=coc["cost_of_equity"])
     if street is None:
-        flags.append("无卖方一致目标价 (<3 家): 引擎 B 零权, 只有 DCF")
+        flags.append("无卖方一致目标价 (<3 家): 外部参考缺失")
 
-    tbv_floor = max(0.0, ((d.get("book_equity") or 0.0) - (d.get("goodwill_intangibles") or 0.0)) / d["shares"]) if d.get("book_equity") else 0.0
 
     def run(s: dict) -> dict:
         p = project(s)
-        a = dcf_value(p, wacc=s["wacc"], terminal_growth=s["terminal_growth"], ronic_terminal=s["ronic_terminal"], **bridge)
+        a = dcf_value(p, wacc=s["wacc"], terminal_growth=s["terminal_growth"], ronic_terminal=s["ronic_terminal"],
+                      terminal_nopat=project({**s, "year_effects": []})[-1]["nopat"], **bridge)
         b = eps_pe_value(p, cost_of_equity=s["cost_of_equity"], terminal_growth=s["terminal_growth"],
                          ronic_terminal=s["ronic_terminal"], pe_hist=pe_hist, pe_mult=pe_mult)
-        wa, wb = weights["fcf_dcf"], (weights.get("street", 0.0) if street else 0.0)
-        pa_raw = a["per_share"] if (a["per_share"] is not None and math.isfinite(a["per_share"])) else 0.0
-        pa = max(pa_raw, tbv_floor)          # 引擎 A 地板 = 有形账面价值/股 (剔商誉): 亏损路径的公司也不值 0
+        if not s["net_interest_known"]:
+            b = None
+        pa_raw = a["per_share"]
+        if pa_raw is None or not math.isfinite(pa_raw):
+            raise ValueError("nonfinite DCF value; cannot replace it with zero")
+        pa = max(pa_raw, 0.0)
         pb = street[s.get("_street_key", "per_share")] if street else 0.0
-        blended = (wa * pa + wb * pb) / (wa + wb) if (wa + wb) > 0 else None
+        # Intrinsic value does not inherit sell-side targets or book-value floors.
+        blended = pa
         return {"path": p, "dcf": a, "eps_pe": b, "street": (dict(street, used=pb) if street else None),
-                "weights": {"fcf_dcf": wa, "street": wb}, "blended": blended,
-                "tbv_floor": tbv_floor, "floor_binding": pa_raw < tbv_floor}
+                "weights": {"fcf_dcf": 1.0, "street": 0.0}, "blended": blended,
+                "tbv_floor": None, "floor_binding": pa_raw < 0}
 
     base = run(spec)
     sc = params["scenario"]
-    probs = tilt_probabilities(dict(overrides.get("probabilities") or {"bear": 0.25, "base": 0.50, "bull": 0.25}), applied)
+    probs = tilt_probabilities(dict(overrides["probabilities"]), applied) if overrides.get("probabilities") else {}
+    if not probs and any(o["driver"] == "scenario_tilt" for o in applied):
+        flags.append("没有有依据的基准概率，忽略scenario_tilt")
     fy = spec["margin_fade_years"]
     fy_d = int(sc.get("margin_fade_years", 0) or 0)
     rfy = spec["revenue_fade_years"]
@@ -1008,9 +1071,9 @@ def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict |
                 "wacc": max(spec["wacc"] - sc["wacc"], gT + 0.02), "cost_of_equity": spec["cost_of_equity"] - sc["wacc"],
                 "margin_fade_years": fy + fy_d, "revenue_fade_years": rfy + fy_d})
     scen = {"bear": bear["blended"], "base": base["blended"], "bull": bull["blended"], "probabilities": probs}
-    fair = None
-    if all(scen[k] is not None for k in ("bear", "base", "bull")):
-        fair = sum(probs[k] * scen[k] for k in ("bear", "base", "bull"))
+    fair = base["blended"]
+    expected_value = sum(probs[k] * scen[k] for k in ("bear", "base", "bull")) if probs else None
+    target = earnings_target(base["path"], spec, pe_mult=pe_mult)
     g_impl = implied_growth(px, spec, dcf_ps)
     m_impl = implied_margin(px, spec, dcf_ps)
     n_after = max(1, spec["horizon_years"] - 1)
@@ -1038,7 +1101,7 @@ def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict |
     if not (dcf["per_share"] and math.isfinite(dcf["per_share"]) and dcf["per_share"] > 0):
         flags.append("DCF 每股非正 (利润率路径未转正或终值溢价不足)")
     if base.get("floor_binding") or bear.get("floor_binding"):
-        flags.append(f"引擎 A 触及有形账面地板 ${tbv_floor:,.2f}/股 (剔商誉)")
+        flags.append("经营路径对应股权价值非正: 以零为有限责任下界，未估计重组/期权价值")
     conf = confidence(params.get("base_confidence"), tv_share=dcf["tv_share"], fcf_ttm=d.get("fcf_ttm"),
                       quarters=d["quarters_used"], dcf_positive=bool(dcf["per_share"] and dcf["per_share"] > 0),
                       opm_percentile=d.get("opm_percentile") if d.get("opm_history_n", 0) >= MIN_CYCLE_QUARTERS else None)
@@ -1069,6 +1132,10 @@ def valuate(bundle: dict, resolved: dict, *, rf: float, erp: float, beta: dict |
         "revenue_basis": lvl_basis, "scenario_deltas": dict(sc), "anchor": anchor_out,
         "cost_of_capital": coc, "spec": {k: v for k, v in spec.items()},
         "base": base, "scenarios": scen, "fair_value": fair, "implied": implied,
+        "fair_value_basis": "base_case_intrinsic_dcf",
+        "scenario_expected_value": expected_value,
+        "scenario_probability_basis": overrides.get("probability_basis"),
+        "market_target_12m": target,
         "verdict": verdict(px, fair), "confidence": conf, "flags": flags,
         "provenance": resolved["provenance"], "pe_hist": pe_hist, "consensus": bundle.get("consensus"),
         "fundamentals_fetched_at": bundle.get("fetched_at"),

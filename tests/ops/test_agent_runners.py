@@ -170,7 +170,7 @@ def test_claude_schema_rejects_unknown_keywords_without_dropping_named_propertie
                                         ("unknowns", ["synthetic"] * 101)])
 def test_projected_claude_output_still_fails_the_full_host_contract(
         field, value, monkeypatch, fake_cli, tmp_path):
-    from quant.core.agent_contracts import CONTRACT_VERSION
+    from quant.core.agent_contracts import CONTRACT_VERSION, RESULT_SCHEMA_VERSION
     from quant.ops import agent_runtime as runtime
     from quant.ops.agent_snapshots import make_snapshot
 
@@ -184,8 +184,8 @@ def test_projected_claude_output_still_fails_the_full_host_contract(
         # The transport projection never replaces the complete prompt contract.
         assert packet["output_schema"]["properties"]["summary"]["maxLength"] == 12000
         snapshot = packet["snapshot"]
-        payload = {"schema_version": CONTRACT_VERSION, "contract_version": CONTRACT_VERSION,
-                   "role": "macro", "snapshot_id": snapshot["snapshot_id"],
+        payload = {"schema_version": RESULT_SCHEMA_VERSION, "contract_version": CONTRACT_VERSION,
+                   "valuation_scenarios": [], "role": "macro", "snapshot_id": snapshot["snapshot_id"],
                    "input_hash": snapshot["input_hash"], "generated_at": snapshot["as_of"],
                    "expires_at": snapshot["expires_at"], "summary": "synthetic",
                    "observations": [], "hypotheses": [], "risks": [], "unknowns": [],

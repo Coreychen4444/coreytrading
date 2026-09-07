@@ -1,34 +1,12 @@
 #!/usr/bin/env python3
-"""calibrate.py — 估值预测 vs 实际的对账与校准 (财报后对账 + 历史「当时」重估回测)。
+"""Fundamental-path diagnostics and ledger reconciliation; 零授权效力.
 
-为什么存在 (用户 第二轮): 「财报后对账校准」。估值模型的每个参数都是声明值,
-不对账 = 永远不知道它偏在哪。两条路径, 同一套对账函数:
-
-  reconcile  账本 `valuations.jsonl` 里的每条预测, 等它之后的财报落地 (基本面缓存出现更新的季度),
-             把实现值 (TTM 收入增速年化 / TTM 营业利润率 / 核心 EPS / 价格相对 SPY 的超额) 与预测
-             (基准路径插值 + 熊/牛情景点) 对上, 落 `calibration.jsonl` (kind=reconcile)。
-  backtest   把 OpenD 50 季历史当时间机器: 每个季度末 + 45 天 (财报大致公布时点) 只用**当时已知**的
-             季度 + 当时收盘价 (深度日线) 重估一次, 再对 1–4 季后的实际对账 (kind=backtest)。
-             今天就有 200+ 个样本, 不用等下季财报。回测里 PE 通道无历史 (OpenD 只给当前 5Y 通道),
-             只跑引擎 A; rf/ERP 用常量 (声明), 无 overlay 无宏观 —— 校准的是**基本面路径**的偏差,
-             价格侧 (判定 vs 前向超额) 只作参考。
-
-对账口径 (与模型情景同一把尺):
-  实现增速  = (TTM 收入_now / TTM 收入_then)^(4/季数) − 1   vs   预测 = 基准路径同期年化增速
-  实现利润率 = TTM 营业利润率_now                              vs   预测 = 路径在该时点的利润率
-  归类 = 最近的情景点 (熊/基/牛 = 基准 ∓ Δ), 超出熊−Δ/2 或 牛+Δ/2 为「出界」;
-  Brier 型得分 = 分配给实现归类的概率 (出界 = 0); 偏差 = 实现 − 基准 (符号有意义: 正 = 模型太保守)。
-
-判据 (设计 §10 预注册): 收入趋势归一化 (revenue_method=trend) 采纳当且仅当 semi_cyclical 组在 4 季
-前向上 (增速覆盖率 ↑ 或 |偏差| ↓) 且 利润率覆盖率不降; 否则保留为可选覆盖不默认。
-
-🚨 零授权效力: 本层不被 sizing/entry_guard/exit_guard import, 不写 positions/watchlist。
-
-CLI:
-    .venv/moomoo/bin/python3 quant/valuation/calibrate.py backtest --tickers MU LITE [--years 4] [--horizon 4]
-        [--variant actual|trend|both] [--json] [--write]
-    .venv/moomoo/bin/python3 quant/valuation/calibrate.py reconcile [--tickers ...] [--refresh] [--json] [--write]
-    范围缺省 = 持仓 ∪ 候选 (universe.coverage_tickers; 墓碑卡不进); --all-inputs = inputs.json 全表
+The legacy historical backtest uses latest revised financial statements, a
+fixed publication-lag approximation and constant discount rates. It is NOT a
+point-in-time performance test of dynamic valuation or event response. Band
+scores only describe supplied scenario probabilities and are not Brier scores.
+Missing probabilities produce no score. Real event-response validation lives
+in response.walk_forward and requires independently sourced timed event data.
 """
 from __future__ import annotations
 
@@ -69,7 +47,7 @@ def beta_asof(prices_t: dict[str, float], prices_m: dict[str, float], day: str) 
 # ── 「当时」的 bundle ────────────────────────────────────────────────
 
 def bundle_as_of(bundle: dict, as_of: str, price: float, *, lag_days: int = PUBLICATION_LAG_DAYS) -> dict:
-    """只保留当时已公布的季度 (period_end ≤ as_of − lag); 快照换成当时价; PE 通道/目标价置空 (无历史 = 不偷看)。"""
+    """按声明的发布滞后近似截取季度，不证明当时可得 (period_end ≤ as_of − lag); 快照换成当时价; PE 通道/目标价置空 (无历史 = 不偷看)。"""
     cutoff = (date.fromisoformat(as_of) - timedelta(days=lag_days)).isoformat()
     rows = [r for r in bundle["quarters"] if (r.get("period_end") or "") <= cutoff]
     shares = None
@@ -134,7 +112,9 @@ def classify(realized: float, base: float, delta: float) -> str:
     return "above_bull"
 
 
-def score_band(band: str, probs: dict) -> float:
+def score_band(band: str, probs: dict) -> float | None:
+    if not probs:
+        return None
     return float(probs.get(band, 0.0)) if band in ("bear", "base", "bull") else 0.0
 
 
@@ -195,6 +175,8 @@ def backtest_ticker(bundle: dict, resolved: dict, *, prices: dict[str, float], s
         out.append({
             "kind": "backtest", "ticker": bundle["ticker"], "archetype": res["archetype"], "as_of": as_of, "upto": upto,
             "model_version": res.get("model_version"),
+            "validation_basis": "approximate_revised_financials_fixed_lag_and_rates",
+            "point_in_time_validated": False,
             "horizon_q": horizon_q, "variant": resolved["overrides"].get("revenue_method", resolved["params"].get("revenue_method") or "actual"),
             "price": px[1], "fair_value": res["fair_value"], "verdict": res["verdict"]["label"], "ratio": res["verdict"]["ratio"],
             "confidence": res["confidence"]["tier"], "growth_start": res["growth_start"], "target_margin": res["target_margin"],
@@ -268,7 +250,7 @@ def aggregate(rows: list[dict], key: str = "archetype") -> dict:
                 verdicts.setdefault(r.get("verdict") or "?", []).append(r["excess_return"])
         out[g] = {"n": len(rs), "coverage_growth": cov("band_growth"), "coverage_opm": cov("band_opm"),
                   "bias_growth_mean": bg[0], "bias_growth_median": bg[1], "bias_opm_mean": bm[0], "bias_opm_median": bm[1],
-                  "score_growth": statistics.mean(r["score_growth"] for r in rs), "score_opm": statistics.mean(r["score_opm"] for r in rs),
+                  "score_growth": m("score_growth")[0], "score_opm": m("score_opm")[0],
                   "bands_growth": {b: sum(1 for r in rs if r["band_growth"] == b) for b in BANDS},
                   "bands_opm": {b: sum(1 for r in rs if r["band_opm"] == b) for b in BANDS},
                   "verdict_excess": {v: {"n": len(xs), "mean": statistics.mean(xs), "median": statistics.median(xs)} for v, xs in verdicts.items()}}
@@ -282,8 +264,8 @@ def _pct(x, d=1):
 def render_aggregate(agg: dict, title: str) -> str:
     lines = [f"== {title} =="]
     for g, a in sorted(agg.items(), key=lambda kv: (kv[0] != "ALL", kv[0])):
-        lines.append(f"[{g}] n={a['n']} · 增速覆盖 {a['coverage_growth']:.0%} 偏差 均{_pct(a['bias_growth_mean'])} 中{_pct(a['bias_growth_median'])} 得分 {a['score_growth']:.2f}"
-                     f" · 利润率覆盖 {a['coverage_opm']:.0%} 偏差 均{_pct(a['bias_opm_mean'])} 中{_pct(a['bias_opm_median'])} 得分 {a['score_opm']:.2f}")
+        lines.append(f"[{g}] n={a['n']} · 增速覆盖 {a['coverage_growth']:.0%} 偏差 均{_pct(a['bias_growth_mean'])} 中{_pct(a['bias_growth_median'])} 得分 {_pct(a['score_growth'])}"
+                     f" · 利润率覆盖 {a['coverage_opm']:.0%} 偏差 均{_pct(a['bias_opm_mean'])} 中{_pct(a['bias_opm_median'])} 得分 {_pct(a['score_opm'])}")
         lines.append(f"      归类 增速 {a['bands_growth']} · 利润率 {a['bands_opm']}")
         if a["verdict_excess"]:
             lines.append("      判定→前向超额(vs SPY): " + " · ".join(f"{v} n={s['n']} 均{_pct(s['mean'])} 中{_pct(s['median'])}" for v, s in sorted(a["verdict_excess"].items())))

@@ -14,7 +14,7 @@
 - 仓库使用受支持且隔离的 Python 环境，依赖来自 `pyproject.toml`，包括固定版本的交易所日历；
 - 离线测试不依赖 broker、模型 CLI 或私有数据即可通过；
 - 只创建当前工作流确实需要的私有运行文件，且都从 `trade/` 下的示例复制而来；
-- secrets、私有运行数据、`var/` 下的运行产物和可选的 `ai_news/` 工作区只保存在本机并被 Git 忽略；
+- secrets、私有运行数据、`var/` 下的运行产物和可选的 `trade/intelligence/` 工作区只保存在本机并被 Git 忽略；
 - 每个可选集成都已验证，或明确报告为未配置；
 - 不会隐式执行订单、通知、任务注册、模型调用、commit、push 或其他外部副作用。
 
@@ -146,16 +146,16 @@ git diff --check
 以下是只在确实需要对应文件时才使用的最小命令：
 
 ```bash
-cp trade/us_stock/holding/state/positions.example.json \
-  trade/us_stock/holding/state/positions.json
-cp trade/us_stock/holding/state/watchlist.example.json \
-  trade/us_stock/holding/state/watchlist.json
+cp trade/portfolio/state/positions.example.json \
+  trade/portfolio/state/positions.json
+cp trade/portfolio/state/watchlist.example.json \
+  trade/portfolio/state/watchlist.json
 git check-ignore -v \
-  trade/us_stock/holding/state/positions.json \
-  trade/us_stock/holding/state/watchlist.json
+  trade/portfolio/state/positions.json \
+  trade/portfolio/state/watchlist.json
 ```
 
-后续工作流各自从对应示例新增的运行文件包括：`holding/events/` 下的事件账本与 NAV 历史、NAV 报告用来剔除出入金的外部现金流账本、`valuation/` 下的估值人工区与账本、`market/` 下的市场缓存，以及 `strategy/` 下的私有策略规则。不要复制全部 example；策略 example 是 schema，不是有效规则或推荐。
+后续工作流各自从对应示例新增的运行文件包括：`portfolio/events/` 下的事件账本与 NAV 历史、NAV 报告用来剔除出入金的外部现金流账本、`valuation/` 下的估值人工区与账本、`market/` 下的市场缓存，以及 `strategy/` 下的私有策略规则。不要复制全部 example；策略 example 是 schema，不是有效规则或推荐。
 
 所有权必须严格保持：broker synchronization 拥有 broker 派生事实；受控的 Agent 与用户工作流拥有 thesis、zone、已复核的 action 和私有规则；decision module 拥有后代 README 指定的生成 guard/plan 状态；append-only 事件历史通过新增修正事件修正，不能重写。
 
@@ -349,7 +349,7 @@ Notifications/tasks/MCP/模型运行器状态：
 
 ### 如何确认生成的私有文件不会被提交？
 
-运行 `git check-ignore -v <path>`，再检查 `git status --short --untracked-files=all`。私有 runtime file、`var/` 产物或 `ai_news/` 文件显示为可跟踪文件，都是必须先修复的失败。
+运行 `git check-ignore -v <path>`，再检查 `git status --short --untracked-files=all`。私有 runtime file、`var/` 产物或 `trade/intelligence/` 文件显示为可跟踪文件，都是必须先修复的失败。
 
 ### `.env.example` 和 `.mcp.json.example` 怎么用？
 

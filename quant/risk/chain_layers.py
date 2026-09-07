@@ -30,14 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 
 import argparse
 import json
-import os
 
 from quant.core.occ import parse_occ
 
-DEFAULT_STATE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "trade", "us_stock", "holding", "state", "positions.json",
-)
+from quant.core.paths import POSITIONS_PATH
+
+DEFAULT_STATE = str(POSITIONS_PATH)
 
 # ── 可编辑映射: underlying → 一个或多个链层 ───────────────────────────
 # 层级 = AI 链子驱动 (per memory partner_calibration.md §AI-circle):
@@ -148,7 +146,7 @@ def main():
     ap.add_argument("--state", default=DEFAULT_STATE)
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
-    if not os.path.exists(a.state):
+    if not Path(a.state).exists():
         sys.exit(f"[chain_layers] state 不存在: {a.state}")
     book = load_active(a.state)
     layers, redundant, unmapped = analyze(book)

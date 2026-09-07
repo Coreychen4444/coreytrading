@@ -405,7 +405,7 @@ def intel_universe(positions_doc: dict, watchlist_doc: dict) -> dict:
     `status`, 而 `status` 在本仓是手工字段 (本模块顶部: 两个方向都出过事)。于是
     结构豁免仓、期权已平的残卡与已移出候选分组的墓碑一起被当成覆盖范围, 而
     `grep moomoo_listed quant/` 永远看不见提示词里的那一份判别式。修法 = 判别式
-    进代码, 消费者只抄输出。出口 = `quant/ops/ainews_universe.py --json`。
+    进代码, 消费者只抄输出。出口 = `quant/ops/intelligence_universe.py --json`。
 
     纯函数, 不读文件 (core 不读 state)。零授权效力: 输出只有名字, 没有价格、仓位或 cap。
     """

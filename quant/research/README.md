@@ -97,7 +97,7 @@ Date windows are CLI inputs for pullers and windowed backtests; record the same 
 
 ## AI bootstrap procedure
 
-1. Read `CLAUDE.md`, this file, and `trade/us_stock/knowledge/research/README.md` before creating anything.
+1. Read `CLAUDE.md`, this file, and `trade/knowledge/research/README.md` before creating anything.
 2. Restate the research question as one falsifiable hypothesis about one production behavior.
 3. Copy `study.example.md` to the ignored private workspace and remove `.example` from the private filename.
 4. Ask for every unresolved choice: population, observation unit, metric, horizon, threshold, missing-data behavior, fallback branch, and promotion rule. Do not infer them from public examples.
@@ -111,7 +111,7 @@ Before running existing mechanics, also verify that no source literal encodes a 
 Recommended ignored layout:
 
 ```text
-trade/us_stock/knowledge/research/<study_slug>/
+trade/knowledge/research/<study_slug>/
 ├── preregistration.md
 ├── data_manifest.json
 ├── inputs/

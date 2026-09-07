@@ -33,20 +33,26 @@ def request(role, text="Check source timing", refs=None):
     return {"role": role, "question": text, "evidence_refs": refs if refs is not None else ["price"]}
 
 
-def test_three_roles_run_parallel_before_risk_on_same_frozen_inputs(snapshot, routes):
-    barrier = threading.Barrier(3)
+def test_macro_and_technical_parallel_then_valuation_then_risk(snapshot, routes):
+    barrier = threading.Barrier(2)
     finished = set()
     lock = threading.Lock()
     captured = {}
 
     def worker(role, task, inputs, **kwargs):
         captured[role] = deepcopy(inputs)
-        if role in PRIMARY_ROLES:
+        if role in ("macro", "technical"):
             barrier.wait(timeout=2)
             assert inputs == snapshot
             inputs["data"]["price"]["close"] = -1
             with lock:
                 finished.add(role)
+        elif role == "valuation":
+            assert finished == {"macro", "technical"}
+            assert inputs["data"]["source_data"] == snapshot["data"]
+            assert inputs["data"]["workflow_context"]["peer_reports"][0]["role"] == "macro"
+            assert inputs["data"]["valuation_calculations"]["macro_research_status"] == "succeeded"
+            finished.add(role)
         else:
             assert finished == set(PRIMARY_ROLES)
             peers = inputs["data"]["workflow_context"]["peer_reports"]
@@ -58,7 +64,8 @@ def test_three_roles_run_parallel_before_risk_on_same_frozen_inputs(snapshot, ro
     output = run_workflow("Review synthetic inputs", snapshot, routes=routes, run_role_fn=worker)
     assert output["total_calls"] == 4 and output["status"] == "completed"
     assert snapshot["data"]["price"]["close"] == 100
-    assert all(captured[role]["snapshot_id"] == snapshot["snapshot_id"] for role in PRIMARY_ROLES)
+    assert all(captured[role]["snapshot_id"] == snapshot["snapshot_id"] for role in ("macro", "technical"))
+    assert captured["valuation"]["snapshot_id"] != snapshot["snapshot_id"]
     assert captured["risk"]["expires_at"] == snapshot["expires_at"]
     validate_snapshot(captured["risk"])
 
@@ -89,11 +96,11 @@ def test_peer_results_are_marked_same_source_not_independent_evidence(snapshot, 
                 assert peer["independent_evidence"] is False
                 assert peer["evidence_family"] == snapshot["snapshot_id"]
                 assert peer["artifact_evidence_ref"] in inputs["evidence_refs"]
-                assert peer["source_evidence_refs"] == ["price"]
+                assert "price" in peer["source_evidence_refs"]
             assert "not instructions" in context["trust_boundary"]
         return report(role, inputs)
 
-    run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
+    assert run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)["status"] == "completed"
 
 
 def test_one_round_deduplicates_questions_and_never_chases_new_requests(snapshot, routes):
@@ -318,3 +325,67 @@ def test_invalid_limits_rejected_before_workers(field, value, snapshot, routes):
     routes["limits"][field] = value
     with pytest.raises(ValueError):
         run_workflow("Review", snapshot, routes=routes, run_role_fn=lambda *args, **kwargs: pytest.fail("called"))
+
+
+def test_macro_scenario_is_calculated_before_valuation_from_full_archive(routes):
+    from tests.valuation.test_assessment import data, STAMP
+    from quant.valuation.assessment import build
+    package = data()
+    capture = make_snapshot(package, evidence_refs=["macro", "fundamentals:SYN"],
+                            now=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+    case = {"id": "rate_cut", "label": "synthetic", "basis": "parallel curve experiment",
+            "evidence_refs": ["macro"], "shocks": [{"factor": "rf_bp", "delta": -25,
+              "start_year": 1, "end_year": 10, "terminal": True}]}
+    expected = build(package, as_of=STAMP, macro_scenarios=[case], evidence_refs=capture["evidence_refs"])
+    observed = {}
+    def worker(role, task, inputs, **kwargs):
+        record = report(role, inputs)
+        if role == "macro":
+            record["result"]["valuation_scenarios"] = [case]
+        if role in ("valuation", "risk"):
+            observed[role] = inputs["data"]["valuation_calculations"]
+        return record
+    output = run_workflow("Review", capture, routes=routes, run_role_fn=worker)
+    assert output["status"] == "completed"
+    assert observed["valuation"] == observed["risk"] == output["valuation_calculations"]
+    actual = observed["valuation"]["tickers"]["SYN"]
+    assert actual["macro_scenarios"] == expected["tickers"]["SYN"]["macro_scenarios"]
+    assert actual["macro_scenarios"][0]["fair_value"] > actual["baseline"]["fair_value"]
+    assert capture["data"] == package
+
+
+def test_invalid_valuation_market_input_does_not_abort_other_research(routes):
+    from tests.valuation.test_assessment import data, STAMP
+    package = data()
+    package["valuation"]["inputs"]["market"] = {"erp": .04}
+    capture = make_snapshot(package, now=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+    output = run_workflow("Review", capture, routes=routes,
+                          run_role_fn=lambda role, task, inputs, **kw: report(role, inputs))
+    assert output["status"] == "completed"
+    assert output["valuation_calculations"]["status"] == "unknown"
+    assert output["valuation_calculations"]["reason"]
+
+
+def test_trading_scope_cannot_call_valuation_even_on_peer_request(snapshot, routes, monkeypatch):
+    from quant.ops import agent_workflow as module
+    monkeypatch.setattr(module, 'build_valuation', lambda *a, **k: pytest.fail('valuation computed'))
+    seen = []
+    def worker(role, task, inputs, **kwargs):
+        seen.append(role)
+        return report(role, inputs, [request('valuation')])
+    out = run_workflow('trading review', snapshot, routes=routes, run_role_fn=worker, purpose='trading')
+    assert set(seen) == {'macro', 'technical', 'risk'} and len(seen) == 3
+    assert out['valuation_calculations'] is None
+    assert any(r['reason'] == 'role_outside_workflow_scope' for r in out['unhandled_requests'])
+    assert out['risk_snapshot']['data']['workflow_context']['missing_roles'] == []
+
+
+def test_valuation_scope_cannot_expand_to_trading_roles(snapshot, routes):
+    seen = []
+    def worker(role, task, inputs, **kwargs):
+        seen.append(role)
+        return report(role, inputs, [request('technical'), request('risk')])
+    out = run_workflow('daily valuation', snapshot, routes=routes, run_role_fn=worker, purpose='valuation')
+    assert seen == ['macro', 'valuation']
+    assert out['risk_snapshot'] is None and out['valuation_calculations'] is not None
+    assert len(out['unhandled_requests']) == 4

@@ -327,7 +327,7 @@ def test_gate_sits_above_the_current_regime_no_chase():
     from pathlib import Path
     checked = []
     for fname in ("watchlist.json", "positions.json"):
-        doc = json.loads(Path(f"trade/us_stock/holding/state/{fname}").read_text())
+        doc = json.loads(Path(f"trade/portfolio/state/{fname}").read_text())
         for ticker, card in (doc.get("tickers") or {}).items():
             agent = (card.get("agent") or {})
             nr = agent.get("next_regime") or {}

@@ -2,9 +2,11 @@
 
 以**领域 Agent、可替换模型运行器和可执行交易规则**为基础的美股交易运营系统。Codex 与 Claude 协作研究，宿主控制器校验结果并提交通过复核的卡片更新，订单由人工执行。
 
-[English](README.md) · [Agent 运行手册](agents/README.md) · [代码架构](quant/README.md) · [定时任务](tasks/README.md) · [AI 搭建指南](AI_BOOTSTRAP_CN.md)
+[English](README.md) · [Agent 运行手册](agents/README.md) · [代码架构](quant/README.md) · [定时任务](tasks/README.md) · [业务资料](trade/README.md) · [AI 搭建指南](AI_BOOTSTRAP_CN.md)
 
 所有模型共用的项目合同是 [CLAUDE.md](CLAUDE.md)；不会自动发现该文件的编码 Agent 从 [AGENTS.md](AGENTS.md) 进入。
+
+交易范围为美股与现有美股期权流程。跨资产宏观数据只用于环境观测与研究输入，不因此成为额外的交易市场。
 
 ## 架构
 
@@ -17,8 +19,10 @@ flowchart TD
     Rules["结构、仓位与退出规则的代码真源"] --> Inputs
     Inputs --> Jobs
     Routes["角色与模型路由：Codex / Claude"] --> Jobs
-    Jobs --> Workflow["宏观 + 技术 + 估值 → 风控 → 有限追问"]
+    Jobs --> Workflow["宏观 + 技术 → 风控 → 有限追问"]
     Workflow --> Reports["研究报告、分歧与未知项"]
+    ValTask["独立估值任务"] --> ValFlow["刷新与冻结 → 宏观情景 → 估值计算与研究"]
+    ValFlow --> ValReport["独立估值报告"]
     Jobs --> Card["单卡技术提案"]
     Card --> Review["另一运行器独立复核"]
     Review --> Submit["政策、时效、版本与写入检查"]
@@ -55,8 +59,8 @@ flowchart TD
 ## Agent 如何协作
 
 1. **捕获证据。** 宿主读取既有状态与缓存，记录 owner、时间和内容 hash，冻结共享快照及各角色视图。捕获不等于刷新，缺失和失效信息会保留。
-2. **并行研究。** 宏观、技术和估值分别分析自己的领域输入。输出区分事实观察、假设、风险和未知项，引用绑定捕获时的原始证据。
-3. **组合复核。** 风控读取自己的原始输入与三份报告。风控视图覆盖全部受管持仓，包括期权自身退出规则与可用 Greeks；金额来自既有机械计算。
+2. **并行研究。** 交易流程中的宏观与技术角色分别分析自己的领域输入；独立估值流程按宏观情景、宿主计算、估值研究的顺序执行。输出区分事实观察、假设、风险和未知项，引用绑定捕获时的原始证据。
+3. **组合复核。** 风控读取自己的原始输入与本轮宏观、技术报告。风控视图覆盖全部受管持仓，包括期权自身退出规则与可用 Greeks；金额来自既有机械计算。
 4. **定向追问。** 跨领域请求按接收角色合并，最多追加一轮，未解决的问题留在记录中。同一结论经另一模型转述，不增加独立证据。
 
 默认配置允许单次 workflow 最多 3 个并行调用、8 次模型调用。宿主另设所有任务共享的上限：原生调用并发最多 3 个，滚动一小时内最多 24 次。备用同样消耗预算，并发排队有超时。这些额度约束本系统的工作量，不代表任一模型账户的剩余额度或费用。
@@ -85,11 +89,13 @@ flowchart TD
 | 任务 | 领域工作 |
 |---|---|
 | `heartbeat` | 券商与状态同步、机械风控和退出告警、健康检查、非阻塞缺卡派发 |
-| `overnight-briefing` | 刷新每日输入，运行四角色协作，处理复核重画队列并生成入场计划 |
+| `overnight-briefing` | 刷新每日输入，运行宏观、技术与风控协作，处理复核重画队列并生成入场计划 |
 | `postclose-transition` | 先评估退出，再执行完整收盘后的机械转移，运行技术／风控研究并处理复核重画 |
 | `gate-ladder-report` | 等待同交易日 postclose 完结后，输出机械 gate 阶梯表 |
 | `chart-read` | 基于完整日线及已完成盘后处理的状态，生成技术判读和机械结构 digest |
-| `weekly-portfolio-review` | 用既有绩效、宏观、技术和估值证据完成四角色组合复盘，NAV 周变剔除外部现金流 |
+| `weekly-portfolio-review` | 用既有绩效、宏观与技术证据完成组合风控复盘，NAV 周变剔除外部现金流 |
+
+独立的 `valuation-daily` 任务（[tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)）自行刷新数据并运行宏观情景与估值链，报告归档在 `var/valuation-daily/`。盘前与周复盘不运行估值角色。
 
 盘前与盘后流程的关键顺序是：
 
@@ -121,9 +127,9 @@ flowchart TD
 | 技术卡片提案 | 技术角色、独立复核及受控 writer |
 | 宏观与估值证据 | 信息层上下文，不能覆盖价格结构授权或退出规则 |
 | NAV 变动与外部现金流 | [nav_report.py](quant/report/nav_report.py) 读取 [cash_flow_sync.py](quant/data/cash_flow_sync.py) 维护的现金流账本；出入金不是盈亏 |
-| 策略研究与规则变更 | [策略 schema](trade/us_stock/strategy/README.md)（私有规则是被忽略的副本）、[研究脚手架](quant/research/README.md) 及适用的验证研究 |
+| 策略研究与规则变更 | [策略 schema](trade/strategy/README.md)（私有规则是被忽略的副本）、[研究脚手架](quant/research/README.md) 及适用的验证研究 |
 
-风控 Agent 解读机械收据，不另造 sizing 公式。候选容量共享组合约束，不能相加成一批订单的预算。购买力、工具身份或证据未知时，继续报告未知。新闻采集属于可选、独立维护的 `ai_news/` 工作区；交易角色只读消费已有归档，缺失时优雅降级。
+风控 Agent 解读机械收据，不另造 sizing 公式。候选容量共享组合约束，不能相加成一批订单的预算。购买力、工具身份或证据未知时，继续报告未知。新闻与宏观采集属于可选、独立维护的情报工作流；其发布数据位于 `trade/intelligence/`（本仓只含 README 与合成示例），交易角色只读消费已有归档，缺失时优雅降级。
 
 ## 仓库结构
 
@@ -135,10 +141,23 @@ flowchart TD
 | [quant/](quant/) | 宿主控制器、数据同步、机械决策、估值和报告 |
 | [tests/](tests/) | 合成数据机械验证、契约、隔离和仓库检查 |
 | [tasks/](tasks/) | 定时任务提示词真源与部署说明 |
-| `trade/us_stock/` | AI 初始化合同：README 与合成 `*.example.*` schema；私有卡片、持仓、事件、缓存与规则是被忽略的副本 |
-| `ai_news/` | 可选、独立维护的情报工作区，不随仓库发布 |
-| `var/agent-runs/`、`var/agent-control/` | 被忽略：私有快照、模型运行、任务回执、卡片备份与健康记录／原生调用共享额度和业务租约 |
+| [trade/](trade/README.md) | AI 初始化合同：下表六个数据目录的 README 与合成 `*.example.*` schema；私有卡片、持仓、事件、缓存、情报数据与规则是被忽略的副本 |
+| `var/` | 被忽略的私有运行状态：组合锁、情报 claim 与投递去重、Agent 运行／额度／租约、独立估值运行 |
+| `tmp/` | 被忽略的临时输出与 heartbeat 冷却状态 |
 | `.claude/` | 专项规则、skills 与宿主集成 |
+
+`trade/` 的六个目录直接位于根下，路径由 [quant/core/paths.py](quant/core/paths.py) 统一定义：
+
+| 目录 | 内容 |
+|---|---|
+| `trade/portfolio/` | 当前持仓与候选、成交/NAV/现金流账本、评分、人工日志和派生观察 |
+| `trade/market/` | 行情、财报与原始市场输入；可重拉缓存和历史快照分别保留 |
+| `trade/intelligence/` | 新闻来源、宏观快照、事件计划/结果与发布报告 |
+| `trade/valuation/` | 人工估值输入、预测账本与校准记录 |
+| `trade/strategy/` | 交易规则与方法合同 |
+| `trade/knowledge/` | 知识资料与冻结只读的研报库 |
+
+组合派生判断在 `portfolio/observations/`，共享写入锁在 `var/portfolio/.state.lock`。历史持仓 Git 读取与旧情报引用由代码兼容，已发布证据保留原文。宏观/事件量化区分原始证据、可知时点特征、结果标签与实验；当前没有预建空的研究子系统。
 
 Python 依赖继续分层：`ops` 编排下层，共享契约与数学集中于 `core`，研究代码不进入实时依赖链。完整规则见 [quant/README.md](quant/README.md)。私有状态和模型产物不作为可复用示例或公开发布材料。
 
@@ -172,7 +191,7 @@ python3 quant/ops/pipeline.py --mode briefing --read-only --json
 
 该命令只渲染缓存，跳过同步、转移、通知、journal、Agent 调用和 entry 阶段，不会刷新数据。
 
-要基于已有输入发起四角色研究：
+要基于已有输入发起宏观、技术与风控组合研究：
 
 ```bash
 python3 quant/ops/agent_jobs.py run --kind weekly --json

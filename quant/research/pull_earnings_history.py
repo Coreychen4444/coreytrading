@@ -3,7 +3,7 @@
 对 klines_deep universe 逐票调 openapi `get_financials_earnings_price_history`
 (20 期/票, 含 pub_trading_day_str / pub_time_str / predict_vola_ratio_newest =
 vendor 期权隐含 implied move ~2021 起), 原始 JSON 落
-`trade/us_stock/market/earnings_deep/<TICKER>.json` (gitignore, 回测专用)。
+`trade/market/earnings_deep/<TICKER>.json` (gitignore, 回测专用)。
 
 端点配额、授权与频率限制必须写入 private preregistration；脚本默认限速请求。
 幂等: 已存在且 --force 未给 → 跳过。ETF/无财报票端点返回空 → 记 skip 不报错。

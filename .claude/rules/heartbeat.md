@@ -3,14 +3,14 @@ paths:
   - "quant/ops/pipeline.py"
   - "quant/report/portfolio_brief.py"
   - "quant/decision/exit_guard.py"
-  - "tasks/heartbeat.md"
-  - "tasks/overnight-briefing.md"
-  - "tasks/postclose-transition.md"
+  - "tasks/claude/heartbeat.md"
+  - "tasks/claude/overnight-briefing.md"
+  - "tasks/claude/postclose-transition.md"
   - "tmp/heartbeat-state.json"
 ---
 # Heartbeat Patrol Rules
 
-Applied when: 改动巡逻 / 简报代码或任务 prompt。定时任务 prompt 真源 `tasks/heartbeat.md`；采集顺序真源 `quant/ops/pipeline.py`（`STAGES`，由 `tests/ops/test_pipeline.py` 钉住），不在 prose 里抄序列。
+Applied when: 改动巡逻 / 简报代码或任务 prompt。定时任务 prompt 真源 `tasks/claude/heartbeat.md`；采集顺序真源 `quant/ops/pipeline.py`（`STAGES`，由 `tests/ops/test_pipeline.py` 钉住），不在 prose 里抄序列。
 
 ## 执行
 每份定时 prompt 第一条命令 = `quant/ops/agent_jobs.py due --kind <kind>`：XNYS 日历裁定交易日与窗口，休市 / 窗口外直接跳过，日历不可用即报错不猜。然后一条命令：`python3 quant/ops/pipeline.py --mode heartbeat --json`。OpenD 探活、dead-man 时间戳（`lastChecks.heartbeat`，briefing 模式绝不写）、OpenD 不可达的 Telegram 告警（12h 冷却 + 恢复通知）全在 pipeline 内。人工 / session 内跑必须 `--read-only`：只读预览是白名单，只跑缓存 brief，采集、写状态、后台 agent、效果层全部跳过。

@@ -4,7 +4,7 @@ Applied when: any trade discussion in session (buy, sell, add, reduce, sell put,
 
 > 第零问：**这笔在不在今天的节奏里？** 不在（清单外 / 止损后回补 / 改限价 / 盘中临时起意）= 答案已是「错过」，不必再走三问。错过一笔的代价有上限，失序的代价没有。operator 若配置了 `TG_FOOTER_LINE`，它就是通知尾行里那句提醒。
 
-本文件是**行为触发层**：触发条件 + 快检 + 硬拦话术。方法论正文住 operator 的私有策略规则（由 `trade/us_stock/strategy/*.example.md` 派生；master index 在私有 `trading-rules.md` 顶部）。授权只看价格结构（技术面优先 v3）；财报 / thesis / 研报 / 宏观一律 [FYI]，不产生 clamp / 降级 / veto。
+本文件是**行为触发层**：触发条件 + 快检 + 硬拦话术。方法论正文住 operator 的私有策略规则（由 `trade/strategy/*.example.md` 派生；master index 在私有 `trading-rules.md` 顶部）。授权只看价格结构（技术面优先 v3）；财报 / thesis / 研报 / 宏观一律 [FYI]，不产生 clamp / 降级 / veto。
 
 ## Trigger conditions
 Activate when the operator mentions a specific trade action, asks for an opinion with actionable intent, or wants to change a limit order. Do NOT activate for general commentary, portfolio review, pure analysis, or briefing discussion.
@@ -27,7 +27,7 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 三问都过 → "检查通过，执行吧"，不制造摩擦。
 
 ## Binary catalyst timing
-触发：48h 内财报 / FDA / FOMC，且 operator 在「现在买 vs 等更低」之间纠结或反复改限价。跑 entry-timing EV 框架的完整流程（implied move 双 anchor + 4 项硬检查 + ATR→P_fill + EV；schema 见 `trade/us_stock/strategy/entry-timing-ev-framework.example.md`），worksheet 用 `quant/journal/decision_log.py` 落库。不凭直觉给 target；"等跌了再赌财报" = 伪装的 perfect-price trap（drop 是 sizing modifier 不是 entry filter）。v3 下本节只提供计算，不拦截。
+触发：48h 内财报 / FDA / FOMC，且 operator 在「现在买 vs 等更低」之间纠结或反复改限价。跑 entry-timing EV 框架的完整流程（implied move 双 anchor + 4 项硬检查 + ATR→P_fill + EV；schema 见 `trade/strategy/entry-timing-ev-framework.example.md`），worksheet 用 `quant/journal/decision_log.py` 落库。不凭直觉给 target；"等跌了再赌财报" = 伪装的 perfect-price trap（drop 是 sizing modifier 不是 entry filter）。v3 下本节只提供计算，不拦截。
 
 ## Behavioral pattern detection（always-on；检测到即 flag + 引规则编号）
 | 模式 | 信号 | 回应 |
@@ -52,7 +52,7 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 4 项各 0–2 分：strike 舒服吗 / expiry 合理（14–30 天）/ 事件风险 / 真想接货还是赌权利金。7–8 健康，5–6 激进，<5 赌博。第 5 问硬 veto：会不会抵消刚做完的防守？会 = 不做。
 
 ## 框架触发器（一句话；正文住私有策略规则，本文件只放触发）
-- **Trend Exit System**：浮盈峰值 ≥+50% / brief 出现 FIRED·BROKEN·MARGIN / "基本面没坏拿着" → 棘轮（+50%→保本，+100%→回吐上限 1/3）与趋势死亡线（3×ATR / parabolic 5d×0.92）是硬线，宏观不豁免，告警当日执行，无 override；no-add lock 期间禁加仓；卖飞恐惧的答案是重进协议不是不卖。schema `trade/us_stock/strategy/trend-exit-system.example.md`；`quant/decision/exit_guard.py` 每轮自动跑。
+- **Trend Exit System**：浮盈峰值 ≥+50% / brief 出现 FIRED·BROKEN·MARGIN / "基本面没坏拿着" → 棘轮（+50%→保本，+100%→回吐上限 1/3）与趋势死亡线（3×ATR / parabolic 5d×0.92）是硬线，宏观不豁免，告警当日执行，无 override；no-add lock 期间禁加仓；卖飞恐惧的答案是重进协议不是不卖。schema `trade/strategy/trend-exit-system.example.md`；`quant/decision/exit_guard.py` 每轮自动跑。
 - **Capital Deployment While Waiting**：等大 entry 时闲置 cash + IV percentile ≥60% → 同 thesis 反方向 sell premium。
 - **Sell飞 vs Rebalance**：真账 = redirected capital vs 被卖标的同期表现；现金真闲置才是卖飞。
 - **Natural Humility Anchor**：深亏 ≥30% 是否主动止损 → thesis 未证伪 + 成本 ≤5% cap 可不卖；严禁用 anchor 价值 justify 加仓。
@@ -60,6 +60,6 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 - **Post-Trade Scoring**：process 通过 = A（结果好坏皆 A）/ 错+好 = D 🚨 / 错+坏 = C；评分必须落 `journals/scores.jsonl`（`quant/journal/annotate_event.py --score`）。机械点名只给规则外成交；operator 主动复盘、结构性退出照此评分。
 
 ## Execution style
-直接，不铺垫；通过就说 "检查通过"；引用规则编号；交易讨论用中文。复杂决策（多事件叠加、大仓位、陌生标的）建议跑完整 pre-trade checklist（schema `trade/us_stock/strategy/pre-trade-checklist.example.md`）。
+直接，不铺垫；通过就说 "检查通过"；引用规则编号；交易讨论用中文。复杂决策（多事件叠加、大仓位、陌生标的）建议跑完整 pre-trade checklist（schema `trade/strategy/pre-trade-checklist.example.md`）。
 
 The operator makes the final decision and submits any order manually; nothing in this file authorizes an order.

@@ -1,0 +1,15 @@
+{
+  "SYNTH_STOCK": {
+    "features": {"policy_surprise_bp": -25},
+    "cohort": {
+      "ticker": "SYNTH_STOCK",
+      "feature_schema": "policy_surprise_bp:actual_change_minus_prior_expectation:v1",
+      "anchor_convention": "first_close_after_information"
+    },
+    "information_known_at": "2026-09-02T18:00:01Z",
+    "spot": {"price": 100, "as_of": "2026-09-02T20:00:00Z", "source": "Synthetic split-adjusted close"},
+    "source": "Synthetic conditional surprise; not a forecast of the policy decision",
+    "known_at": "2026-09-02T18:00:01Z",
+    "valid_until": "2026-09-03T20:00:00Z"
+  }
+}

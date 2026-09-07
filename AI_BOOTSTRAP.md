@@ -14,7 +14,7 @@ A completed bootstrap has all of the following properties:
 - the repository uses an isolated, supported Python environment with the dependencies declared in `pyproject.toml`, including the pinned exchange calendar;
 - offline tests pass without broker connectivity, model CLIs or private data;
 - only the private runtime files needed for the requested workflow exist, built from the examples under `trade/`;
-- secrets, private runtime data, run artifacts under `var/` and the optional `ai_news/` workspace remain local and ignored by Git;
+- secrets, private runtime data, run artifacts under `var/` and the optional `trade/intelligence/` workspace remain local and ignored by Git;
 - every optional integration is either verified or explicitly reported as not configured;
 - no order, notification, task registration, model call, commit, push or other external side effect happens implicitly.
 
@@ -146,16 +146,16 @@ Procedure:
 Typical minimal commands, used only when those files are required:
 
 ```bash
-cp trade/us_stock/holding/state/positions.example.json \
-  trade/us_stock/holding/state/positions.json
-cp trade/us_stock/holding/state/watchlist.example.json \
-  trade/us_stock/holding/state/watchlist.json
+cp trade/portfolio/state/positions.example.json \
+  trade/portfolio/state/positions.json
+cp trade/portfolio/state/watchlist.example.json \
+  trade/portfolio/state/watchlist.json
 git check-ignore -v \
-  trade/us_stock/holding/state/positions.json \
-  trade/us_stock/holding/state/watchlist.json
+  trade/portfolio/state/positions.json \
+  trade/portfolio/state/watchlist.json
 ```
 
-Runtime files that specific workflows add later, each from its own example: the event ledgers and NAV history under `holding/events/`, the external cash-flow ledger that the NAV report nets out, the valuation input region and ledgers under `valuation/`, market caches under `market/`, and the private strategy rules under `strategy/`. Do not copy every example. Example strategy documents are schemas, not active rules or recommendations.
+Runtime files that specific workflows add later, each from its own example: the event ledgers and NAV history under `portfolio/events/`, the external cash-flow ledger that the NAV report nets out, the valuation input region and ledgers under `valuation/`, market caches under `market/`, and the private strategy rules under `strategy/`. Do not copy every example. Example strategy documents are schemas, not active rules or recommendations.
 
 Ownership remains strict: broker synchronization owns broker-derived facts; controlled agent and user workflows own thesis, zones, reviewed actions and private rules; decision modules own the generated guard and plan state named in the descendant READMEs; append-only event history is corrected with a new event, not rewritten.
 
@@ -349,7 +349,7 @@ Treat the task as repair or migration, not initialization. Read and validate the
 
 ### How can I verify that a generated private file will not be committed?
 
-Use `git check-ignore -v <path>` and inspect `git status --short --untracked-files=all`. A private runtime file, a `var/` artifact or an `ai_news/` file appearing as trackable output is a failure to fix before continuing.
+Use `git check-ignore -v <path>` and inspect `git status --short --untracked-files=all`. A private runtime file, a `var/` artifact or an `trade/intelligence/` file appearing as trackable output is a failure to fix before continuing.
 
 ### What about `.env.example` and `.mcp.json.example`?
 

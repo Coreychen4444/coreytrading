@@ -2,9 +2,11 @@
 
 A US-equity trading operations system built around **domain agents, interchangeable model runtimes, and executable trading rules**. Codex and Claude collaborate on research; a host controller validates their outputs and applies reviewed card updates. Orders are placed manually.
 
-[中文版](README_CN.md) · [Agent operations](agents/README.md) · [Code architecture](quant/README.md) · [Scheduled tasks](tasks/README.md) · [AI bootstrap](AI_BOOTSTRAP.md)
+[中文版](README_CN.md) · [Agent operations](agents/README.md) · [Code architecture](quant/README.md) · [Scheduled tasks](tasks/README.md) · [Trading data](trade/README.md) · [AI bootstrap](AI_BOOTSTRAP.md)
 
 The project contract for every model is [CLAUDE.md](CLAUDE.md); coding agents that do not discover that file enter through [AGENTS.md](AGENTS.md).
+
+Trading covers US equities and the existing US equity-options workflow. Cross-asset macro data supplies context and research inputs only; it never becomes an additional trading market.
 
 ## Architecture
 
@@ -17,8 +19,10 @@ flowchart TD
     Rules["Canonical structure, sizing and exit rules"] --> Inputs
     Inputs --> Jobs
     Routes["Role-to-model routing: Codex / Claude"] --> Jobs
-    Jobs --> Workflow["Macro + technical + valuation → risk → bounded follow-ups"]
+    Jobs --> Workflow["Macro + technical → risk → bounded follow-ups"]
     Workflow --> Reports["Research reports, disagreements and unknowns"]
+    ValTask["Independent valuation task"] --> ValFlow["Refresh and freeze → macro scenarios → valuation calculations and research"]
+    ValFlow --> ValReport["Independent valuation report"]
     Jobs --> Card["Single-card technical proposal"]
     Card --> Review["Independent review by the other runtime"]
     Review --> Submit["Policy, freshness, revision and write checks"]
@@ -55,8 +59,8 @@ A valid abstention is retained. Failures, timeouts or invalid output may use the
 ## How agents collaborate
 
 1. **Capture evidence.** The host reads existing state and caches, records their owners, timestamps and hashes, and freezes a shared snapshot with a view for each role. Capturing data does not refresh it; missing or stale evidence stays visible.
-2. **Research in parallel.** Macro, technical and valuation agents analyze their assigned views. Outputs distinguish observations, hypotheses, risks and unknowns, with references bound to the captured evidence.
-3. **Review the portfolio.** The risk agent receives its original inputs and the three peer reports. Its view includes all managed holdings, including option-specific exit rules and available Greeks. Amounts come from the existing mechanical calculations.
+2. **Research in parallel.** Macro and technical agents analyze their assigned views in the trading workflow. The separate valuation workflow runs macro scenarios, host calculations and valuation research in sequence. Outputs distinguish observations, hypotheses, risks and unknowns, with references bound to the captured evidence.
+3. **Review the portfolio.** The risk agent receives its original inputs and the current macro and technical reports. Its view includes all managed holdings, including option-specific exit rules and available Greeks. Amounts come from the existing mechanical calculations.
 4. **Resolve focused questions.** Cross-domain requests are grouped by recipient for at most one follow-up round. Unresolved questions remain in the record. Repeating a claim through another model does not create independent evidence.
 
 The default configuration allows three parallel calls and eight calls per workflow. A shared host limit also caps concurrent native calls at three and calls within a rolling hour at 24. Fallbacks consume the same budget; concurrency waits are bounded. These limits control this system's workload, not either provider's account quota or billing.
@@ -85,11 +89,13 @@ Any scheduler that can run a prompt with a coding agent (a desktop task runner, 
 | Task | Domain work |
 |---|---|
 | `heartbeat` | Broker/state reconciliation, mechanical risk and exit alerts, health checks and nonblocking missing-card dispatch |
-| `overnight-briefing` | Refresh daily inputs, run all four roles, process the reviewed repaint queue and prepare entry plans |
+| `overnight-briefing` | Refresh daily inputs, run macro, technical and risk roles, process the reviewed repaint queue and prepare entry plans |
 | `postclose-transition` | Evaluate exits, apply completed-session transitions, run technical/risk research and process reviewed repaints |
 | `gate-ladder-report` | Wait for the same session's postclose job to settle, then render the mechanical gate ladder |
 | `chart-read` | Use completed bars and settled postclose state for technical interpretation and the mechanical structure digest |
-| `weekly-portfolio-review` | Four-role portfolio review using existing performance, macro, technical and valuation evidence, with the NAV change net of external cash flows |
+| `weekly-portfolio-review` | Portfolio risk review using existing performance, macro and technical evidence, with the NAV change net of external cash flows |
+
+The independent `valuation-daily` task ([tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)) refreshes inputs and runs the macro-scenario and valuation chain for its own report under `var/valuation-daily/`. Briefing and weekly review do not run the valuation role.
 
 For briefing and postclose, the critical pipeline order is:
 
@@ -121,9 +127,9 @@ The strategy remains technical-first trend following. A **gate** marks a structu
 | Technical card proposals | Technical role, independent review and the controlled writer |
 | Macro and valuation evidence | Informational context; neither overrides structural authorization or an exit |
 | NAV change and external cash flows | [nav_report.py](quant/report/nav_report.py) over the cash-flow ledger kept by [cash_flow_sync.py](quant/data/cash_flow_sync.py); deposits and withdrawals are not performance |
-| Research and rule changes | [Strategy schemas](trade/us_stock/strategy/README.md) (private rules are the ignored copies), the [research scaffold](quant/research/README.md) and the applicable validation study |
+| Research and rule changes | [Strategy schemas](trade/strategy/README.md) (private rules are the ignored copies), the [research scaffold](quant/research/README.md) and the applicable validation study |
 
-Risk agents interpret mechanical receipts rather than inventing another sizing formula. Candidate capacities share portfolio limits and cannot be added together as a batch budget. Unknown buying power, instrument identity or evidence remains unknown. News collection belongs to an optional, separately maintained `ai_news/` workspace; trading roles consume its existing archives read-only and degrade gracefully when it is absent.
+Risk agents interpret mechanical receipts rather than inventing another sizing formula. Candidate capacities share portfolio limits and cannot be added together as a batch budget. Unknown buying power, instrument identity or evidence remains unknown. News and macro collection belongs to an optional, separately maintained intelligence workflow; its published data lives under `trade/intelligence/` (this repository ships only the README and a synthetic example), and trading roles consume the existing archives read-only and degrade gracefully when they are absent.
 
 ## Repository map
 
@@ -135,10 +141,23 @@ Risk agents interpret mechanical receipts rather than inventing another sizing f
 | [quant/](quant/) | Host controllers, data/sync, mechanical decisions, valuation and reports |
 | [tests/](tests/) | Synthetic mechanics, contract, isolation and repository checks |
 | [tasks/](tasks/) | Versioned scheduled-task prompts and deployment instructions |
-| `trade/us_stock/` | AI bootstrap contract: READMEs and synthetic `*.example.*` schemas; private cards, holdings, events, caches and rules are ignored copies |
-| `ai_news/` | Optional, separately owned intelligence workspace; never shipped |
-| `var/agent-runs/`, `var/agent-control/` | Ignored: private captures, model runs, receipts, card backups and health records / shared native-call quotas and leases |
+| [trade/](trade/README.md) | AI bootstrap contract: READMEs and synthetic `*.example.*` schemas for the six data domains below; private cards, holdings, events, caches, intelligence data and rules are ignored copies |
+| `var/` | Ignored private runtime state: the portfolio lock, intelligence claims and delivery receipts, agent runs, quotas and leases, and daily valuation runs |
+| `tmp/` | Ignored temporary output and the heartbeat cooldown state |
 | `.claude/` | Rules, skills and host integration |
+
+The six domains sit directly under `trade/`. [quant/core/paths.py](quant/core/paths.py) defines their canonical paths:
+
+| Directory | Contents |
+|---|---|
+| `trade/portfolio/` | Positions, candidates, fills/NAV/cash-flow ledgers, scores, journals and derived observations |
+| `trade/market/` | Prices, financial statements and raw market inputs; refreshable caches and historical snapshots have distinct retention needs |
+| `trade/intelligence/` | News sources, macro snapshots, event plans/results and published reports |
+| `trade/valuation/` | Manual valuation inputs, prediction ledgers and calibration records |
+| `trade/strategy/` | Trading rules and method contracts |
+| `trade/knowledge/` | Knowledge materials and frozen, read-only research |
+
+Derived portfolio judgments live in `portfolio/observations/`; the shared writer lock lives in `var/portfolio/.state.lock`. Readers support historical Git positions and old intelligence references while published evidence retains its original bytes. Future macro/event research keeps raw evidence, point-in-time features, outcome labels and experiments separate; no empty research subsystem is prebuilt.
 
 Python dependencies remain layered: `ops` orchestrates lower layers; shared contracts and math live in `core`; research stays outside the live import path. See [quant/README.md](quant/README.md) for the complete dependency rules. Private state and model artifacts are not reusable examples or public-release material.
 
@@ -172,7 +191,7 @@ python3 quant/ops/pipeline.py --mode briefing --read-only --json
 
 This renders cached output. It skips synchronization, transitions, notifications, journals, agent calls and the entry stage; it is not a data refresh.
 
-To request a four-role review from existing inputs:
+To request a macro, technical and risk review from existing inputs:
 
 ```bash
 python3 quant/ops/agent_jobs.py run --kind weekly --json

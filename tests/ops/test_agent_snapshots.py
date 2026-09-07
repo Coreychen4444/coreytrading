@@ -101,12 +101,13 @@ def _capture_with_macro(tmp_path, macro, *, now):
                                   kline_dir=tmp_path / "missing_klines", macro_path=path, now=now)
 
 
-MACRO_EXAMPLE = Path("ai_news/examples/macro-state.example.json")
+MACRO_EXAMPLE = Path("trade/intelligence/examples/macro-state.example.json")
 
 
 def _macro_example():
-    if not MACRO_EXAMPLE.exists():
-        pytest.skip("optional intelligence workspace (schema + example) is not part of this repository")
+    from quant.core.paths import MACRO_SCHEMA_PATH
+    if not MACRO_EXAMPLE.exists() or not MACRO_SCHEMA_PATH.exists():
+        pytest.skip("optional intelligence workspace schema is not part of this repository")
     macro = json.loads(MACRO_EXAMPLE.read_text())
     macro["example_only"] = False
     return macro

@@ -24,7 +24,7 @@
   4. 空集允许   无 catalyst 存活 → 渲染「⚠️ 触发源未知」。**这是合法输出**——
                 散文永远能编出一个理由, 这才是最危险的部分
 
-归因落 market/events/catalysts.jsonl, 事后可回查"当时说是什么原因, 后来对不对"。
+归因落 portfolio/observations/catalysts.jsonl, 事后可回查"当时说是什么原因, 后来对不对"。
 
 CLI:
     python3 quant/decision/catalyst_check.py NBIS --date  \
@@ -48,7 +48,7 @@ from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR  # noqa: E402
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
 
-CATALYSTS_PATH = KLINE_CACHE_DIR.parent / "events/catalysts.jsonl"
+from quant.core.paths import CATALYSTS_PATH
 SECTOR_PEERS = ["NVDA", "AMD", "MU", "INTC", "MRVL", "LITE", "AAOI", "AMKR", "QCOM", "TSM"]
 PARAMS = {
     "max_lag_sessions": 1,      # catalyst 最多早异动日 1 个交易日
@@ -271,7 +271,7 @@ def main() -> int:
     ap.add_argument("--date", default=None, help="异动日 (ET, 默认最近一个完成交易日)")
     ap.add_argument("--catalyst", action="append", default=[],
                     help="YYYY-MM-DD:标题:URL:scope(stock|sector|macro), 可重复")
-    ap.add_argument("--log", action="store_true", help="落 market/events/catalysts.jsonl")
+    ap.add_argument("--log", action="store_true", help="落 portfolio/observations/catalysts.jsonl")
     ap.add_argument("--tape", action="store_true",
                     help="附 60m 量价下沉判读 (唯一联网步骤, OpenD 不可达自动降级)")
     ap.add_argument("--json", action="store_true")

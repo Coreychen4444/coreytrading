@@ -21,8 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-DEEP_DIR = Path(__file__).resolve().parents[2] / "trade/us_stock/market/klines_deep"
-REPORT = Path(__file__).resolve().parents[2] / "tmp/backtest/synthetic_longcall_report.md"
+from quant.core.paths import ROOT, KLINE_DEEP_DIR
+
+DEEP_DIR = KLINE_DEEP_DIR
+REPORT = ROOT / "tmp/backtest/synthetic_longcall_report.md"
 R = 0.045
 IV_PREM = 1.10          # volatility risk premium 常数 (§2)
 COOLDOWN = 20

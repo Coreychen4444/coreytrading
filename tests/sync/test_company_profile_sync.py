@@ -1,6 +1,6 @@
 """company_profile 机器区对账 —— 它写 positions/watchlist 两个真源, 每条路径钉住。
 
-立模块动机 (用户): ai_news 利率传导链的公司暴露卡要读资产负债表,
+立模块动机 (用户): 情报层利率传导链的公司暴露卡要读资产负债表,
 雷达每轮只读两个 state JSON → 事实底座必须落在卡上。核心不变量:
   1. 人工区 (business_model/financing_notes/notes_as_of) 机器写永不触碰;
   2. TTM 不足 4 季 → null + 注明, 不年化不外推;

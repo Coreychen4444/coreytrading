@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Validate and publish the optional intelligence workspace's macro state without trading authority.
+"""Validate and publish the optional intelligence workflow's macro state without trading authority.
 
 Trading code only uses `validate_document` (read-only); the publish paths belong to the
-external intelligence workflow that owns `ai_news/` and are inert when that workspace is absent.
+user-owned intelligence workflow that writes `trade/intelligence/` and are inert when that
+workspace is absent.
 
 The JSON Schema is the structural source of truth.  A small stdlib validator
 implements the schema features used by macro-state.schema.json so the writer

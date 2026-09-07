@@ -38,12 +38,12 @@ from typing import Dict, List, Optional, Tuple
 
 from quant.core.io_json import iter_jsonl  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
-from quant.core.paths import KLINE_CACHE_DIR, ROOT  # noqa: E402
+from quant.core.paths import KLINE_CACHE_DIR, ROOT, EVENTS_DIR, NAV_HISTORY_PATH  # noqa: E402
 from quant.core import technical  # noqa: E402
 from quant.decision.exit_guard import PARAMS, compute_floor, compute_trail  # noqa: E402
 
-EVENTS_GLOB = ROOT / "trade/us_stock/holding/events"
-NAV_PATH = ROOT / "trade/us_stock/holding/events/nav_history.jsonl"
+EVENTS_GLOB = EVENTS_DIR
+NAV_PATH = NAV_HISTORY_PATH
 OUT_DIR = ROOT / "tmp/backtest"
 
 R_RATE = 0.04            # 无风险利率 (BS)
@@ -52,7 +52,7 @@ DTE_FORCE_CLOSE = 21     # DTE≤21 + OTM → force close (natural-humility-anch
 DTE_GRACE_DAYS = 3       # 入场 3 天内不触发 DTE 规则 (entry vehicle 选择不在回测范围)
 SLIP_OPT = 0.03          # 规则触发期权卖出的滑点惩罚 (premium 比例)
 SLIP_STK = 0.002         # 规则触发正股卖出的滑点惩罚
-DEFAULT_CONFIG = ROOT / "trade/us_stock/knowledge/research/exit_rules/config.json"
+DEFAULT_CONFIG = ROOT / "trade/knowledge/research/exit_rules/config.json"
 
 
 # ── 市场数据 ────────────────────────────────────────────────────

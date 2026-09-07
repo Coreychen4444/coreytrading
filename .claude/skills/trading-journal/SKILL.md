@@ -49,13 +49,13 @@ Decide which of these it is (a single lesson may need more than one destination)
 - 统计验证：`python3 quant/report/perf_report.py` 应能看到这条记录。
 
 ### 3) Narrative layer
-- 正股 → `trade/us_stock/holding/journals/trade_journal.md`（示例 `trade_journal.example.md`）
-- 期权 → `trade/us_stock/holding/journals/options_journal.md`（含 Greeks 入场快照）
+- 正股 → `trade/portfolio/journals/trade_journal.md`（示例 `trade_journal.example.md`）
+- 期权 → `trade/portfolio/journals/options_journal.md`（含 Greeks 入场快照）
 - 结构参考 `references/review-template.md`。Prose 里写了评分的，必须已在 step 2 落过 scores.jsonl。这些路径是私有运行数据，被 Git 忽略。
 
 ### 4) Private strategy rules（可复用规则）
-Layering convention（`trade/us_stock/strategy/README.md`）：**methodology → 私有策略规则；行为触发 → `.claude/rules/`；指针 → memory**。
-- 私有规则文件由 `trade/us_stock/strategy/*.example.md` 复制去掉 `.example` 派生，只在 operator 复核后写入；不要把策略散文加进公开的 example 层。
+Layering convention（`trade/strategy/README.md`）：**methodology → 私有策略规则；行为触发 → `.claude/rules/`；指针 → memory**。
+- 私有规则文件由 `trade/strategy/*.example.md` 复制去掉 `.example` 派生，只在 operator 复核后写入；不要把策略散文加进公开的 example 层。
 - 新规则归层看私有 `trading-rules.md` 顶部 master index 选对文件；都不合适且确实 reusable → 建独立小文件并把它加进 master index。
 - 加规则必须带源注解：`_Source: TICKER event description, YYYY-MM-DD_`（让规则在诱惑时刻有案例可引）。
 - 行为触发类（硬拦话术 / 检测信号）→ `.claude/rules/trading-discipline.md`，正文仍放私有规则 + 指针。

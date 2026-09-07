@@ -38,11 +38,11 @@ import random  # noqa: E402
 import statistics as st  # noqa: E402
 from collections import Counter  # noqa: E402
 
-from quant.core.paths import KLINE_DEEP_DIR as KDIR  # noqa: E402
+from quant.core.paths import EARNINGS_DEEP_DIR, KLINE_DEEP_DIR as KDIR  # noqa: E402
 from quant.research.gate_backtest import load  # noqa: E402
 from quant.research.gate_backtest2 import atr_series  # noqa: E402
 
-EARNINGS_DIR = Path("trade/us_stock/market/earnings_deep")
+EARNINGS_DIR = EARNINGS_DEEP_DIR
 X_NORMAL = 1.94            # 普通日 p98 (shock_budget §2.3)
 POOL_Q = 0.90              # A 臂: 池级 p90
 TICKER_Q = 0.98            # B 臂: 单票 p98

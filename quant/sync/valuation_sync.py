@@ -14,7 +14,7 @@
   growth_creates_value · news_applied · fyi (简报照抄的一行) · source (账本行时间戳) · synced_at
 
 🚨 零授权效力: 不被 sizing/entry_guard/exit_guard/today_group 读; fyi 行不含股数/金额/cap;
-低估 ≠ GO, 高估 ≠ SELL。not_applicable 与账本无行的票不写块 (已有旧块保留不删, 由 as_of 暴露陈旧)。
+低估 ≠ GO, 高估 ≠ SELL。not_applicable 与账本无行的票不写块；显式 unknown 更新清空镜像价格，旧值仍留在账本。
 
 CLI:
     python3 quant/sync/valuation_sync.py [--tickers T ...] [--json]
@@ -37,10 +37,10 @@ from quant.sync.company_profile_sync import target_cards  # noqa: E402
 
 
 def latest_rows(path: Path | None = None) -> dict[str, dict]:
-    """每票最新一条**非 skipped** 估值行 (账本 append-only, 后写的赢)。"""
+    """Latest computed value or explicit abstention; an older price cannot mask failure."""
     out: dict[str, dict] = {}
     for r in iter_jsonl(Path(path or VALUATIONS_PATH)):
-        if r.get("skipped") or not r.get("ticker") or r.get("fair_value") is None:
+        if r.get("skipped") or not r.get("ticker") or (r.get("fair_value") is None and r.get("status") != "unknown"):
             continue
         out[str(r["ticker"]).upper()] = r
     return out
@@ -52,6 +52,8 @@ def _pct(x, d=0):
 
 def fyi_line(row: dict) -> str:
     """简报依据行尾的一句 (判断层词汇, 无股数/金额/cap)。与 valuate.digest 同一口径, 只是更短。"""
+    if row.get("status") == "unknown":
+        return f"📐[FYI] 估值未知 · {row.get('reason') or '缺少有效输入'} · 零授权"
     st = row.get("street") or {}
     dcf = row.get("dcf_per_share")
     split = (f" (DCF ${dcf:,.0f} / 街 ${st['per_share']:,.0f})" if (st.get("per_share") and dcf is not None) else "")
@@ -76,6 +78,9 @@ def fyi_line(row: dict) -> str:
 def block_from_row(row: dict) -> dict:
     return {
         "as_of": str(row.get("timestamp") or "")[:10],
+        "model_version": row.get("model_version"), "fair_value_basis": row.get("fair_value_basis"),
+        "price_time": row.get("price_time"), "fundamentals_hash": row.get("fundamentals_hash"),
+        "market_target_12m": row.get("market_target_12m"), "sensitivities": row.get("sensitivities"),
         "price": row.get("price"), "fair_value": row.get("fair_value"), "verdict": row.get("verdict"),
         "ratio": row.get("ratio"), "confidence": row.get("confidence"), "archetype": row.get("archetype"),
         "implied_cagr": row.get("implied_cagr"), "implied_horizon_years": (row.get("spec") or {}).get("horizon_years"),
@@ -108,7 +113,7 @@ def sync_cards(pos_doc: dict, wl_doc: dict, rows: dict[str, dict], *, only: set[
             card["agent"] = agent
         block = block_from_row(row)
         prev = agent.get("valuation") or {}
-        if prev.get("source") == block["source"] and prev.get("fyi") == block["fyi"]:
+        if {k: v for k, v in prev.items() if k != "synced_at"} == {k: v for k, v in block.items() if k != "synced_at"}:
             continue
         agent["valuation"] = block
         touched[bucket] = True

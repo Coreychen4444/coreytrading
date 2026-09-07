@@ -13,8 +13,10 @@ import json
 import math
 from typing import Any
 
+from .valuation_contracts import SCENARIO_SCHEMA, validate_scenario
+
 CONTRACT_VERSION = "1.0.0"
-RESULT_SCHEMA_VERSION = "1.0.0"
+RESULT_SCHEMA_VERSION = "1.1.0"
 ROLES = ("macro", "technical", "risk", "valuation")
 
 
@@ -87,7 +89,7 @@ def _schema_for(role: str) -> dict:
     mode = "proposal_only" if role == "technical" else "analysis_only"
     proposal = ({"anyOf": [{"type": "null"}, _ZONE_PROPOSAL]}
                 if role == "technical" else {"type": "null"})
-    return {"$schema": "https://json-schema.org/draft/2020-12/schema",
+    schema = {"$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": f"{role} research result", **_object({
         "schema_version": {"type": "string", "const": RESULT_SCHEMA_VERSION},
         "contract_version": {"type": "string", "const": CONTRACT_VERSION},
@@ -110,6 +112,10 @@ def _schema_for(role: str) -> dict:
             "may_place_orders": {"type": "boolean", "const": False},
         }),
     })}
+    if role == "macro":
+        schema["properties"]["valuation_scenarios"] = _array(deepcopy(SCENARIO_SCHEMA), maximum=6)
+        schema["required"].append("valuation_scenarios")
+    return schema
 
 
 RESULT_SCHEMAS = {role: _schema_for(role) for role in ROLES}
@@ -143,10 +149,16 @@ def _validate(value: Any, schema: dict, path: str) -> None:
                 pass
         raise ContractError(f"{path}: does not match any allowed shape")
     expected = schema.get("type")
-    types = {"object": dict, "array": list, "string": str, "boolean": bool,
+    types = {"object": dict, "array": list, "string": str, "boolean": bool, "integer": int,
              "null": type(None)}
-    if expected and type(value) is not types[expected]:
+    if expected == "number":
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ContractError(f"{path}: expected finite number")
+    elif expected and type(value) is not types[expected]:
         raise ContractError(f"{path}: expected {expected}")
+    if expected in ("integer", "number"):
+        if ("minimum" in schema and value < schema["minimum"]) or ("maximum" in schema and value > schema["maximum"]):
+            raise ContractError(f"{path}: number outside bounds")
     if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
         raise ContractError(f"{path}: must equal {schema['const']!r}")
     if "enum" in schema and value not in schema["enum"]:
@@ -231,6 +243,18 @@ def validate_result(role: str, payload: dict, *, snapshot: dict,
         raise ContractError("result.input_hash: expected lowercase SHA-256")
     refs = snapshot.get("evidence_refs")
     allowed_refs = set(refs)
+    if role == "macro":
+        scenario_ids = set()
+        for scenario in payload["valuation_scenarios"]:
+            try:
+                # The company-specific horizon is checked again by the host.
+                validate_scenario(scenario, horizon=max(s["end_year"] for s in scenario["shocks"]),
+                                  evidence_refs=allowed_refs)
+            except ValueError as exc:
+                raise ContractError(str(exc)) from exc
+            if scenario["id"] in scenario_ids:
+                raise ContractError("duplicate valuation scenario ID")
+            scenario_ids.add(scenario["id"])
     seen_ids: set[str] = set()
     for field in ("observations", "hypotheses", "risks", "requests"):
         for index, item in enumerate(payload[field]):

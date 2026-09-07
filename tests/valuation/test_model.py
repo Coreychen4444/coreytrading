@@ -39,8 +39,8 @@ def test_derive_drivers_recovers_synthetic_truth():
     assert d["eps_core_ttm"] == pytest.approx(d["eps_reported_ttm"], rel=1e-9)
     assert M.S2C_CLAMP[0] <= d["sales_to_capital"] <= M.S2C_CLAMP[1]
     assert d["invested_capital"] == pytest.approx(3e9 + 5e8 - 2e9)
-    assert d["buyback_yield"] > 0 and d["share_change_rate"] > 0
-    assert d["flags"] == []
+    assert d["buyback_yield"] > 0 and d["share_change_rate"] == 0
+    assert len(d["flags"]) == 1 and "未来融资与稀释未建模" in d["flags"][0]
 
 
 def test_goodwill_is_excluded_from_reinvestment_capital_but_kept_in_roic():
@@ -233,11 +233,12 @@ def test_valuate_platform_end_to_end_is_internally_consistent():
     res = M.valuate(b, _resolved("platform"), rf=0.045, erp=0.045, beta=M.beta_from_klines(tk, spy))
     sc = res["scenarios"]
     assert res["fair_value"] > 0 and sc["bear"] <= sc["base"] <= sc["bull"]
-    assert res["fair_value"] == pytest.approx(0.25 * sc["bear"] + 0.5 * sc["base"] + 0.25 * sc["bull"])
+    assert res["fair_value"] == pytest.approx(sc["base"])
+    assert sc["probabilities"] == {} and res["scenario_expected_value"] is None
     assert res["verdict"]["label"] in ("低估", "偏低", "合理", "偏高", "高估")
     near = M.valuate(b, _resolved("platform"), rf=0.045, erp=0.045, beta=None, price=res["fair_value"] * 0.9)
     assert near["implied"]["cagr"] is not None and near["implied"]["target_margin"] is not None
-    assert res["base"]["weights"] == {"fcf_dcf": 0.5, "street": 0.5}
+    assert res["base"]["weights"] == {"fcf_dcf": 1.0, "street": 0.0}
     assert res["base"]["dcf"]["per_share"] > 0 and res["base"]["eps_pe"]["per_share"] > 0
     st = res["base"]["street"]
     assert st["target_avg"] == 60.0 and st["per_share"] == pytest.approx(60.0 / (1 + res["cost_of_capital"]["cost_of_equity"]))
@@ -278,9 +279,9 @@ def test_cyclical_normalizes_to_median_and_flags_peak():
 def test_overrides_and_overlay_flow_into_spec():
     b = make_bundle()
     res = M.valuate(b, _resolved("platform", overrides={"target_margin": 0.4, "wacc": 0.08, "horizon_years": 6,
-                                                        "probabilities": {"bear": 0.2, "base": 0.6, "bull": 0.2}},
-                                news_overlay=[{"date": "2026-09-01", "source": "s", "driver": "growth_start", "delta": 0.02, "note": "n"}]),
-                    rf=0.045, erp=0.045, beta=None)
+                                                        "probabilities": {"bear": 0.2, "base": 0.6, "bull": 0.2}, "probability_basis": "synthetic prior"},
+                                news_overlay=[{"date": "2026-09-01", "source": "s", "driver": "growth_start", "delta": 0.02, "note": "n", "valid_until": "2026-10-01"}]),
+                    rf=0.045, erp=0.045, beta=None, as_of="2026-09-03T12:00:00Z")
     assert res["spec"]["target_margin"] == 0.4 and res["spec"]["wacc"] == 0.08 and res["spec"]["horizon_years"] == 6
     assert res["spec"]["growth_start"] == pytest.approx(res["growth_start"] + 0.02)
     assert res["scenarios"]["probabilities"] == {"bear": 0.2, "base": 0.6, "bull": 0.2}
@@ -296,7 +297,7 @@ def test_loss_making_infra_gets_low_confidence_not_a_crash():
     margins = [-0.8 + 0.06 * i for i in range(12)]
     b = make_bundle(n_q=12, start_year=2023, margin_series=margins, cash=1e9, debt=2e9, capex_ratio=0.9, price=100.0)
     res = M.valuate(b, _resolved("ai_infra_capex"), rf=0.045, erp=0.045, beta=None)
-    assert res["base"]["weights"]["street"] == 0.5 and res["base"]["street"] is not None
+    assert res["base"]["weights"]["street"] == 0.0 and res["base"]["street"] is not None
     assert res["confidence"]["tier"] == "低"
     assert res["margin_basis"].startswith("原型缺省")
     assert math.isfinite(res["scenarios"]["base"])
@@ -337,10 +338,10 @@ def test_risk_labels_preserve_valuation_and_context_without_quantified_overlays(
 def test_spec_stage_multiplicative_and_additive_drivers():
     s = _flat_spec(growth_start=0.10, terminal_growth=0.03)
     p = M.apply_overlays_spec(s, [_ov("revenue_base", 0.10), _ov("growth_start", 0.02), _ov("target_margin", -0.05),
-                                  _ov("share_change_rate", 0.01), _ov("net_interest_after_tax", 1e6), _ov("wacc", 0.005),
+                                  _ov("net_interest_after_tax", 1e6), _ov("wacc", 0.005),
                                   _ov("terminal_growth", 0.01), _ov("pe_multiplier", -0.1), _ov("scenario_tilt", 0.1)])
     assert p["revenue_base"] == pytest.approx(1.1e9) and p["growth_start"] == pytest.approx(0.12)
-    assert p["target_margin"] == pytest.approx(0.25) and p["share_change_rate"] == pytest.approx(0.01)
+    assert p["target_margin"] == pytest.approx(0.25) and p["share_change_rate"] == 0
     assert p["net_interest_after_tax"] == pytest.approx(1e6) and p["wacc"] == pytest.approx(0.105) and p["cost_of_equity"] == pytest.approx(0.105)
     assert p["terminal_growth"] == pytest.approx(0.04)
     assert "pe_multiplier" not in p and "scenario_tilt" not in p
@@ -371,7 +372,8 @@ def test_valuate_carries_news_block_and_moves_fair_value():
     assert bear["fair_value"] < plain["fair_value"]
     assert bear["base"]["eps_pe"]["pe_mult"] == pytest.approx(0.8) and "overlay" in bear["base"]["eps_pe"]["pe_basis"]
     assert bear["cost_of_capital"]["erp"] == pytest.approx(0.045 + 0.01) and bear["cost_of_capital"]["erp_tilt"] == 0.0
-    assert bear["scenarios"]["probabilities"]["bear"] == pytest.approx(0.35)
+    assert bear["scenarios"]["probabilities"] == {}
+    assert any("scenario_tilt" in flag for flag in bear["flags"])
     assert plain["news"]["applied"] == [] and plain["cost_of_capital"]["erp_tilt"] == 0.0
 
 
@@ -434,10 +436,11 @@ def test_cyclical_uses_trend_slope_and_level_when_fit_is_good():
 def test_resolve_base_prefers_consensus_then_runrate_then_ttm():
     b = make_bundle(g_annual=0.10, margin=0.30)
     d = M.derive_drivers(b, _params("platform"))
-    fw = {"forward_revenue": d["revenue_ttm"] * 1.5, "forward_eps": d["eps_core_ttm"] * 2.0}
+    fw = {"forward_revenue": d["revenue_ttm"] * 1.5, "forward_eps": d["eps_core_ttm"] * 2.0,
+          "horizon_months": 12, "earnings_basis": "core"}
     a = M.resolve_base(d, _params("platform"), {}, fw)
     assert a["consensus_revenue"] and a["consensus_eps"] and a["growth_1"] == pytest.approx(0.5)
-    assert a["margin_1"] > d["opm_ttm"] and "一致前瞻 EPS" in a["margin_basis"] and "一致前瞻收入" in a["revenue_basis"]
+    assert a["margin_1"] > d["opm_ttm"] and "一致前瞻 EPS" in a["margin_basis"] and "前瞻收入" in a["revenue_basis"]
     assert a["growth_after"] <= _params("platform")["growth_cap_after"] and a["forward_pe"] == pytest.approx(50.0 / fw["forward_eps"])
     off = M.resolve_base(d, _params("platform"), {"use_consensus": False}, fw)
     assert not off["consensus_revenue"] and off["revenue_1"] == pytest.approx(d["revenue_ttm"] * (1 + off["growth_after"]))
@@ -454,7 +457,10 @@ def test_valuate_with_consensus_moves_value_and_records_anchor():
     plain = M.valuate(b, _resolved("platform"), rf=0.045, erp=0.045, beta=None)
     d = plain["drivers"]
     b2 = make_bundle(g_annual=0.10, margin=0.30, forward={"forward_revenue": d["revenue_ttm"] * 1.5, "forward_eps": d["eps_core_ttm"] * 1.8,
-                                                           "forward_pe": None, "forward_ps": None, "as_of": "2026-09-01", "source": "t"})
+                                                           "forward_pe": None, "forward_ps": None, "as_of": "2026-09-01", "source": "t",
+                                                           "available_at": "2026-09-01T00:00:00Z", "valid_until": "2026-10-01T00:00:00Z",
+                                                           "period_start": "2026-09-01", "period_end": "2027-08-31", "basis": "synthetic core forecast",
+                                                           "horizon_months": 12, "earnings_basis": "core"})
     cons = M.valuate(b2, _resolved("platform"), rf=0.045, erp=0.045, beta=None)
     assert cons["fair_value"] > plain["fair_value"] * 1.2
     assert cons["anchor"]["consensus_revenue"] and cons["base"]["path"][0]["revenue"] == pytest.approx(d["revenue_ttm"] * 1.5)
@@ -508,8 +514,35 @@ def test_no_street_coverage_falls_back_to_dcf_only_with_flag():
     b = make_bundle()
     b["consensus"] = None
     res = M.valuate(b, _resolved("platform"), rf=0.045, erp=0.045, beta=None)
-    assert res["base"]["weights"] == {"fcf_dcf": 0.5, "street": 0.0} and res["base"]["street"] is None
-    assert any("引擎 B 零权" in f for f in res["flags"])
+    assert res["base"]["weights"] == {"fcf_dcf": 1.0, "street": 0.0} and res["base"]["street"] is None
+    assert any("外部参考缺失" in f for f in res["flags"])
     assert res["fair_value"] > 0
     both = M.valuate(make_bundle(), _resolved("platform"), rf=0.045, erp=0.045, beta=None)
-    assert both["scenarios"]["bear"] != res["scenarios"]["bear"], "街上低/均/高进熊/基/牛"
+    assert both["scenarios"] == res["scenarios"], "卖方目标不改变内在价值"
+
+
+def test_missing_interest_withholds_earnings_target_without_fabricated_zero():
+    bundle = make_bundle()
+    for row in bundle["quarters"]:
+        row["net_interest"] = None
+    result = M.valuate(bundle, _resolved("platform"), rf=.045, erp=.0423, beta=None)
+    assert result["fair_value"] > 0
+    assert result["market_target_12m"]["status"] == "unknown"
+    assert result["market_target_12m"]["price"] is None
+    assert result["base"]["eps_pe"] is None
+    assert any("净利息缺失" in flag for flag in result["flags"])
+
+
+def test_unfinanced_share_shrink_and_invalid_terminal_spread_are_rejected():
+    spec = _flat_spec(terminal_growth=.03)
+    with pytest.raises(ValueError, match="financed"):
+        M.apply_overlays_spec(spec, [_ov("share_change_rate", .02)])
+    with pytest.raises(ValueError, match="terminal growth"):
+        M.apply_overlays_spec(spec, [_ov("terminal_growth", .2)])
+
+
+def test_nonfinite_bridge_never_becomes_a_zero_equity_value():
+    bundle = make_bundle()
+    bundle["quarters"][-1]["cash_sti"] = float("nan")
+    with pytest.raises(ValueError):
+        M.valuate(bundle, _resolved("platform"), rf=.045, erp=.0423, beta=None)

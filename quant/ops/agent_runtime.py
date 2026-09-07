@@ -35,10 +35,10 @@ _RULES = {
     "valuation": (),
 }
 _METHODS = {
-    "macro": ("ai_news/design/macro-inference-contract.md",),
-    "technical": ("trade/us_stock/strategy/trading-rules.md",),
-    "risk": ("trade/us_stock/strategy/trading-rules.md",),
-    "valuation": ("ai_news/valuation/README.md",),
+    "macro": ("agents/methods/macro-inference-contract.md", "quant/valuation/README.md"),
+    "technical": ("trade/strategy/trading-rules.md",),
+    "risk": ("trade/strategy/trading-rules.md",),
+    "valuation": ("agents/methods/news-valuation-overlay.md", "quant/valuation/README.md"),
 }
 
 
@@ -165,8 +165,8 @@ def policy_context(role: str) -> dict:
     policy, missing = {}, []
     for path in paths:
         key = str(path.relative_to(ROOT))
-        if not path.exists() and key.startswith(("ai_news/", "trade/")):
-            # The intelligence workspace and the private strategy files are user-owned and
+        if not path.exists() and key.startswith(("agents/methods/", "trade/")):
+            # The intelligence method notes and the private strategy files are user-owned and
             # may be absent: they are supplied when present and named as missing otherwise,
             # never fabricated from the public examples.
             missing.append(key)
@@ -209,6 +209,13 @@ def execution_schema(role: str, snapshot: dict, review_target=None) -> dict:
             refs["items"] = {"type": "string", "enum": snapshot["evidence_refs"]}
         else:
             refs["maxItems"] = 0
+    if role == "macro":
+        scenarios = properties["valuation_scenarios"]
+        if snapshot["evidence_refs"]:
+            scenarios["items"]["properties"]["evidence_refs"]["items"] = {
+                "type": "string", "enum": snapshot["evidence_refs"]}
+        else:
+            scenarios["maxItems"] = 0
     if review_target:
         properties["proposal"] = {"type": "null"}
         properties["review"] = properties["review"]["anyOf"][1]

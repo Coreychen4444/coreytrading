@@ -8,7 +8,7 @@
 
 **不输出买卖信号**。它只是把证据量化,倾斜 size + 信心。接在 Pre-Trade
 Quick Check 的 Q3(zone)之后作为 sizing 层。详见
-公开 schema 为 `trade/us_stock/strategy/uncertainty-execution-system.example.md`；
+公开 schema 为 `trade/strategy/uncertainty-execution-system.example.md`；
 实际规则写入移除 `.example` 后的私有文件。
 
 四个问题(各自独立回答,不是一个开关):

@@ -5,7 +5,7 @@
 阈值是未校准初值 —— 接 hard STALE 之前要先跑校准 (zone_timeline 挖历史卡片 +
 level_map 机械重画, 以"重画会不会改变 entry_guard 决策"作 label)。
 
-落 market/events/structure_drift.jsonl (每卡每交易日一行, 幂等)。这条序列本身
+落 portfolio/observations/structure_drift.jsonl (每卡每交易日一行, 幂等)。这条序列本身
 就是校准的观测样本 —— 先攒数据, 再谈阈值。
 
 CLI:
@@ -29,7 +29,7 @@ from quant.core.io_json import append_jsonl, iter_jsonl, read_json  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core.timeutil import et_today, now_et_iso  # noqa: E402
 
-DRIFT_PATH = KLINE_CACHE_DIR.parent / "events/structure_drift.jsonl"
+from quant.core.paths import STRUCTURE_DRIFT_PATH as DRIFT_PATH
 
 
 def _rows(ticker: str) -> List[dict]:
@@ -120,7 +120,7 @@ def render(results: Dict[str, dict]) -> str:
 def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser(description="结构漂移观测 (advisory)")
     ap.add_argument("--tickers", nargs="*", default=None)
-    ap.add_argument("--log", action="store_true", help="落 market/events/structure_drift.jsonl")
+    ap.add_argument("--log", action="store_true", help="落 portfolio/observations/structure_drift.jsonl")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
