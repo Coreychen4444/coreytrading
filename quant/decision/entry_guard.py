@@ -53,8 +53,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
-from quant.core import book, dow, earnings  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓 + 短期道氏排序键)
-from quant.core.holdings import is_traded  # noqa: E402  (参考票判据单一真源)
+from quant.core import book, dow, earnings, market_sessions, reversal  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓 + 短期道氏排序键 + 交易日历 + 反转探针判别式)
+from quant.core.holdings import is_candidate, is_traded  # noqa: E402  (参考票判据单一真源)
 from quant.data import iv_logger  # noqa: E402  (期权 IV 硬门槛的 percentile 源)
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
@@ -68,8 +68,11 @@ from quant.core.structure import (# noqa: E402
     zone_bands, zone_mech_stale, zone_position,  # 真源在 core (sync/lot_reconcile 同读); 此处 re-export
 )
 from quant.core import structure as structure_stale  # noqa: E402  (staleness 常量 re-export 源)
+from quant.decision.regime_transition import volume_leg  # noqa: E402  (gate 量能闸 = 转移机同一函数)
 from quant.core.sizing import (  # noqa: E402
-    AT_RISK_CAP_FRAC, OPTION_ATRISK_LOSS_FRAC, OPTION_MIN_GATE,
+    AT_RISK_CAP_FRAC, NOTIONAL_CAP, OPTION_ATRISK_LOSS_FRAC, OPTION_MIN_GATE,
+    REVERSAL_PROBE_RISK_GATE, available_cap, gate_risk_notional_cap, gate_step_frac,
+    reversal_probe_premium_cap,
     binding_stop, constraint_lines, entry_cap, option_premium_cap_frac,
     granting_gate_level, long_call_iv_gate,
     read_constraints, regime_cap_frac,
@@ -278,7 +281,7 @@ def floor_gate_gap_lines(agent: dict, atr: Optional[float]) -> List[str]:
     return out
 
 
-def next_regime_lines(agent: dict, rows: List[dict]) -> Tuple[List[str], bool]:
+def next_regime_lines(agent: dict, rows: List[dict], ticker: str = "") -> Tuple[List[str], bool]:
     """agent.next_regime — gate 是**状态转移锚点**, 不是本 regime 的入场位。
 
     模型 (用户): 一张卡不是"一套 zone + 一串 gate", 是若干 regime,
@@ -305,6 +308,14 @@ def next_regime_lines(agent: dict, rows: List[dict]) -> Tuple[List[str], bool]:
     name = nr.get("name") or "next"
     streak = _gate_streak(rows, lvl)
     k = len(streak)
+    # 量能闸与收盘 streak 是两个事实 —— 转移机 (regime_transition.detect_transition)
+    # 两条腿都要过才切。只报价格腿 = 把"差量能"的 gate 播成"切换在途, 勿手动改卡",
+    # 而它今晚根本不会切 (例: 收盘 2/2 ✓ 但 RelVR 0.74 < 1.1)。
+    # 同函数同口径, 与 gate_ladder_report 的 ⚠️量能闸未过 一个数 (渲染口径 = 判定口径)。
+    vol_min = coerce_float((nr.get("entry_gate") or {}).get("volume_ratio_min"))
+    vol_ok, vol_note = (True, None)
+    if k >= int(gate.get("days") or 2) and vol_min:
+        vol_ok, vol_note = volume_leg(rows, vol_min, ticker, streak=k)
     z = nr.get("zones") or {}
     prov = set(nr.get("provisional") or [])
     fired = k >= need
@@ -313,9 +324,15 @@ def next_regime_lines(agent: dict, rows: List[dict]) -> Tuple[List[str], bool]:
     # 词汇, 档位由结构判别式逐笔判 (v3  纯结构单腿; 旧两腿公式的 thesis 半已废),
     # 不由单一 gate "解锁"。
     head = f"🎚 regime 转移线 收盘>${lvl:g} ×{need} → [{name}] 生效"
-    if fired:
-        out = [f"{head}: ✅ {k}/{need} 已成立 ({', '.join(d[5:] for d in streak[-need:])} ET)",
-               "   🔁 自动切换域 (regime_transition,  裁决 A) — 本行仍显示"
+    if fired and not vol_ok:
+        out = [f"{head}: 价格腿 ✅ {k}/{need} ({', '.join(d[5:] for d in streak[-need:])} ET)"
+               f" · ⚠️ {vol_note} < {vol_min:g} 量能闸未过",
+               "   ⏸ 两条腿都过才切 — 本轮**不会**转移; 价格腿跌破 gate 即清零, "
+               "量腿对齐日 = streak 内任一日 (再站上重新计)"]
+    elif fired:
+        out = [f"{head}: ✅ {k}/{need} 已成立 ({', '.join(d[5:] for d in streak[-need:])} ET)"
+               + (f" · 量腿 ✓ {vol_note}" if vol_note else ""),
+               "   🔁 自动切换域 (regime_transition) — 本行仍显示"
                " = 切换在途 (等 postclose/briefing 的 regime 步), 勿手动改卡;"
                " provisional 带补画前不授权入场"]
     else:
@@ -334,7 +351,7 @@ def next_regime_lines(agent: dict, rows: List[dict]) -> Tuple[List[str], bool]:
         out.append("   切换后仓位层: " + " | ".join(parts))
     if nr.get("cap_pct_nav"):
         out.append(f"   预算档 cap {float(nr['cap_pct_nav']) * 100:g}% NAV — 股数按 floor(cap/price) 降级表切档")
-    return out, fired
+    return out, (fired and vol_ok)
 
 
 def zone_staleness(zb: dict, thesis: dict, rows: List[dict], today: str) -> List[str]:
@@ -538,15 +555,18 @@ def option_iv_gate(ticker: str) -> dict:
         ivp = iv_logger.percentile(ticker)
     except Exception as e:                                        # noqa: BLE001
         ivp = {"error": f"{type(e).__name__}: {e}"}
+    # IV 序列不可信时的分位代理 = HV20 的 252 日分位 (看分位不看 IV
+    # 绝对值): 读法单一 core.book.hv20_percentile_of, option_plan.build 同一个数 (传参)。
+    hv_pct = (book.hv20_percentile_of(ticker) or {}).get("pct")
     if ivp.get("error"):
         row = latest_iv(ticker)
         abs_iv = coerce_float((row or {}).get("atm_iv_pct"))
-        g = long_call_iv_gate(None, False, abs_iv)
-        return {**g, "pct": None, "samples": 0, "abs_iv": abs_iv}
+        g = long_call_iv_gate(None, False, abs_iv, hv_pct=hv_pct)
+        return {**g, "pct": None, "samples": 0, "abs_iv": abs_iv, "hv_pct": hv_pct}
     g = long_call_iv_gate(ivp.get("iv_percentile"), bool(ivp.get("reliable")),
-                          ivp.get("latest_iv_pct"))
+                          ivp.get("latest_iv_pct"), hv_pct=hv_pct)
     return {**g, "pct": ivp.get("iv_percentile"), "samples": ivp.get("samples"),
-            "abs_iv": ivp.get("latest_iv_pct")}
+            "abs_iv": ivp.get("latest_iv_pct"), "hv_pct": hv_pct}
 
 
 def iv_gate_line(ticker: str) -> str:
@@ -595,6 +615,190 @@ def dow_line(pr: dict) -> str:
     detail = stage.split("（", 1)[1].rstrip("）") if "（" in stage else stage
     return (f"结构位 {pr['cn']}" + (f" ｜ {detail}" if detail else "")
             + (f" ｜ 周线级 {pr['weekly_cn']}" if pr.get("weekly_cn") else ""))
+
+
+# ── 抄底入场类 reversal_probe (试行; 空仓前提; 判别式 core.reversal → core.setups) ──
+#
+# 第二入场类, 不是替代: 正股 gate 授权一字不动; 本类只对**空仓**的候选卡出计划 (抄底的前提是该
+# 标的为空仓; 持仓票的加仓仍走 cap + Iron Rule #2 v2)。
+#   信号   = setups.bottom_setup 的 ✓止跌 (止跌低之后次日未新低 或 止跌日长下影), 有效 valid_days 个交易日
+#   域     = R0: 止跌低距 60 日高 ≥10% (不排 R2; 见 bottom_stage_backtest 探索定价)
+#   限价   = reversal.ladder: min(信号收盘, 最新收盘) / 止跌低之上 2/3 / 1/3 (不锚 z1, z1 是 gate 类的锚)
+#   止损   = 止跌低 (下影线低点) 收盘 ×1, 无 S1 (exit_guard 按卡 entry_class 分流; 正股 = 卡 stop)
+#   正股腿 = cap = min(组合层六臂 available_cap, gate1 风险预算 2.5% NAV ÷ 止损距) → share_ladder 整股三档
+#   期权腿 = IVP 门 (percentile / HV20 分位代理; 绝对 IV 兜底不算) → cap = gate1 2.5% NAV ÷ 止跌低处保费投影亏损
+#            (sizing.reversal_probe_premium_cap) 与组合层臂折保费取小; IVP 门不过 = 只走正股, 不是 VETO
+#   授权   = 落 option_plans.json (entry_class=reversal_probe, stock 段 + 合约段) → Today 组 (正股 + 合约) +
+#            提醒线 + trade_history_sync 盖 auth.entry_class; 过期 = 错过, 不追 (座右铭)。
+#   试行   = 试行期满按预先锁定判据复核 (≥10 笔或 60 交易日; 止损率 >50% 或 mean R <0 → 回 canonical §七 口径)
+RP_TARGET_DTE = 270      # 与 gate 类同 LEAPS DTE 下限 (探索定价 DTE150 ATM 尾部更差, 本类同 Δ 带同 DTE)
+
+_HELD_CACHE: Optional[set] = None
+
+
+def _held_tickers() -> Optional[set]:
+    """持仓票 (含在持期权的正股, `holdings.live_tickers`) —— 抄底前提 = 空仓。读不到 → None
+    (调用方按「不知道 = 不授权」处理, 与 today_group「无 K 线→不 grant」同一 fail-closed 哲学)。"""
+    global _HELD_CACHE
+    if _HELD_CACHE is None:
+        try:
+            from quant.core.holdings import live_tickers  # noqa: PLC0415
+            from quant.core.paths import POSITIONS_PATH  # noqa: PLC0415
+            _HELD_CACHE = {str(t).upper() for t in live_tickers(read_json(POSITIONS_PATH) or {})}
+        except Exception:                                    # noqa: BLE001
+            return None
+    return _HELD_CACHE
+
+
+def reversal_probe_plan(tk: str, rows: List[dict], atr: Optional[float],
+                        nav: Optional[float], usage: Optional[dict], today: str,
+                        exposure: Optional[float] = None,
+                        held: Optional[set] = None) -> Optional[dict]:
+    """→ None (无信号) | {"verdict": PLAN|OUT_OF_DOMAIN|VETO|NEEDS_CHAIN, signal, lines, reasons,
+    ladder, stop, stock_plan, option_plan(_data), cap, loss_frac, valid_until}。
+    纯读 (K 线缓存 / iv_history / OpenD 链), 不写文件。`held` = 持仓票集合 (None = 读不到 → 不授权)。"""
+    sig = reversal.detect(rows, atr)
+    if not sig:
+        return None
+    out: dict = {"verdict": None, "signal": sig, "lines": [], "reasons": [],
+                 "ladder": None, "stop": sig["support"], "valid_until": None,
+                 "stock_plan": None, "option_plan": None, "option_plan_data": None}
+    try:
+        out["valid_until"] = market_sessions.add_sessions(
+            sig["date"], int(reversal.PARAMS["valid_days"])).isoformat()
+    except Exception as e:                                        # noqa: BLE001
+        out["reasons"].append(f"⚠️ 有效期算不出 ({type(e).__name__}: {e}) — 日历缺, 本轮不落计划")
+    sh = sig.get("shadow") or {}
+    out["lines"].append(
+        f"✓止跌 {sig['date']} (age {sig.get('age', 0)}): {sig['signal']} · 止跌低 (止损) {sig['support']:g}"
+        + (f" = {sig['stop_dist_n']:g}N" if sig.get("stop_dist_n") else "")
+        + (f" · 止跌日 下影 {sh['lower_pct']}%" if sh.get("lower_pct") is not None else "")
+        + f" · 收盘{'已' if sig.get('above_low_bar_high') else '未'}站上止跌日高"
+        + f" · 止跌低距 60 日高 {sig['drawdown']:+.1%} → 域 {sig['domain']}"
+        + (f" · 有效至 {out['valid_until']}" if out["valid_until"] else ""))
+    if held is None:
+        out["verdict"] = "VETO"
+        out["reasons"].append("⛔ 持仓表读不到 — 抄底前提 (空仓) 判不了, 不授权 (fail-closed)")
+        return out
+    if tk.upper() in held:
+        out["verdict"] = "VETO"
+        out["reasons"].append("⛔ 持仓票不走抄底 (抄底的前提是该标的为空仓; "
+                              "加仓走 cap + Iron Rule #2 v2)")
+        return out
+    if not sig["in_domain"]:
+        out["verdict"] = "OUT_OF_DOMAIN"
+        out["reasons"].append(f"域外不开: 止跌低距 60 日高仅 {sig['drawdown']:+.1%}, "
+                              f"不算「跌到足够便宜」(门 {reversal.PARAMS['drawdown_min']:.0%}) — 只播不授权")
+        return out
+    if not nav:
+        out["verdict"] = "VETO"
+        out["reasons"].append("NAV 缺失 — cap 算不出, 不给股数/张数")
+        return out
+    if not out["valid_until"]:
+        out["verdict"] = "VETO"
+        return out
+    last_close = coerce_float(rows[-1].get("close"))
+    ladder = reversal.ladder(sig, last_close)
+    out["ladder"] = ladder
+    if not ladder:
+        out["verdict"] = "VETO"
+        out["reasons"].append("⛔ 最新收盘已在止跌低之下 — 信号作废 (反弹结束)")
+        return out
+    if sig.get("age", 0) > 0 and last_close is not None and last_close < sig["close"]:
+        out["lines"].append(f"⚠️ 最新收盘 {last_close:g} 低于信号收盘 {sig['close']:g} (止跌低未破, 信号仍有效) — 首档随收盘下移")
+    # ── 正股腿: 组合层六臂 ∧ gate1 风险预算 ÷ 止损距 (止跌低) ──
+    ac = available_cap(nav, NOTIONAL_CAP, atr, ladder[0], usage=usage,
+                       power_room=(_power() or {}).get("room"),
+                       exposure=(exposure or 0.0))
+    out["notional_cap"] = ac.get("cap_usd")
+    out["notional_binding"] = ac.get("binding")
+    risk_cap = gate_risk_notional_cap(nav, REVERSAL_PROBE_RISK_GATE, ladder[0], sig["support"])
+    arms = [(ac.get("cap_usd"), f"组合层 {ac.get('binding')}"), (risk_cap, "gate1 风险预算÷止损距")]
+    arms = [(v, w) for v, w in arms if v is not None]
+    stock_cap, stock_binding = (min(arms, key=lambda x: x[0]) if arms else (None, "无"))
+    sl = share_ladder(stock_cap, ladder, PARAMS["ladder_weights"]) if stock_cap else None
+    stock_tiers = [t for t in ((sl or {}).get("tiers") or []) if t.get("shares")]
+    stock_ok = bool(stock_tiers) and not (sl or {}).get("exception")
+    out["stock_plan"] = {"cap": stock_cap, "binding": stock_binding, "risk_cap": risk_cap,
+                         "tiers": stock_tiers, "n_shares": (sl or {}).get("n_shares"),
+                         "exception": bool((sl or {}).get("exception")),
+                         "cap_frac": ((stock_cap / nav) if stock_cap else None)}
+    if stock_ok:
+        out["lines"].append(f"正股 cap ${stock_cap:,.0f} ({stock_cap / nav:.1%} NAV, binding={stock_binding}) → "
+                            + " / ".join(f"${t['price']:g}×{t['shares']}股" for t in stock_tiers)
+                            + f" · 止损 {sig['support']:g} ×1")
+    else:
+        out["reasons"].append(f"正股 0 股: cap ${stock_cap or 0:,.0f} 装不下一股 (binding={stock_binding})")
+    # ── 期权腿: IVP 门 → 倒推 cap; 门不过 = 只走正股 ──
+    ivg = option_iv_gate(tk)
+    out["iv_gate"] = ivg
+    opt_ok = False
+    if ivg.get("basis") not in ("pct", "hv_pct"):
+        out["reasons"].append(f"call ⛔ IVP 门无分位可判 ({ivg.get('reason')}) — 本类要求分位口径 "
+                              "(IV percentile 或 HV20 分位代理), 绝对 IV 兜底不算; 正股照走")
+    elif not ivg["allowed"]:
+        out["reasons"].append(f"call ⛔ IVP 门: {ivg['reason']} — 见底日高分位是常态, 本类只吃 <40 那一桶; 正股照走")
+    else:
+        out["lines"].append(f"IVP 门 ✓ {ivg['reason']} [basis={ivg['basis']}]")
+        anchor_note = (f"抄底 (reversal_probe) 锚 = 首档 {ladder[0]:g} (min(信号收盘, 最新收盘), 不等 z1) / "
+                       f"止跌低之上 2/3 / 1/3; 止损 = 止跌低 {sig['support']:g} 收盘 ×1 (无 S1)")
+        try:
+            from quant.options import option_plan
+            plan = option_plan.build(
+                tk, ladder, None, target_dte=RP_TARGET_DTE, min_dte=RP_TARGET_DTE,
+                stop=sig["support"], notional_cap=ac.get("cap_usd"),
+                at_risk_premium_cap=None, anchor_note=anchor_note,
+                hv_pct=ivg.get("hv_pct") if ivg.get("basis") == "hv_pct" else None)
+        except Exception as e:                                    # noqa: BLE001
+            plan = None
+            out["reasons"].append(f"⚠️ 期权计划生成失败 ({type(e).__name__}: {e}) — 手动跑 "
+                                  f"quant/options/option_plan.py {tk} --ladder "
+                                  + " ".join(f"{x:g}" for x in ladder) + f" --stop {sig['support']:g}")
+            if not stock_ok:
+                out["verdict"] = "NEEDS_CHAIN"
+                return out
+        if plan is not None and plan.get("error"):
+            out["reasons"].append(f"call ⛔ {plan['error']}")
+            out["option_plan"] = option_plan.render(plan)
+            out["option_plan_data"] = plan
+            if not stock_ok and str(plan["error"]).startswith("链数据不可得"):
+                out["verdict"] = "NEEDS_CHAIN"
+                return out
+        elif plan is not None:
+            lf = option_plan.loss_frac_at_stop(plan)
+            cap = reversal_probe_premium_cap(nav, lf)
+            out["loss_frac"] = lf
+            if cap is None:
+                out["reasons"].append("call ⛔ 止跌低处保费投影算不出 (无 stop 投影 / 投影 ≥ 首档) — 倒推 cap 不成立")
+            else:
+                note = (f"抄底 (reversal_probe) 倒推 cap: gate{REVERSAL_PROBE_RISK_GATE} 风险预算 "
+                        f"{gate_step_frac(REVERSAL_PROBE_RISK_GATE):.1%} NAV ÷ 正股跌到止跌低 {sig['support']:g} 的保费投影亏损 "
+                        f"{lf:.0%} = ${cap:,.0f} ({cap / nav:.1%} NAV)"
+                        + (f"; 组合层名义上限 ${ac['cap_usd']:,.0f} (binding={ac.get('binding')}) 折保费后取小"
+                           if ac.get("cap_usd") is not None else "; ⚠️ 组合层名义上限缺 (NAV/ATR)"))
+                option_plan.apply_premium_cap(plan, cap, note)
+                out["cap"] = plan.get("cap_used")
+                out["cap_frac"] = (plan.get("cap_used") or 0.0) / nav
+                size = plan.get("size") or {}
+                tiers = [t for t in (size.get("tiers") or []) if t.get("shares")]
+                # 整股约束的 0 股路径 (share_ladder exception = 「买 1 股 + 书面例外」) 对期权不成立:
+                # 0 张 = 正股或 veto。
+                if tiers and not size.get("exception"):
+                    opt_ok = True
+                    out["lines"].append(f"call cap ${plan['cap_used']:,.0f} (倒推 ${cap:,.0f}; 止跌低处投影亏损 {lf:.0%}) → "
+                                        + " / ".join(f"${t['price']:g}×{t['shares']}张" for t in tiers))
+                else:
+                    out["reasons"].append(f"call 0 张: cap ${plan.get('cap_used') or 0:,.0f} 装不下一张 (禁降 delta 装 cap)")
+            out["option_plan"] = option_plan.render(plan)
+            out["option_plan_data"] = plan
+    out["option_ok"] = opt_ok
+    out["stock_ok"] = stock_ok
+    if stock_ok or opt_ok:
+        out["verdict"] = "PLAN"
+    else:
+        out["verdict"] = "VETO"
+        out["reasons"].append("⛔ 正股 0 股且 call 0 张 — 本轮无可挂")
+    return out
 
 
 def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
@@ -651,7 +855,22 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
             # 无计划时指向不存在的段落 (NVDA VETO 案), 砍掉尾巴留事实半句
             out["lines"] = [ln.split(" — 下方阶梯为")[0] if "下方阶梯为" in ln else ln
                             for ln in out["lines"]]
+            # 反转探针 : gate 类没给计划的候选卡 (cap 0 / STALE / 结构 VETO /
+            # NEEDS_CARD 但有 K 线) 走第二入场类 —— 只对仍是候选的卡; 失败不静默。
+            if rows and is_candidate({"status": "watching", **card}):
+                try:
+                    rp = reversal_probe_plan(tk, rows, atr, nav, usage, today,
+                                             exposure=book.exposure_of(tk), held=_held_tickers())
+                except Exception as e:                                # noqa: BLE001
+                    rp = {"verdict": "ERROR", "lines": [], "signal": None,
+                          "reasons": [f"⚠️ reversal_probe 评估失败 ({type(e).__name__}: {e})"]}
+                if rp:
+                    out["reversal_probe"] = rp
         return out
+
+    if not is_candidate({"status": "watching", **card}):
+        out["reasons"].append("已移出 Watchlist 或非 watching：入场授权撤销；加回分组后重新检查")
+        return done("VETO")
 
     if not rows:
         out["reasons"].append("无 K 线缓存 (kline_cache 下轮拉取)")
@@ -671,7 +890,7 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
 
     zb = zone_bands(agent.get("zones"))
     out["lines"].extend(reclaim_gate_lines(agent.get("zones"), rows, today))
-    nr_lines, nr_fired = next_regime_lines(agent, rows)
+    nr_lines, nr_fired = next_regime_lines(agent, rows, tk)
     out["lines"].extend(nr_lines)
     out["lines"].extend(floor_gate_gap_lines(agent, atr))
     if nr_fired:
@@ -798,35 +1017,58 @@ def evaluate_ticker(tk: str, card: dict, today: str, nav: Optional[float],
     #    一行"手动跑", 不静默。保费上限 = 本档新增 risk ÷ |S1| (gate1 12.5% NAV);
     #    期权的正股退出线 = max(卡 stop, 授予 cap 的 gate) (S5g, granting_gate_level)。
     veh = (out["constraints"] or {}).get("vehicle")
-    if veh in OPTION_VEHICLES:
+    # 覆盖: 所有非 vehicle=stock 的 PLAN 卡都出期权
+    # 限价投影 —— 此前只有标了 leaps/spread 的卡有计划, 没标 vehicle 的卡既没有 oz1
+    # 线也没有锚, call 买在哪里系统看不见。未标 / stock_first = 正股优先, 投影只回答
+    # 「若用期权, 限价挂哪」; 落库 (write_option_plans → Today 组 + oz1 线) 同样覆盖。
+    if veh != "stock":
+        _lbl = "期权" if veh in OPTION_VEHICLES else "期权若用 (正股优先)"
         _g = caps.get("gate_no") or 1
         prem_frac = option_premium_cap_frac(_g)
         ivg = option_iv_gate(tk)
         out["option_iv_gate"] = ivg
         if _g < OPTION_MIN_GATE or prem_frac <= 0:
             out["reasons"].append(
-                f"⛔ 期权 gate{_g} 无保费上限 (OPTION_MIN_GATE={OPTION_MIN_GATE}) — 本档正股执行")
+                f"⛔ {_lbl} gate{_g} 无保费上限 (OPTION_MIN_GATE={OPTION_MIN_GATE}) — 本档正股执行")
         elif not ivg["allowed"]:
             out["reasons"].append(
-                f"⛔ 期权 IV 硬门槛 VETO: {ivg['reason']} — 本档正股执行 "
+                f"⛔ {_lbl} IV 硬门槛 VETO: {ivg['reason']} — 本档正股执行 "
                 f"(gate{_g} 保费上限 {prem_frac:.1%} NAV 留给 IV 回落后)")
         else:
             out["reasons"].append(
-                f"🧰 期权 gate{_g} 可用: IV 硬门槛 ✓ ({ivg['reason']}) · 保费上限 "
+                f"🧰 {_lbl} gate{_g} 可用: IV 硬门槛 ✓ ({ivg['reason']}) · 保费上限 "
                 f"{prem_frac:.1%} NAV" + (f" = ${prem_frac * nav:,.0f}" if nav else ""))
+            # 期权限价锚 = 正股 z1 回踩 (期权锚定正股回踩 z1 的价格,
+            # 不追高): 修复快车道卡的正股阶梯锚在确认日收盘 (ladder_entry 裁决,
+            # 正股照旧), 期权不跟它 —— 那个首档可以高于 z1 上沿,
+            # 而期权要买在便宜位置。期权一律取 zone 档 (normal 阶梯:
+            # min(close×0.995, z1 上沿) / z1 下沿 / z2 中值); zb 缺 → 退回正股阶梯不静默。
+            opt_ladder = ladder
+            anchor_note = "期权限价锚 = 正股 z1 回踩 (zone 档), 不追"
+            if mode == "repair_reclaim":
+                _zl = build_ladder("normal", close, rows, zb, atr=atr)
+                if _zl:
+                    opt_ladder = _zl
+                    anchor_note += f"; 正股修复阶梯 {ladder} 不用于期权"
+                else:
+                    anchor_note += "; ⚠️ 无 zone 带, 退回正股修复阶梯"
             try:
                 from quant.options import option_plan
-                # LEAPS DTE = §13.2 下限 270, 执行 = 下限之上最近可用周期不限 Jan
-                dte, dte_floor = (270, 270) if veh == "leaps" else (45, 7)
+                # LEAPS DTE = 下限 270, 执行 = 下限之上最近可用周期不限 Jan;
+                # 未标 vehicle 的卡按单腿 long call 同一口径 (option_strategy_scope: DTE>150)
+                dte, dte_floor = (45, 7) if veh == "spread" else (270, 270)
                 ar_prem = (AT_RISK_CAP_FRAC * nav / OPTION_ATRISK_LOSS_FRAC) if nav else None
                 _gate = granting_gate_level(card)
                 _und_stop = max([v for v in (coerce_float(zb.get("stop")) if zb else None, _gate)
                                  if v is not None], default=None)
-                plan = option_plan.build(tk, ladder, (prem_frac * nav) if nav else None,
+                plan = option_plan.build(tk, opt_ladder, (prem_frac * nav) if nav else None,
                                          target_dte=dte, min_dte=dte_floor,
                                          stop=_und_stop,
                                          notional_cap=caps.get("notional_cap"),
-                                         at_risk_premium_cap=ar_prem)
+                                         at_risk_premium_cap=ar_prem,
+                                         anchor_note=anchor_note,
+                                         hv_pct=ivg.get("hv_pct") if ivg.get("basis") == "hv_pct" else None)
+                out["option_ladder"] = opt_ladder
                 out["option_plan"] = option_plan.render(plan)
                 out["option_plan_data"] = plan
             except Exception as e:                                    # noqa: BLE001
@@ -874,8 +1116,19 @@ def _summary_cells(r: dict) -> tuple:
         # 候选卡就是 gate2 —— 旧的写死 "(R1)" 会在一览上把 4% 的计划标成 2.5% 的。
         verdict += f"(gate{(r.get('caps') or {}).get('gate_no') or 1})"
         if r.get("dow"):
-            verdict += f"·{r['dow']['short']}"          # 结构位 = 清单第一排序键 ()
+            verdict += f"·{r['dow']['short']}"          # 结构位 = 清单第一排序键
+    rp = r.get("reversal_probe") or {}
+    if rp.get("verdict") == "PLAN":
+        verdict += "+🔁抄底"                              # 抄底给了正股/合约计划
     tail = None
+    if rp.get("verdict") == "PLAN" and r["verdict"] != "PLAN":
+        sig = rp.get("signal") or {}
+        st_tiers = ((rp.get("stock_plan") or {}).get("tiers") or [])
+        op_tiers = [t for t in (((rp.get("option_plan_data") or {}).get("size") or {}).get("tiers") or [])
+                    if t.get("shares")]
+        tail = (f"🔁 止跌低 {sig.get('support')} · 首档 ${(rp.get('ladder') or [0])[0]:g}"
+                + (f" → {st_tiers[0]['shares']}股" if st_tiers else "")
+                + (f" / {op_tiers[0]['shares']}张@${op_tiers[0]['price']:g}" if (op_tiers and rp.get("option_ok")) else ""))
     if r["verdict"] == "PLAN" and r.get("ladder"):
         parts = []
         z1 = r.get("z1")
@@ -926,10 +1179,16 @@ def render(results: List[dict], nav: Optional[float], today: str,
            reentry_only: Optional[Dict[str, float]] = None) -> str:
     order = {"PLAN": 0, "STALE": 1, "NEEDS_CARD": 2, "VETO": 3}
     icon = _ICON
-    # verdict 之内按短期道氏结构位排：优先 = 上涨推进中/反转向上，
+
+    def _rank(x: dict):
+        # 反转探针给了计划的卡排在 gate 类 PLAN 之后、其余之前 (它也是当日可挂的单)
+        base = order.get(x["verdict"], 9)
+        if (x.get("reversal_probe") or {}).get("verdict") == "PLAN":
+            base = 0.5
+        return (base, tuple((x.get("dow") or {}).get("sort_key") or (9, 9)))
+    # verdict 之内按短期道氏结构位排 (优先 = 上涨推进中/反转向上,
     # 次位 = 观察期, 末位 = 下跌推进中; 同档周线级打平局)。只排序, 不改任何块内数字。
-    ordered = sorted(results, key=lambda x: (order.get(x["verdict"], 9),
-                                             tuple((x.get("dow") or {}).get("sort_key") or (9, 9))))
+    ordered = sorted(results, key=_rank)
     lines = [f"📥 入场执行计划 {today} (entry_guard)"
              + (f" | NAV ${nav:,.0f}" if nav else "")]
     lines.extend(usage_txt or [])
@@ -957,6 +1216,18 @@ def render(results: List[dict], nav: Optional[float], today: str,
         if r.get("reentry_ref"):
             lines.append(f"   🔓 完全修复线 ${r['reentry_ref']:g} (exit_guard 重进 watch)"
                          " — 提示线非入场条件, 入场按上方 gate/zone")
+        rp = r.get("reversal_probe")
+        if rp:
+            # 抄底块: gate 类之外的第二入场类, 正股 + call;
+            # 域外/门外/持仓票也印 —— 「看见了但没开」和「没看见」必须能区分。
+            lines.append(f"   🔁 抄底 reversal_probe — {rp.get('verdict')}"
+                         + (" (可挂: 正股阶梯见上行, 合约见下方计划; 过期 = 错过不追)" if rp.get("verdict") == "PLAN" else ""))
+            for x in rp.get("lines") or []:
+                lines.append(f"      {x}")
+            for x in rp.get("reasons") or []:
+                lines.append(f"      · {x}")
+            if rp.get("option_plan") and rp.get("option_ok"):
+                lines.append("      " + "\n      ".join(str(rp["option_plan"]).splitlines()))
         if r["verdict"] == "PLAN" and r.get("ladder"):
             w = PARAMS["ladder_weights"]
             caps = r["caps"] or {}
@@ -1054,6 +1325,9 @@ def _last_plan_signatures() -> Dict[str, str]:
             if row.get("source") == "entry_guard" and row.get("action") == "entry_plan" \
                     and row.get("plan_sig"):
                 out[str(row.get("ticker"))] = row["plan_sig"]
+            elif row.get("source") == "entry_guard" and row.get("action") == "reversal_probe_plan" \
+                    and row.get("plan_sig"):
+                out[f"{row.get('ticker')}:reversal_probe"] = row["plan_sig"]
     return out
 
 
@@ -1064,6 +1338,28 @@ def log_decisions(results: List[dict]) -> int:
     last = _last_plan_signatures()
     n = 0
     for r in results:
+        rp = r.get("reversal_probe") or {}
+        if r["verdict"] != "PLAN" and rp.get("verdict") == "PLAN":
+            # 反转探针计划 : 合约 + 张数 + 信号日变了才落一行
+            pd_ = rp.get("option_plan_data") or {}
+            tiers = ([t for t in (((pd_.get("size") or {}).get("tiers")) or []) if t.get("shares")]
+                     + [{"stock": t.get("price"), "shares": t.get("shares")}
+                        for t in ((rp.get("stock_plan") or {}).get("tiers") or [])])   # 正股腿也进指纹
+            sig = json.dumps({"code": (pd_.get("chosen") or {}).get("code"),
+                              "contracts": [t["shares"] for t in tiers],
+                              "signal_date": (rp.get("signal") or {}).get("date")}, sort_keys=True)
+            key = f"{r['ticker']}:reversal_probe"
+            if last.get(key) == sig:
+                continue
+            append_jsonl(DECISIONS_PATH, {
+                "timestamp": now_et_iso(), "ticker": r["ticker"], "action": "reversal_probe_plan",
+                "chosen": "reversal_probe", "size": rp.get("cap"), "plan_sig": sig,
+                "notes": (f"抄底 reversal_probe 信号 {(rp.get('signal') or {}).get('date')} 止跌低 {rp.get('stop')} "
+                          f"ladder {rp.get('ladder')} loss_frac {rp.get('loss_frac')} 有效至 {rp.get('valid_until')} "
+                          + " ".join(rp.get("lines") or [])[:200]),
+                "source": "entry_guard"})
+            n += 1
+            continue
         if r["verdict"] != "PLAN":
             continue
         sig = _plan_signature(r)
@@ -1102,6 +1398,40 @@ def write_option_plans(results: List[dict], today: str) -> int:
     from quant.core.paths import OPTION_PLANS_PATH
     plans: Dict[str, dict] = {}
     for r in results:
+        rp = r.get("reversal_probe") or {}
+        if r.get("verdict") != "PLAN" and rp.get("verdict") == "PLAN":
+            # 抄底的授权住这里 (含正股腿): 正股卡 cap 0 也能有它; 消费者
+            # today_group (正股 + 合约进组) / price_reminder (首档线 / oz1) / trade_history_sync
+            # (盖 auth.entry_class, 过期 = 无授权)。stock 段与合约段各自可缺 (0 股 / IVP 门不过)。
+            sig = rp.get("signal") or {}
+            entry = {
+                "entry_class": "reversal_probe", "selected_at": today,
+                "signal_date": sig.get("date"), "signal_close": sig.get("close"),
+                "signal": sig.get("signal"), "support": sig.get("support"),
+                "lower_high": sig.get("lower_high"), "ladder": rp.get("ladder"),
+                "valid_until": rp.get("valid_until"),
+            }
+            sp = rp.get("stock_plan") or {}
+            if rp.get("stock_ok") and sp.get("tiers"):
+                entry["stock"] = {"tiers": [{"price": t["price"], "shares": t["shares"]} for t in sp["tiers"]],
+                                  "cap": sp.get("cap"), "cap_frac": sp.get("cap_frac"), "binding": sp.get("binding")}
+            pd_ = rp.get("option_plan_data") or {}
+            chosen = pd_.get("chosen") or {}
+            rungs = pd_.get("rungs") or []
+            tiers = [t for t in ((pd_.get("size") or {}).get("tiers") or []) if t.get("shares")]
+            if rp.get("option_ok") and chosen.get("code") and tiers and rungs:
+                code = str(chosen["code"])
+                entry.update({
+                    "code": code[3:] if code.startswith("US.") else code,
+                    "strike": chosen.get("strike"), "expiry": pd_.get("expiry"),
+                    "dte": pd_.get("dte"), "delta": chosen.get("delta"),
+                    "tiers": [{"premium": rungs[i]["premium_flat_iv"], "contracts": t["shares"]}
+                              for i, t in enumerate(tiers) if i < len(rungs)],
+                    "loss_frac_at_stop": rp.get("loss_frac"), "cap_frac": rp.get("cap_frac"),
+                })
+            if "stock" in entry or "code" in entry:
+                plans[r["ticker"]] = entry
+            continue
         pd_ = r.get("option_plan_data") or {}
         chosen = pd_.get("chosen") or {}
         size = pd_.get("size") or {}

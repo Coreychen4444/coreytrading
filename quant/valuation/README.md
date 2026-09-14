@@ -304,3 +304,266 @@ tasks/codex/valuation-daily.md for ownership, schedule and output requirements.
 These changes repair data use and delivery. They do not validate forecast
 accuracy, recover historical consensus vintages, turn qualitative financing
 notes into rate exposures, or measure announcement-minute price jumps.
+
+## Company reconstruction pilot
+
+`company_model.py` is a separate explicit company engine, currently
+`company-v5.2-research`. It does not inherit archetype growth, margins, a share
+count inferred from EPS, or the old cash-flow-derived PE. The private input
+catalog is `trade/valuation/company_models.json`, keyed by ticker; capture adds
+it to the frozen evidence with ownership/hash checks. Assessment routes a ticker
+with a packet to this engine. Expired, mismatched or invalid packets do not fall
+back to legacy prices. Other tickers remain legacy diagnostics under the global
+publication hold. No current company is approved for publication.
+
+The explicit input contract uses schema `1.0`, currency `USD`, scale `millions`
+for both money and shares. Every packet has `known_at`, fixed `valid_until`, a
+source catalog (URL, captured-content SHA256, availability and capture clocks),
+`source_refs`, and `basis`. Reported statements and each forecast scenario have
+their own evidence/basis. The engine checks declared availability; source hashes
+do not independently prove the truth of a transcribed fact or assumption.
+
+- `segment_names` is the complete nonoverlapping set including corporate and
+  intersegment elimination rows. `observed.segments` reconciles to independently
+  transcribed consolidated revenue and profit. It must not contain both a parent
+  subtotal and its children. Additional signed-component `identities` reconcile
+  balance-sheet/cash-flow totals without silently repairing the source.
+- Each forecast quarter specifies start/end dates, segment revenue/profit,
+  separate interest income/expense, named nonoperating items, tax expense, NCI
+  income, and explicitly defined after-tax adjustments to parent income.
+  `adjusted_definition` distinguishes company non-GAAP from analyst adjustments.
+- Shares have explicit basic weighted, incremental dilutive, closing, issued and
+  repurchased amounts. Loss-period anti-dilution and a profitable adjusted basis
+  use separate denominators. Closing shares must roll forward. Annual EPS is
+  aggregate income divided by day-weighted shares, not summed quarterly EPS.
+- Cash rolls forward from consolidated income with D&A, named noncash changes,
+  working capital, capitalized cash interest, both investing/financing capex,
+  grants, partner flows, debt, common equity cash, leases and distributions.
+  The liquidity pool excludes restricted cash. Transfers within that pool are
+  not external inflows. Minimum-cash shortfalls are explicit; no balancing debt
+  or financing is invented. Positive equity cash requires explicit share issuance.
+- `earnings_windows` names four consecutive fiscal quarters and the exact
+  earnings definition. A quarter already partly elapsed is not called an exact
+  next-twelve-month forecast. Independent PE cases require four quarters starting
+  near the twelve-month target date, not the forward year at today's cutoff.
+  PE comes only from explicit same-basis comparable/history evidence or a clearly
+  labelled analyst sensitivity. Missing multiples remain unknown.
+- Optional owner DCF discounts explicit common-owner cash per share and terminal
+  common equity after financing, reinvestment and partner claims. It never adds
+  cash/debt a second time or manufactures a terminal multiple. An unfunded path
+  withholds both price calculations. Missing owner/terminal evidence stays unknown.
+
+The CLI writes a new detached output and refuses to overwrite existing forecasts:
+
+```bash
+.venv/moomoo/bin/python3 quant/valuation/company_model.py --input INPUT.json --as-of ISO_TIMESTAMP --output NEW_RECEIPT.json
+```
+
+`company_validation.py` evaluates preregistered prospective EPS records against a
+declared frozen baseline. It separates missing/future outcomes, excludes hindsight
+and overlapping forecasts, rejects unresolved actual revisions, and reports MAE,
+bias, baseline error and sample counts. It does not test share-price accuracy or
+approve publication. Synthetic tests and current-statement reconciliation are
+not historical validation of the new forecasts.
+
+### Observed multiple panels (company v5.1)
+
+`company_multiples.py` now derives the PE range for `comparable_forward_pe` and
+`historical_same_basis_pe`; these methods reject manually supplied `low`/`high`.
+Only `analyst_sensitivity` accepts explicit hypothetical bounds. All three remain
+research outputs, and today's observed multiples are not a prediction of the
+multiple the market will use in twelve months.
+
+The multiple case supplies a `panel` with `selection` and `observations`:
+
+- Selection records `registered_at`, `basis`, the complete unique `tickers`, and
+  inclusive `start`/`end` observation dates. A current peer panel contains every
+  named peer exactly once, at least three peers excluding the subject. A historical
+  panel contains only the subject and at least eight nonoverlapping forward years.
+  These are minimal research panel rules, not statistical acceptance thresholds.
+- Each observation records `id`, `ticker`, and `comparability_basis`, plus `price`
+  and `eps` objects. Both need `value`, `currency`, `share_basis`, `captured_at` and
+  `source_ref` into the company's hashed source catalog. Price has `as_of`; EPS
+  has `available_at`, `period_start`, `period_end`, `earnings_definition`, `kind`
+  (consensus_forecast/company_guidance/analyst_forecast), `vintage_basis` and
+  `value_origin=direct_earnings_forecast`. Price-divided-by-provider-PE EPS is not
+  independent earnings evidence. Source hashes do not prove the declarations true.
+- EPS must be known at the price observation and cover its forward year, with the
+  exact accounting definition used by the target calculation. Price and EPS must
+  have consistent currency and split/share bases. Current peer prices expire after
+  seven days. Capture times never renew observation times.
+- The range is the unweighted, linearly interpolated 25th/75th percentiles of
+  observed PE, with median, each observation and all exclusions retained. Missing
+  selected peers, invalid rows or overlap exclusions withhold the range rather
+  than quietly select a favourable subset. A historical sample needs an explicit
+  reviewed nonoverlapping panel. Dispersion is not a probability interval.
+
+The consistency requirement follows the
+[relative PE framework](https://pages.stern.nyu.edu/~adamodar/New_Home_Page/lectures/relpe.htm).
+The fixed sample floors, maximum age and percentile convention are our research
+design choices and remain subject to independent review before any acceptance.
+
+Earnings evaluator version 2 additionally requires explicit `tickers` in the
+preregistered specification and the exact `spec_hash` on every forecast, valid
+64-character input/receipt/source hashes, and actual capture after disclosure.
+When the specification declares a fixed `baseline_eps`, each prediction must
+retain that exact value. Timezone-normalized creation times select the earliest
+nonoverlapping prediction. Earlier specifications/forecasts remain immutable;
+create a new registered specification and new predictions for this evaluator,
+never edit older records to make them pass. Hash syntax/binding does not verify
+the underlying artifact contents, and this evaluator never approves publication.
+
+### Disclosed opening balances (company v5.2)
+
+Every packet now supplies an evidence-bearing `opening_balance` with `date`,
+`cash_and_equivalents`, `liquid_investments`, `restricted_cash_outside_pool`,
+`current_debt`, `noncurrent_debt`, `closing_common_shares`, and `debt_basis`.
+Its `reported` object separately anchors `opening_liquidity`, `opening_debt`,
+`opening_shares`, and `cash_including_restricted`. Arithmetic mismatches stop
+forecasts. Every scenario must use the exact disclosed date and computed opening
+balances; changing starting cash to cure a funding gap is rejected. Starting at a
+different date requires an explicitly implemented intervening bridge, not prose.
+
+Restricted cash is reconciled to the cash-flow statement but excluded from the
+operating pool. Reported debt carrying value is not automatically principal or
+all senior claims. Every quarter now requires `cash.debt_non_cash_change` to
+reconcile noncash carrying-value changes separately from financing cash. Zero is
+an explicit analyst assumption where supplied, not a missing-field default.
+
+
+### Conditional business value to common equity
+
+`company_equity.py` supplies a pure bridge at a single settlement date. The
+optional scenario `business_equity` case declares USD/millions, full consolidated
+operating value before financial claims, a complete list of `required_business_ids`
+and `businesses`, `nonoperating_assets`, and a complete `required_claim_ids`/`claims`
+inventory. Each row has `economic_id`, `date`, `basis`, and `source_refs`. Repeated
+economic IDs across any component are rejected. Corporate operating values may
+be negative; nonoperating additions must be excess unrestricted cash or separately
+valued nonoperating equity, never restricted cash or consolidated subsidiary EV.
+
+Claims select exactly one treatment: `cash` with a cash amount; `shares` with
+incremental `new_shares` and incremental `cash_proceeds`; `net_share_warrant` or
+`net_cash_warrant` with underlying shares/strike; `not_triggered` with explicit
+false trigger state and rationale; or `unresolved`, which withholds the value.
+Incompatible settlement fields are rejected. Net warrants require
+`exercise_basis=immediate_exercise_at_bridge_date`. The monotone settlement equation
+solves the common price without taking today's market price as an input. It does
+not price an unexpired option's time value. Nonpositive residual wealth stays
+unknown pending a restructuring model, rather than publishing a negative target.
+
+The company host binds the date to an explicit forecast quarter end and the
+outstanding share anchor to that quarter's closing shares, validates every source
+reference, and withholds the bridge for an unfunded operating path. Separately
+settled claims must not already be in those shares, cash/assets or operating
+values; matching economic IDs can detect declared duplicates but cannot prove
+the completeness/truth of an analyst's inventory. Business values and claim
+economics still require independent review. This bridge is not a twelve-month
+market target, never changes publication status, and has no accepted
+business-value inputs. Missing cases return unknown.
+
+### Explicit consolidated operating cash flow
+
+`company_cashflow.py` calculates conditional operating value before financial
+claims, with no market price input. A scenario may supply `operating_dcf` with
+dated evidence, USD/millions, `date`, consecutive `periods`, and `terminal`.
+Cashflow basis is `consolidated_unlevered_after_operating_tax`; SBC remains an
+expense with no addback. Operating leases stay expensed; finance leases belong
+in capital investment and the corresponding debt/claims bridge. Explicit tax
+and capital assumptions are mandatory.
+
+Each period declares operating profit, cash operating tax excluding financing
+tax shields, D&A, gross capital investment, capital grants, working-capital
+increase and WACC. Debt cashflows, interest, partner distributions and share
+financing are rejected from this path. The host binds operating profit to its
+complete forecast quarters where periods overlap; cash taxes and reinvestment
+need separately reviewed assumptions rather than borrowing net-income taxes.
+Period-end discount factors use actual elapsed days.
+
+The terminal declares next-year normalized NOPAT, incremental ROIC, growth and
+WACC. Required reinvestment is growth/ROIC; terminal cashflow is NOPAT times one
+minus that fraction. Growth must be below WACC and no greater than ROIC. The
+receipt reports explicit cashflow PV, terminal PV and its share of total value.
+These arithmetic constraints do not validate the stable-state transition.
+
+A `business_equity` case can set `use_consolidated_dcf=true`, require only the
+`consolidated` business ID, and leave `businesses` empty. The host inserts its
+computed operating value at the exact same date, refusing additional segment
+values. Remaining assets/claims and closing shares follow the equity bridge
+contract. Missing long-term inputs remain unknown. No consolidated
+DCF assumptions have been accepted; this connection alone does not approve
+valuation publication or establish forecast accuracy.
+
+### Market-target evaluation protocol
+
+`market_validation.py` evaluates explicitly frozen predictive prices separately
+from operating value and EPS. It uses the first XNYS close on/after twelve calendar
+months from forecast creation (Feb 29 maps to Feb 28), retaining actual close
+times and the canonical calendar's supported-range failures. Prices and outcomes
+use the same forecast-date split/share basis and exclude dividends. A genuine
+zero outcome is retained, not dropped as an invalid positive-price observation.
+
+The specification pins tickers, model version, alpha, and a constant-price
+baseline with a fixed fractional halfwidth. Forecasts bind `spec_hash`, input and
+receipt hashes, source/capture clocks for anchor prices, target close, share basis,
+point/low/high and the nominal interval level. Baseline bounds are checked against
+the frozen formula, not merely a matching prose label. Only `interval_kind=predictive`
+can be scored: deterministic operating scenario extrema are not probability bands.
+
+Outputs include anchor-normalized absolute price error versus unchanged price,
+coverage, width, proper interval score versus the fixed baseline, and explicit
+pending, overlapping, out-of-scope and abstained counts. Earliest nonoverlapping
+forecasts are selected per ticker; cross-company common shocks are still a stated
+dependence limitation. Revised actuals require explicit vintage selection.
+
+This is a descriptive evaluator, not a release switch. It does not establish
+provenance, calibrated probabilities or statistically significant outperformance.
+The current diagnostic specification has no automatic acceptance thresholds;
+those and the dependence-aware decision method need independent preregistration
+before using evaluation results to promote a model. No current live valuation has
+been accepted and no real price forecast is invented to populate the evaluator.
+
+### 暂存发布与撤回接口
+
+`releases.py` 提供纯函数发布日志校验、CAS准备及精确报告选择；
+`quant/report/valuation_report.py` 的 `release_fyi` 每次渲染重新检查撤回和到期。
+按公司与输出种类分别绑定输入、代码、候选、独立复核及五类验收证据。
+最新发布失效不会回退旧价；重新发布旧候选须在此前发布事件之后重新复核，
+并继续满足当前输入/代码与到期约束。条件公允价值范围与概率预测区间分开显示。
+
+此接口默认关闭，尚未替代日更的全局停用边界。持久化控制器还需提供专用锁、
+原子日志存储、可信复核来源、实时输入/代码摘要以及上线开关；纯函数CAS不等于
+跨进程锁。哈希与不同reviewer_id不证明复核者身份、证据真实性或统计验收正确。
+本地合成演练不能作为真实模型验收证据。现有市场评价的not_determined不得转换为passed。
+
+持久化接口现由 `quant/ops/valuation_release.py` 提供：submit默认预览，apply时专用锁内
+重新读取registry与host current_context，CAS检查后单文档原子替换，artifact与event同次可见。
+同event_id同请求重试只返回已有提交，内容不同拒绝；already_applied是历史写入事实，
+不表示目前仍获准发布。读取端每次检查当前撤回、输入/代码与可信review hash集合。
+current_context应由宿主从真实当前状态提供，固定参数仅适合已冻结上下文和合成演练。
+控制器不自行认证reviewer；可信复核来源的装配和生产日更接线仍待完成。全局目标价停用不变。
+
+DCF期间可提供lease_details，明确同合同范围经营租赁费用/现金、本金/利息、新融资租赁资产和
+已包含的融资租赁折旧。只有营运资本排除租赁应计、现金经营税已含经营租赁扣除且排除融资
+利息税盾时才计算费用减现金的调整。新增finance资产须勾稽到总资本投入，本金/利息不会再扣
+一次FCFF。不同范围的披露差额不能直接填写同范围标签；缺省不启用该附加桥，原输入口径
+仍需各自审核。租赁分类变化后的税、折旧、租金与稳定期假设仍需完整预测。
+
+income可显式选择nonoperating_basis=combined_net并给出net_nonoperating及定义，适用于只映射
+到公司披露/指引净额的材料。此时不允许同时提供interest_income/interest_expense/
+other_nonoperating，避免双计或用伪造零填补未披露分项。默认split_components兼容原输入；
+合并净额不提供利率重定价暴露，也不能把其中投资收益解释为经常性经营盈利。
+
+季度cash可提供income_cash_timing：tax_cash_paid_net允许净退税；interest_cash_paid与
+interest_cash_received须成对输入，且明确不含已有capitalized_interest_cash。桥从利润表税费和
+分拆利息出发，把选定应计额替换为现金，绝不改变EPS。combined_net可仅桥接税，不能凭净额
+推断利息。必须声明WC、noncash_adjustments与other_cash_flows均排除这些选定项目；该声明
+不证明源数据范围正确，仍需独立勾稽。未提供时收据为not_separately_bridged，不声称已核实
+付款时间；本桥不生成税负债或应计利息余额，也不替代无杠杆DCF的经营现金税。
+
+DCF期间可提供capital_details，按有形资产、无形资产（两者均排除融资租赁）、融资租赁、
+其他经营资本分拆新增投资与已在EBIT扣除的D&A。四类必须齐备、分别说明依据，合计须与
+FCFF资本扣除及D&A加回一致；与lease_details同时使用时融资租赁分项也须一致。
+营运资本须排除上述资产，新增投资口径排除偿还旧融资，避免重复计入。余额变化不能直接
+充当新增投资或期间摊销。缺省not_separately_reconciled；算式通过仅为arithmetically_reconciled，
+source_completeness仍为not_established，零值需要证据而不是填写标签即可放行。全局发布停用不变。

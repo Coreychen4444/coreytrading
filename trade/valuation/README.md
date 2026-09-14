@@ -9,6 +9,12 @@ Canonical runtime paths (constants in `quant/core/paths.py`):
 - `response_events.jsonl` — optional owner-produced, dated event surprises and mature split-adjusted price outcomes; schema example below.
 - `response_queries.json` — optional current conditional feature scenarios, each with source, known_at and fixed valid_until.
 - `calibration.jsonl` — append-only reconciliation/backtest output: each predicted quantity against what later happened.
+- `company_models.json` — explicit company research packets keyed by ticker;
+  source-backed actual statements and separately labelled analyst scenarios.
+  The input contract and refusal to fall back to legacy prices are documented in
+  `quant/valuation/README.md`. This catalog is private and grants no publication
+  or trading permission. Sources and immutable trial receipts remain under
+  `var/valuation-daily/rebuild/`; refreshing broker data never rewrites this file.
 
 Create a private file by copying the matching `*.example.*` file and removing `.example`, then replace every synthetic value; ask for the missing facts instead of guessing them. For a missing optional input, the matching `*.example.*` file documents the schema; replace every synthetic value with reviewed evidence before creating a runtime file. Missing facts remain explicit gaps.
 
@@ -51,3 +57,10 @@ mapping. It uses fictional concepts and cannot fetch real data. Prepared SEC
 supplements remain detached research inputs until explicitly placed in a frozen
 valuation package; they do not overwrite source caches. Broker refreshes retain
 capture vintages under the fundamentals cache's snapshots directory.
+
+`releases.json` is the persistent release journal plus immutable, content-addressed
+candidate/review/evidence documents. It is business audit history, not a disposable
+cache. The owner is `quant/ops/valuation_release.py`; all applied updates use its
+dedicated lock and atomic document replacement. Revocation appends history and
+preserves prior artifacts. Never truncate this file to recover a failed release.
+The controller is staged; no real company release has been approved or installed.

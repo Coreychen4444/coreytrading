@@ -149,16 +149,15 @@ def _zoned_agent(**z):
             "zones": zones}
 
 
-def test_derive_clean_watchlist_card_gets_normal_participation_ceiling():
-    """干净候选 → 常规参与, cap = NOTIONAL_CAP 满额 (2026-08-13 cap 二值)。
-    since = 结构锚定日, 不是执行日 (铁则 2)。"""
+def test_derive_clean_watchlist_card_waits_for_a_gate():
+    """干净候选 → 候选·等 gate, cap 0 (两种模式: 「常规参与 cap 40%」无 gate 的第三路径退役;
+    入场 = gate 转移 或 抄底计划)。since = 结构锚定日, 不是执行日 (铁则 2)。"""
     from quant.core.structure import derive_card_regime
-    from quant.core.sizing import NOTIONAL_CAP
     a = _zoned_agent()
-    assert derive_card_regime(a, bucket="watchlist", today="2026-08-06") == "derived_normal"
+    assert derive_card_regime(a, bucket="watchlist", today="2026-08-06") == "derived_wait_gate"
     cr = a["current_regime"]
-    assert cr["cap_pct_nav"] == NOTIONAL_CAP
-    assert cr["participation"] == "zone_eligible"
+    assert cr["cap_pct_nav"] == 0 and cr["participation"] == "gate_only"
+    assert cr["name"] == "候选·等 gate" and "常规参与退役" in cr["reason"]
     assert cr["since"] == "2026-08-04"                # anchored_on, 不是 today
     assert cr["source"] == "card"
 
@@ -197,7 +196,7 @@ def test_derive_card_source_is_recomputed_on_structure_change():
     from quant.core.structure import derive_card_regime
     a = _zoned_agent()
     derive_card_regime(a, bucket="watchlist", today="2026-08-06")
-    assert a["current_regime"]["name"] == "常规参与"
+    assert a["current_regime"]["name"] == "候选·等 gate"
     a["zones"]["reclaim_gates"] = [{"level": 92.5}]
     derive_card_regime(a, bucket="watchlist", today="2026-08-07")
     assert a["current_regime"]["name"] == "修复观察"
@@ -409,3 +408,60 @@ def test_mech_stale_quiet_legs_on_missing_inputs():
         ["valid_until 2026-08-01 已过期"]
     hits = zone_mech_stale({}, {"last_reviewed": "2026-08-01"}, [], "2026-08-25")
     assert hits and "last_reviewed" in hits[0]
+
+
+# ── 期权 BUY 的正股价位 flags (期权锚定正股回踩 z1, 不追高) ──
+
+_ZB = {"z1": [216.6, 220.4], "z2": [209.0, 212.8], "no_chase": 220.4,
+       "trim": [232.0, 236.3], "stop": 200.15}
+
+
+def test_option_fill_flags_whole_bar_above_z1_is_a_chase():
+    flags, amb = structure.option_fill_flags(221.0, 223.5, _ZB)
+    assert "above_z1" in flags and "above_no_chase" in flags and amb is False
+
+
+def test_option_fill_flags_inside_z1_is_clean():
+    assert structure.option_fill_flags(217.0, 219.9, _ZB) == ([], False)
+
+
+def test_option_fill_flags_bar_straddling_z1_top_is_ambiguous_not_flagged():
+    """保守: 整根 bar 在带外才判, 跨带归人判 (不冤枉也不放过)。"""
+    flags, amb = structure.option_fill_flags(219.0, 222.0, _ZB)
+    assert flags == [] and amb is True
+
+
+def test_option_fill_flags_gap_between_zones_is_not_a_chase():
+    assert structure.option_fill_flags(213.5, 215.0, _ZB) == ([], False)
+
+
+def test_option_fill_flags_whole_bar_below_z2_is_breakdown_buy():
+    flags, amb = structure.option_fill_flags(205.0, 208.5, _ZB)
+    assert flags == ["below_z2"] and amb is False
+    flags, amb = structure.option_fill_flags(208.0, 210.0, _ZB)      # 跨 z2 下沿
+    assert flags == [] and amb is True
+
+
+def test_option_fill_flags_trim_and_no_chase_semantics_match_stock():
+    flags, _ = structure.option_fill_flags(233.0, 235.0, _ZB)
+    assert set(flags) == {"above_z1", "above_no_chase", "in_trim_zone"}
+    zb = dict(_ZB, no_chase=None, trim=None)
+    assert structure.option_fill_flags(221.0, 223.5, zb) == (["above_z1"], False)
+
+
+def test_cards_missing_bottom_stamp_flags_unstamped_bottom_positions():
+    """抄底成交落了 lot (entry_class + 止损 = 止跌低) 但持仓卡没盖章 / 卡 stop ≠ 止跌低 → 点名;
+    盖好了不点; 已平仓 (qty 0) 不点。"""
+    from quant.core.structure import cards_missing_bottom_stamp
+    lot = {"qty": 10, "avg_cost": 205.0, "entry_class": "reversal_probe", "stop_loss": 194.8}
+    unstamped = {"tickers": {"TST": {"broker": {"qty": 10}, "lots": {"position": [lot]},
+                                      "agent": {"zones": {"stop_level": 180.0}}}}}
+    out = cards_missing_bottom_stamp(unstamped)
+    assert len(out) == 1 and out[0].startswith("TST: lot 止损 194.8 vs 卡 stop 180.0")
+    stamped = {"tickers": {"TST": {"broker": {"qty": 10}, "lots": {"position": [lot]},
+                                    "agent": {"entry_class": "reversal_probe", "zones": {"stop_level": 194.8}}}}}
+    assert cards_missing_bottom_stamp(stamped) == []
+    flat = {"tickers": {"TST": {"broker": {"qty": 0}, "lots": {"position": [lot]}, "agent": {}}}}
+    assert cards_missing_bottom_stamp(flat) == []
+    assert cards_missing_bottom_stamp({"tickers": {"X": {"broker": {"qty": 3}, "lots": {"position": [{"qty": 3}]},
+                                                          "agent": {}}}}) == []

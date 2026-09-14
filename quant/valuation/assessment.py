@@ -19,7 +19,7 @@ from quant.core.agent_contracts import canonical_hash
 from quant.core.io_json import atomic_write_json, read_json
 from quant.core.timeutil import ET
 from quant.core.valuation_contracts import finite
-from quant.valuation import archetypes, evidence, model, overlays, response, scenarios
+from quant.valuation import archetypes, company_model, evidence, model, overlays, response, scenarios
 
 
 def _timestamp(value):
@@ -214,7 +214,10 @@ def build(data: dict, *, as_of: str, macro_scenarios=None, evidence_refs=None) -
     rf, erp, erp_basis = resolve_market(inputs, as_of=as_of,
         observed_rate=market_rate(value.get("market_snapshots") or [], as_of=as_of))
     output = {"as_of": as_of, "model_version": model.MODEL_VERSION, "market": {**rf, "erp": erp, "erp_basis": erp_basis},
-              "input_hash": canonical_hash(value), "tickers": {}, "authority": "analysis_only"}
+              "input_hash": canonical_hash(value), "tickers": {}, "authority": "analysis_only",
+              "publication": model.publication_policy()}
+    if value.get("company_models"):
+        output["model_version"] += "+" + company_model.VERSION
     names = data.get("selected_tickers") or sorted((inputs.get("tickers") or {}))
     for ticker in names:
         bundle = (value.get("fundamentals") or {}).get(ticker)
@@ -224,6 +227,22 @@ def build(data: dict, *, as_of: str, macro_scenarios=None, evidence_refs=None) -
                   "short_term": _short_term(value, ticker, bundle, cutoff=cutoff, as_of=as_of)}
         output["tickers"][ticker] = result
         try:
+            # A company package owns its methodology. Failure/expiry cannot fall
+            # back to the rejected archetype model. It does not require US10Y to
+            # reconcile statements or calculate an explicit earnings path.
+            if ticker in (value.get("company_models") or {}):
+                packet = value["company_models"][ticker]
+                if not isinstance(packet, dict) or packet.get("ticker") != ticker:
+                    raise ValueError("company_model_ticker_mismatch")
+                research = company_model.build(packet, as_of=as_of)
+                result.update(status="company_research", company_research=research)
+                result["missing"].append("company_model_not_yet_accepted")
+                if macro_scenarios:
+                    result["missing"].append("macro_scenarios_not_applied_to_company_model")
+                if research["status"] == "input_mismatch":
+                    result.update(status="unknown")
+                    result["missing"].append("company_disclosure_reconciliation_failed")
+                continue
             if rf["rf"] is None:
                 raise ValueError(rf["basis"])
             bundle, supplement_receipt = prepare_company(bundle, ticker=ticker, as_of=as_of)

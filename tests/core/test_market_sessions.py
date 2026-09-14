@@ -136,3 +136,11 @@ def test_future_calendar_gate_is_closed_except_calendar_independent_weekly():
     assert sessions.scheduled_session_due("weekly", future)["due"] is True
     with pytest.raises(sessions.MarketSessionError):
         sessions.scheduled_session_due("anything", future)
+
+
+def test_add_sessions_follows_the_exchange_calendar():
+    """reversal_probe 有效期的日历口径: 交易日计数, 周末/节假日不算。"""
+    assert sessions.add_sessions("2026-09-11", 3) == date(2026, 9, 16)   # 周五 +3 → 周三
+    assert sessions.add_sessions("2026-09-11", 1) == date(2026, 9, 14)
+    assert sessions.add_sessions("2026-11-25", 1) == date(2026, 11, 27)  # 跨感恩节
+    assert sessions.add_sessions("2026-09-12", 0) == date(2026, 9, 11)   # 周六 → 前一交易日

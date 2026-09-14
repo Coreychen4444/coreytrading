@@ -195,3 +195,62 @@ def test_pick_expiry_default_keeps_old_nearest():
     cands = [("2026-08-14", 3), ("2026-09-18", 38), ("2026-10-16", 66)]
     assert op.pick_expiry(cands, 45,) == "2026-09-18"
     assert op.pick_expiry([("2026-08-14", 3)], 45) is None  # 全被滤 → None
+
+
+# ── 期权限价锚 = 正股 z1 回踩: entry_guard 传 anchor_note, render 播出 ──
+
+def _plan_stub(**over):
+    p = {"ticker": "SYN", "spot": 116.1, "expiry": "2027-01-15", "dte": 270, "type": "call",
+         "iv": {"iv_percentile": 30.0, "samples": 80, "reliable": True, "latest_iv_pct": 35.0},
+         "gate": {"verdict": "ok", "note": "n"}, "hard_gate": {"allowed": True, "reason": "r"},
+         "delta_band": (0.6, 0.8), "eligible_count": 3,
+         "chosen": {"strike": 100.0, "delta": 0.7, "bid": 60.0, "ask": 62.0, "mid": 61.0,
+                    "spread_pct": 3.3, "oi": 900.0, "iv": 35.0, "code": "US.SYN270115C100000"},
+         "rungs": [{"underlying": 112.0, "premium_flat_iv": 58.0, "premium_iv_bump": 60.5}],
+         "size": None}
+    p.update(over)
+    return p
+
+
+def test_render_shows_the_z1_anchor_when_entry_guard_passes_it():
+    txt = op.render(_plan_stub(anchor_note="期权限价锚 = 正股 z1 回踩 (zone 档), 不追"))
+    assert "锚: 期权限价锚 = 正股 z1 回踩" in txt
+    assert "锚:" not in op.render(_plan_stub())          # CLI 不传 = 不显示
+
+
+# ── reversal_probe 倒推 cap 的两个零件 + HV 分位代理 ──
+
+def test_loss_frac_at_stop_is_first_rung_to_stop_projection():
+    plan = {"rungs": [{"premium_flat_iv": 10.0}, {"premium_flat_iv": 9.0}], "premium_at_stop": 7.2}
+    assert abs(op.loss_frac_at_stop(plan) - 0.28) < 1e-9
+    assert op.loss_frac_at_stop({"rungs": [], "premium_at_stop": 7.2}) is None
+    assert op.loss_frac_at_stop({"rungs": [{"premium_flat_iv": 10.0}]}) is None
+    assert op.loss_frac_at_stop({"rungs": [{"premium_flat_iv": 10.0}], "premium_at_stop": 11.0}) is None
+
+
+def test_apply_premium_cap_takes_the_tighter_cap_and_resizes():
+    rungs = [{"premium_flat_iv": 10.0, "premium_iv_bump": 11.0},
+             {"premium_flat_iv": 9.0, "premium_iv_bump": 10.0},
+             {"premium_flat_iv": 8.0, "premium_iv_bump": 9.0}]
+    plan = {"rungs": rungs, "cap_used": 5000.0, "cap_note": "组合层"}
+    op.apply_premium_cap(plan, 1200.0, "倒推")
+    assert plan["cap_used"] == 1200.0 and plan["cap_note"] == "倒推"
+    assert [t["shares"] for t in plan["size"]["tiers"]] == [1]        # floor(1200/1000) = 1 张单档
+    plan = {"rungs": rungs, "cap_used": 5000.0, "cap_note": "组合层"}
+    op.apply_premium_cap(plan, 9000.0, "倒推")
+    assert plan["cap_used"] == 5000.0 and plan["cap_note"] == "组合层"   # 外部更松 → 不覆盖
+    assert sum(t["shares"] for t in plan["size"]["tiers"]) == 5
+    assert op.apply_premium_cap({"rungs": []}, 100.0, "x") == {"rungs": []}
+
+
+def test_build_hard_gate_uses_the_hv_proxy_when_iv_series_is_unreliable(monkeypatch):
+    calls = []
+    monkeypatch.setattr(op, "fetch_chain", lambda *a, **k: calls.append(1) or None)
+    monkeypatch.setattr(op.iv_logger, "percentile", lambda t: {
+        "ticker": t, "latest_iv_pct": 56.0, "samples": 20, "iv_percentile": 90.0, "reliable": False})
+    p = op.build("INTC", [100.0, 98.0], 1500.0, target_dte=270, stop=90.0, hv_pct=23.0)
+    assert p["hard_gate"]["basis"] == "hv_pct" and p["hard_gate"]["allowed"]
+    assert calls == [1] and p["error"].startswith("链数据不可得")      # 过门才拉链
+    p = op.build("NVDA", [100.0, 98.0], 1500.0, target_dte=270, stop=90.0, hv_pct=85.0)
+    assert "IV 硬门槛 VETO" in p["error"] and p["hard_gate"]["basis"] == "hv_pct"
+    assert calls == [1]

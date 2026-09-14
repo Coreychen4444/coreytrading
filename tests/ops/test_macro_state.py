@@ -5,6 +5,7 @@
 """
 import json
 
+from quant.core import macro_playbook as mp
 from quant.ops import macro_state as state
 
 

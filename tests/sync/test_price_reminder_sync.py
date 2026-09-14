@@ -756,3 +756,29 @@ def test_z1_budget_follows_staleness_eviction(monkeypatch):
     monkeypatch.setattr(tgs.book, "bars", lambda t: fresh)
     assert "MU" in prs.z1_budgets({"tickers": {}}, wl, "2026-08-25", nav=18651.0,
                                   quote_of=QUOTE, veto_of=UP)
+
+
+def test_reversal_probe_oz1_line_does_not_need_the_stock_whitelist():
+    """反转探针 : 合约首档限价照画, 不看 budgets (正股 cap 0); 信号过期不画。"""
+    plan = {"NBIS": {"code": "NBIS270618C90000", "expiry": "2027-06-18",
+                     "entry_class": "reversal_probe", "valid_until": "2099-01-01",
+                     "tiers": [{"premium": 12.5, "contracts": 1}]}}
+    lines, _ = prs.desired_lines(POS, WL, TODAY, budgets={}, option_plans=plan)
+    oz = [d for d in lines if d["kind"] == "oz1"]
+    assert [(d["ticker"], d["value"], d["note"]) for d in oz] == [("NBIS270618C90000", 12.5, "oz1:1")]
+    plan["NBIS"]["valid_until"] = "2000-01-01"
+    lines, notes = prs.desired_lines(POS, WL, TODAY, budgets={}, option_plans=plan)
+    assert not [d for d in lines if d["kind"] == "oz1"] and any("信号已过期" in n for n in notes)
+
+
+def test_bottom_stock_first_rung_line_is_drawn_with_the_stop_in_the_note():
+    """抄底正股腿 : 首档限价线 (kind z1) 不看 budgets, 备注 = 股数 + 止损 (止跌低); 过期不画。"""
+    plan = {"NBIS": {"entry_class": "reversal_probe", "valid_until": "2099-01-01", "support": 78.4,
+                     "stock": {"tiers": [{"price": 84.0, "shares": 5}], "cap_frac": 0.05}}}
+    lines, _ = prs.desired_lines(POS, WL, TODAY, budgets={}, option_plans=plan)
+    z1 = [d for d in lines if d["ticker"] == "NBIS" and d["kind"] == "z1"]
+    assert [(d["value"], d["note"]) for d in z1] == [(84.0, "抄底首档:5股 止损78.4")]
+    plan["NBIS"]["valid_until"] = "2000-01-01"
+    lines, notes = prs.desired_lines(POS, WL, TODAY, budgets={}, option_plans=plan)
+    assert not [d for d in lines if d["ticker"] == "NBIS" and d["kind"] == "z1"]
+    assert any("信号已过期" in n for n in notes)

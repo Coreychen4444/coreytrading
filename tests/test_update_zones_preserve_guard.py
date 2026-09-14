@@ -129,7 +129,7 @@ def test_expected_revision_accepts_current_card_and_rejects_replay(upz):
     mod, wl = upz
     before = json.loads(wl.read_text())["tickers"]["GOOGL"]
     args = ["--ticker", "GOOGL", "--bucket", "watchlist", "--key-risk", "reviewed",
-            "--expected-revision", mod.canonical_hash(before)]
+            "--expected-revision", mod.card_revision(before)]
     assert mod.main(args) == 0
     after = wl.read_bytes()
     assert json.loads(after)["tickers"]["GOOGL"]["agent"]["key_risk"] == "reviewed"
@@ -158,14 +158,14 @@ def test_expected_revision_is_checked_after_acquiring_lock(upz, monkeypatch):
     monkeypatch.setattr(mod, "state_lock", interleaved_lock)
     with pytest.raises(RuntimeError, match="revision conflict"):
         mod.main(["--ticker", "GOOGL", "--bucket", "watchlist", "--key-risk", "stale",
-                  "--expected-revision", mod.canonical_hash(old_card)])
+                  "--expected-revision", mod.card_revision(old_card)])
     assert wl.read_bytes() == updated[0]
 
 
 def test_revision_is_per_ticker_not_whole_document(upz):
     mod, wl = upz
     doc = json.loads(wl.read_text())
-    revision = mod.canonical_hash(doc["tickers"]["GOOGL"])
+    revision = mod.card_revision(doc["tickers"]["GOOGL"])
     doc["generated_at"] = "2099-01-01T00:00:00Z"
     doc["tickers"]["OTHER"] = json.loads(json.dumps(doc["tickers"]["GOOGL"]))
     doc["tickers"]["OTHER"]["agent"]["key_risk"] = "other update"
@@ -178,7 +178,7 @@ def test_revision_is_per_ticker_not_whole_document(upz):
 def test_missing_card_uses_null_revision(upz):
     mod, wl = upz
     args = ["--ticker", "NEW", "--bucket", "watchlist", "--thesis", "synthetic",
-            "--expected-revision", mod.canonical_hash(None)]
+            "--expected-revision", mod.card_revision(None)]
     assert mod.main(args) == 0
     before = wl.read_bytes()
     with pytest.raises(RuntimeError, match="revision conflict"):
@@ -186,22 +186,73 @@ def test_missing_card_uses_null_revision(upz):
     assert wl.read_bytes() == before
 
 
-def test_positions_revision_covers_broker_and_preserves_its_update(upz):
+def test_quote_refresh_is_not_a_conflict_but_the_newest_broker_fact_survives(upz):
+    """判据收窄到 writer 自己的地盘。
+
+    旧判据哈希整张卡 → stock_fetch 每轮 heartbeat 刷 broker 报价, 任何耗时几分钟的
+    画卡 run 撞上就空转。报价刷新不是并发写; 但写盘时
+    必须保留**最新**那份 broker 事实, 而不是提案冻结时的那份。
+    """
     mod, wl = upz
     card = json.loads(wl.read_text())["tickers"]["GOOGL"]
     card.update(status="active", broker={"qty": 2, "current_price": 360},
                 lots={"base": [], "position": []}, position_summary={}, pending_orders=[])
-    revision = mod.canonical_hash(card)
-    card["broker"]["qty"] = 3
+    revision = mod.card_revision(card)
+    card["broker"] = {"qty": 2, "current_price": 372}      # 提案在跑, heartbeat 刷了报价
+    card["moomoo_synced_at"] = "2026-09-09T04:26:11.168543Z"
+    mod.POSITIONS_PATH.write_text(json.dumps({"tickers": {"GOOGL": card}}))
+    assert mod.main(["--ticker", "GOOGL", "--bucket", "current", "--key-risk", "fresh",
+                     "--expected-revision", revision]) == 0
+    current = json.loads(mod.POSITIONS_PATH.read_text())["tickers"]["GOOGL"]
+    assert current["broker"] == card["broker"], "写盘必须保留最新报价, 不回滚"
+    assert current["moomoo_synced_at"] == card["moomoo_synced_at"]
+    assert current["agent"]["key_risk"] == "fresh"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda card: card["agent"].update(key_risk="concurrent redraw"),
+    lambda card: card["agent"].setdefault("valuation_note", "concurrent"),
+    lambda card: card.update(status="closed"),
+    lambda card: card.update(lots={"base": [], "position": [{"qty": 1}]}),
+    lambda card: card["instrument"].update(role="core_theme"),
+], ids=["agent_field", "agent_new_field", "status", "lots", "instrument"])
+def test_real_concurrent_card_change_still_aborts_before_writing(upz, mutate):
+    """判据是黑名单: 只有列名的宿主刷新字段出局, 其余 (含未来新字段) 一律进哈希。
+    宿主刷新字段连"有没有"都不算 (首次落 broker 块也是刷新), 其余全在判据里。"""
+    mod, wl = upz
+    card = json.loads(wl.read_text())["tickers"]["GOOGL"]
+    card.update(status="active", broker={"qty": 2, "current_price": 360},
+                lots={"base": [], "position": []}, position_summary={}, pending_orders=[])
+    revision = mod.card_revision(card)
+    mutate(card)
     mod.POSITIONS_PATH.write_text(json.dumps({"tickers": {"GOOGL": card}}))
     before = mod.POSITIONS_PATH.read_bytes()
     with pytest.raises(RuntimeError, match="revision conflict"):
         mod.main(["--ticker", "GOOGL", "--bucket", "current", "--key-risk", "stale",
                   "--expected-revision", revision])
     assert mod.POSITIONS_PATH.read_bytes() == before
-    # A fresh proposal may update its own fields while retaining the broker fact.
-    assert mod.main(["--ticker", "GOOGL", "--bucket", "current", "--key-risk", "fresh",
-                     "--expected-revision", mod.canonical_hash(card)]) == 0
-    current = json.loads(mod.POSITIONS_PATH.read_text())["tickers"]["GOOGL"]
-    assert current["broker"] == card["broker"]
-    assert current["agent"]["key_risk"] == "fresh"
+
+
+@pytest.mark.parametrize('flag', ['--constraint-from', '--constraint-until'])
+def test_retired_constraint_dates_cannot_be_written(upz, flag):
+    mod, wl = upz
+    before = wl.read_bytes()
+    with pytest.raises(SystemExit):
+        mod.parse_args(['--ticker', 'GOOGL', '--bucket', 'watchlist', flag, '2026-09-11'])
+    assert wl.read_bytes() == before
+    args = mod.parse_args(['--ticker', 'GOOGL', '--bucket', 'watchlist',
+                           '--constraint-from', 'none', '--constraint-until', 'none'])
+    action = {'constraints': {'from': '2026-09-08', 'until': '2026-09-11', 'vehicle': 'leaps'}}
+    mod.apply_constraints(action, args)
+    assert action['constraints'] == {'vehicle': 'leaps'}
+
+
+def test_time_window_cleanup_does_not_refresh_analysis(upz):
+    mod, wl = upz
+    doc = json.loads(wl.read_text())
+    card = doc['tickers']['GOOGL']
+    card['agent']['action']['constraints'] = {'until': '2026-09-11', 'vehicle': 'leaps'}
+    wl.write_text(json.dumps(doc))
+    mod.main(['--ticker', 'GOOGL', '--bucket', 'watchlist', '--constraint-until', 'none'])
+    del card['agent']['action']['constraints']['until']
+    assert json.loads(wl.read_text())['tickers']['GOOGL'] == card

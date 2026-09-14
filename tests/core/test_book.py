@@ -157,3 +157,21 @@ def test_power_room_frozen_inputs_match_disk_calculator(tmp_path, monkeypatch):
     assert book.power_room("2026-08-11", account=account, events=events) == expected
     assert expected["spent_today"] == 600
     assert book.power_room("2026-08-11", account={}, events=[])["room"] is None
+
+
+def test_hv20_percentile_of_reads_the_kline_cache_once(tmp_path):
+    """HV 分位代理的唯一读法 (IV 序列不可信时的 IVP,)。"""
+    import random
+    rng = random.Random(3)
+    px, closes = 100.0, []
+    for _ in range(300):
+        px *= 1 + rng.uniform(-0.03, 0.03)
+        closes.append(px)
+    _write(tmp_path, "HVX", closes)
+    r = book.hv20_percentile_of("HVX", tmp_path)
+    assert r and r["hv20"] > 0 and 0 <= r["pct"] <= 100 and r["samples"] >= 120
+    _write(tmp_path, "SHORT", closes[:60])
+    r2 = book.hv20_percentile_of("SHORT", tmp_path)
+    assert r2 and r2["hv20"] > 0 and r2["pct"] is None            # 样本不足 → 分位 None 不编数
+    _write(tmp_path, "TINY", closes[:10])
+    assert book.hv20_percentile_of("TINY", tmp_path) is None

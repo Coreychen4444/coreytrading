@@ -107,3 +107,21 @@ def test_rs_series_normalizes_at_first_valid_point():
     # 前导无效点跳过, 归一锚顺延到首个双方有效点
     rs2 = technical.rs_series([0.0, 3.0, 6.0], [1.0, 2.0, 2.0])
     assert rs2[0] is None and rs2[1] == 1.0 and rs2[2] == 2.0
+
+
+# ── HV20 与分位 (IV percentile 的代理) ──
+
+def test_hv_warms_up_then_is_annualized():
+    closes = [100 * (1.01 if i % 2 else 0.99) ** (i % 3) for i in range(40)]
+    rows = [_bar(c, c + 1, c - 1, c) for c in closes]
+    hv = technical.hv(rows, 20)
+    assert hv[19] is None and hv[20] is not None and hv[-1] > 0
+    assert technical.hv([_bar(1, 1, 1, 1)] * 5, 20) == [None] * 5
+
+
+def test_hv_percentile_needs_enough_samples_and_is_a_fraction():
+    series = [None] * 20 + [float(i % 50) for i in range(300)]
+    assert technical.hv_percentile(series, 60, 252, 120) is None      # 只有 40 个有效样本
+    p = technical.hv_percentile(series, len(series) - 1, 252, 120)
+    assert p is not None and 0.0 <= p <= 1.0
+    assert technical.hv_percentile(series, 5, 252, 120) is None       # series[5] 是 None

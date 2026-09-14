@@ -31,6 +31,7 @@ Zone 是市场结构的快照，必须动态维护。stale zone 两类错：假�
      --update-trigger "..." --reasoning-summary "..."
    ```
    只动 agent 块；禁止手编 positions.json。parabolic 必传 `--methodology parabolic_mode_spirit`。写本地活状态需要 operator 的明确授权；分析本身是只读的。
+   **stop 永远显式传**：卡上有 stop 的重画不传 `--stop-level` = writer 拒绝写盘（「不传」从来不是「保持」，zones 整块替换）；保持 = 传原值 + 原 `--stop-level-days`（同值自动带过 days / 来历）；只传 `--stop-level` = 并入现有 zones 不重画（调 stop 的正确写法）；确要删传 `--clear-stop`（受控路径白名单外）。`agent_submit` 同判 `proposal would remove existing stop`（预览即拒）；brief `INFRA:card_missing_stop` 兜任何路径留下的无 stop 卡。
 
 ## Gate = 状态转移轴（每张卡都要有）
 - `current_regime.cap_pct_nav` 答"现在能不能参与"；`next_regime.entry_gate` 答"下一个状态在哪"。`常规参与` 卡同样要给 next gate（否则促升后 cap 0 无路升回）。判据 `core/structure.has_next_gate`；`reclaim_gates`（本 regime 内早信号）与 `last_regime.repair_gate`（转移史）都不算转移轴。强制点：画卡 ⚠️ + brief `INFRA:card_missing_next_gate`，都不拦截。
@@ -42,7 +43,7 @@ Zone 是市场结构的快照，必须动态维护。stale zone 两类错：假�
 |---|---|
 | 1 | 锚 = tape 里的地标且多维收敛；禁整数关口唯一锚、固定偏移、单一维度 |
 | 2 | 簇的**上沿** = gate（整条簇翻面）；下沿常是本 regime 的 `no_chase` |
-| 3 | 确认口径：收盘 ×N（默认 2）+ RelVR ≥1.2（个股量比 / max(基准量比, 0.4)，半导体→SMH 其余→QQQ） |
+| 3 | 确认口径：收盘 ×N（默认 2）+ **RelVR ≥1.1**（个股量比 / max(基准量比, 0.4)，半导体→SMH 其余→QQQ；真源 `regime_transition.RECLAIM_VOL_RATIO_MIN`，判据在**卡片字段** `volume_ratio_min`）；**量腿对齐日 = streak 内任一日**（连续站上 gate 的那几天里任一日过即算，跌回归零、day-1 的量作废；`regime_transition.volume_leg(streak=)`，转移机与 gate_ladder_report 同读） |
 | 4 | 自洽：上行 gate ≥ `no_chase_above`（相等正常，低于 = 倒挂）；修复 gate ≥ stop。`core.structure.gate_coherence` |
 | 5 | 单调：stop < z1_lo，z1_hi ≤ no_chase ≤ trim_lo |
 | 6 | 下一档地板 = gate − 0.5×ATR20@转移日，且距 gate > 0.25×ATR20 |

@@ -64,6 +64,7 @@ def written(monkeypatch):
     out = []
     monkeypatch.setattr(th.state_io, "append_trade_event", lambda e: out.append(e))
     monkeypatch.setattr(th, "_cards", lambda: CARDS)
+    monkeypatch.setattr(th, "_option_plans", lambda: {})     # 反转探针授权文件: 默认空
     return out
 
 
@@ -170,3 +171,152 @@ def test_cards_merge_watchlist_so_first_entries_get_stamped(tmp_path, monkeypatc
     cards = th._cards()
     assert "COHR" in cards, "watchlist 卡没进盖章判据 — 首次入场又要裸落库"
     assert cards["DUP"]["agent"]["current_regime"]["name"] == "pos版"   # positions 优先
+
+
+# ── 期权 BUY 的正股价位盖章 (期权锚定正股回踩 z1, 不追高) ──
+# 买在 no_chase 之上、转移确认之前的期权成交, 此前一律不盖 = 只能手写注解。
+
+CARDS["SYN"] = {"instrument": {"type": "stock"},
+                "agent": {"current_regime": {"name": "reclaim_93", "cap_pct_nav": _CONF,
+                                             "since": "2026-08-26"},
+                          "regime_history": [{"date": "2026-08-26", "direction": "up",
+                                              "level": 93.0, "cap_pct_nav": _CONF}],
+                          "zones": {"accumulation_zone_1": [101.9, 112.0],
+                                    "accumulation_zone_2": [93.0, 101.9],
+                                    "trim_zone": [125.0, 133.6],
+                                    "no_chase_above": 117.0, "stop_level": 82.59}}}
+CARDS["NOZONE"] = {"instrument": {"type": "stock"},
+                   "agent": {"current_regime": {"name": "x", "cap_pct_nav": _CONF}}}
+
+
+def _opt_row(code="SYN270115C100000", side="BUY", price=12.0, order_id="OPT1",
+             when="2026-08-26 13:37:46"):
+    return {"code": code, "side": side, "status": "FILLED_ALL", "dealt_qty": 1.0,
+            "dealt_avg_price": price, "order_id": order_id, "updated_time": when}
+
+
+def _bar(low, high, close, basis="60m", time="2026-08-26 14:30:00"):
+    return {"time": time, "low": low, "high": high, "close": close, "basis": basis}
+
+
+def test_option_buy_above_z1_is_stamped_from_the_underlying_bar(written, monkeypatch):
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(117.2, 120.5, 118.4))
+    th.append_new_fills_to_events([_opt_row()])
+    e = written[0]
+    assert e["underlying_at_fill"]["price"] == 118.4 and e["underlying_at_fill"]["basis"] == "60m"
+    assert e["underlying_at_fill"]["ambiguous"] is False
+    assert e["zone_at_fill"] == "above_no_chase"
+    assert set(e["price_flags"]) == {"above_z1", "above_no_chase"}
+
+
+def test_option_buy_inside_z1_carries_no_flags(written, monkeypatch):
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(105.0, 110.0, 108.0))
+    th.append_new_fills_to_events([_opt_row()])
+    e = written[0]
+    assert e["zone_at_fill"] == "zone1" and "price_flags" not in e
+
+
+def test_option_buy_bar_straddling_z1_top_is_ambiguous_not_flagged(written, monkeypatch):
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(110.0, 115.0, 114.0))
+    th.append_new_fills_to_events([_opt_row()])
+    e = written[0]
+    assert "price_flags" not in e and e["underlying_at_fill"]["ambiguous"] is True
+
+
+def test_option_buy_without_a_bar_is_marked_unknown_for_a_human(written, monkeypatch):
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: None)
+    th.append_new_fills_to_events([_opt_row()])
+    e = written[0]
+    assert e["underlying_at_fill"]["basis"] == "unknown" and e["underlying_at_fill"]["price"] is None
+    assert "price_flags" not in e and "zone_at_fill" not in e
+
+
+def test_option_buy_on_underlying_without_zones_or_sell_side_is_not_stamped(written, monkeypatch):
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(1.0, 2.0, 1.5))
+    th.append_new_fills_to_events([_opt_row(code="NOZONE270115C10000", order_id="OPT2"),
+                                   _opt_row(side="SELL", order_id="OPT3")])
+    assert all("underlying_at_fill" not in e and "price_flags" not in e for e in written)
+
+
+def test_underlying_bar_at_picks_the_60m_bar_ending_after_the_fill(monkeypatch, tmp_path):
+    import sys, types
+    bars = [{"time": "2026-08-26 10:30:00", "low": 101.9, "high": 130.3, "close": 106.0},
+            {"time": "2026-08-26 13:30:00", "low": 112.0, "high": 123.0, "close": 118.0},
+            {"time": "2026-08-26 14:30:00", "low": 116.5, "high": 128.8, "close": 125.0},
+            {"time": "2026-08-26 16:00:00", "low": 114.0, "high": 126.0, "close": 116.14}]
+    fake = types.SimpleNamespace(get_kline=lambda *a, **k: bars)
+    monkeypatch.setitem(sys.modules, "quant.data.market_data", fake)
+    b = th.underlying_bar_at("SYN", "2026-08-26T13:37:46-04:00")
+    assert b["time"] == "2026-08-26 14:30:00" and b["basis"] == "60m"    # label = 结束时刻
+    b = th.underlying_bar_at("SYN", "2026-08-26T17:05:00-04:00")        # 盘后 → 最后一根
+    assert b["time"] == "2026-08-26 16:00:00"
+
+
+def test_underlying_bar_at_falls_back_to_daily_cache_then_none(monkeypatch, tmp_path):
+    import sys, types
+
+    def boom(*a, **k):
+        raise RuntimeError("OpenD down")
+    monkeypatch.setitem(sys.modules, "quant.data.market_data", types.SimpleNamespace(get_kline=boom))
+    monkeypatch.setattr(th, "KLINE_CACHE_DIR", tmp_path)
+    (tmp_path / "SYN.jsonl").write_text(
+        '{"time": "2026-08-26 00:00:00", "open": 130.31, "high": 133.34, "low": 101.88, "close": 116.14}\n')
+    b = th.underlying_bar_at("SYN", "2026-08-26T13:37:46-04:00")
+    assert b["basis"] == "1d" and b["low"] == 101.88 and b["high"] == 133.34
+    assert th.underlying_bar_at("SYN", "2026-08-27T13:37:46-04:00") is None
+
+
+# ── reversal_probe 盖章: 授权住 option_plans.json, 锚 = 信号日收盘 ──
+
+def _rp_plans(valid_until="2026-08-28"):
+    return {"NBIS": {"code": "NBIS270115C90000", "entry_class": "reversal_probe",
+                     "signal_date": "2026-08-25", "signal_close": 80.0, "support": 76.0,
+                     "valid_until": valid_until, "cap_frac": 0.09, "expiry": "2027-01-15",
+                     "tiers": [{"premium": 12.0, "contracts": 1}]}}
+
+
+def test_reversal_probe_fill_gets_auth_from_the_plan_and_the_signal_close_anchor(written, monkeypatch):
+    monkeypatch.setattr(th, "_option_plans", lambda: _rp_plans())
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(81.0, 83.0, 82.5))
+    th.append_new_fills_to_events([_opt_row(code="NBIS270115C90000", order_id="RP1",
+                                            when="2026-08-26 10:05:00", price=12.0)])
+    e = written[0]
+    assert e["auth"]["entry_class"] == "reversal_probe" and e["auth"]["cap_pct_nav"] == 0.09
+    assert e["auth"]["gate_no"] == 1
+    assert e["price_flags"] == ["above_signal_close"]              # 整根 bar 在信号收盘 80 之上 = 追高
+    assert e["underlying_at_fill"]["anchor"] == "signal_close" and e["underlying_at_fill"]["anchor_price"] == 80.0
+    assert "zone_at_fill" not in e                                 # 本类不看 z1
+
+
+def test_reversal_probe_fill_inside_or_straddling_the_anchor_is_clean_or_ambiguous(written, monkeypatch):
+    monkeypatch.setattr(th, "_option_plans", lambda: _rp_plans())
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(79.0, 81.0, 80.5))
+    th.append_new_fills_to_events([_opt_row(code="NBIS270115C90000", order_id="RP2",
+                                            when="2026-08-26 10:05:00")])
+    e = written[0]
+    assert "price_flags" not in e and e["underlying_at_fill"]["ambiguous"] is True
+
+
+def test_reversal_probe_fill_after_validity_has_no_auth(written, monkeypatch):
+    monkeypatch.setattr(th, "_option_plans", lambda: _rp_plans(valid_until="2026-08-20"))
+    monkeypatch.setattr(th, "underlying_bar_at", lambda und, ts: _bar(81.0, 83.0, 82.5))
+    th.append_new_fills_to_events([_opt_row(code="NBIS270115C90000", order_id="RP3",
+                                            when="2026-08-26 10:05:00")])
+    e = written[0]
+    assert "auth" not in e                                         # 过期 = 无授权成交, 归人判
+
+
+def test_bottom_stock_fill_gets_auth_from_the_plan_and_flags_a_chase(written, monkeypatch):
+    """抄底正股 BUY : auth 来自计划 stock 段 (cap_frac / 止跌低 / vehicle 正股);
+    成交价 > 信号收盘 = above_signal_close (追高); 在其下不标。"""
+    plans = {"INTC": {"entry_class": "reversal_probe", "signal_date": "2026-08-05", "signal_close": 98.0,
+                      "support": 92.0, "valid_until": "2026-08-08", "stock": {"tiers": [{"price": 98.0, "shares": 3}],
+                                                                             "cap_frac": 0.04}}}
+    monkeypatch.setattr(th, "_option_plans", lambda: plans)
+    th.append_new_fills_to_events([_row(code="INTC", order_id="BT1", price=98.7)])
+    e = written[0]
+    assert e["auth"]["entry_class"] == "reversal_probe" and e["auth"]["cap_pct_nav"] == 0.04
+    assert e["auth"]["support"] == 92.0 and e["auth"]["vehicle"] == "正股"
+    assert "above_signal_close" in e["price_flags"]
+    th.append_new_fills_to_events([_row(code="INTC", order_id="BT2", price=97.5)])
+    assert "above_signal_close" not in (written[1].get("price_flags") or [])

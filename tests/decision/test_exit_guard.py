@@ -637,3 +637,27 @@ def test_atrisk_option_uses_s1_fraction():
     sig = at_risk_breach_signal({"ticker": "GOOGL270115C390000", "qty": 9,
                                  "current_price": 20.0}, None, None, 21000.0)
     assert sig and "S1 premium stop" in sig["stop_basis"]
+
+
+def test_reversal_probe_card_gate_is_its_own_stop_and_s1_is_off(tmp_path, monkeypatch):
+    """reversal_probe 期权卡 (止损放在 gate): gate = 卡 stop_level (反转支撑,
+    underlying 基) ×1 日收盘, S1 保费线关 —— mark 已跌破成本×0.8 也不响 S1, 只响 gate。"""
+    _ov_setup(tmp_path, monkeypatch, _flat_klines("2026-06-05"))   # close 350 恒 < 支撑 360
+    doc = _ov_doc(27.0)                                              # 35×0.8 = 28 > 27 → S1 本会响
+    doc["tickers"]["GOOGL270115C390000"]["agent"] = {
+        "entry_class": "reversal_probe",
+        "thesis": {"summary": "反转探针"}, "action": {"intent": "hold"},
+        "zones": {"stop_level": 360.0, "stop_level_basis": "underlying"}}
+    guards, shots, _, _ = exit_guard.evaluate(doc, {"positions": {}}, "2026-06-05")
+    types = [s["type"] for s in shots]
+    assert "opt_gate_stop" in types and "opt_s1_stop" not in types, types
+    shot = next(s for s in shots if s["type"] == "opt_gate_stop")
+    assert "止跌低" in shot["text"] and "360" in shot["text"]
+    g = guards["positions"]["GOOGL270115C390000"]
+    assert g["opt_gate_stop"]["level"] == 360.0 and g["opt_gate_stop"]["label"].startswith("止跌低")
+    assert g["opt_s1_enabled"] is False and g["opt_overlay"]["s1_fired"] is False
+    # 同一张卡若 stop 基是 option_price → 不当 gate (退回常规: 无授予 gate = 无 gate 线, S1 开)
+    doc["tickers"]["GOOGL270115C390000"]["agent"]["zones"]["stop_level_basis"] = "option_price"
+    guards, shots, _, _ = exit_guard.evaluate(doc, {"positions": {}}, "2026-06-05")
+    assert "opt_gate_stop" not in [s["type"] for s in shots]
+    assert "opt_s1_stop" in [s["type"] for s in shots]

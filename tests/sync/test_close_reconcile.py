@@ -106,7 +106,7 @@ def test_apply_is_idempotent():
     assert json.dumps(doc, sort_keys=True) == snapshot
 
 
-def test_apply_preserves_the_agent_block():
+def test_apply_archives_the_agent_block():
     """收尾只动 lots/status/position_summary/exit_info。thesis 与 zone 是历史,
     留着给复盘和重进判断用。"""
     doc = {"tickers": {"NBIS": _body(lots=LOTS)}}
@@ -114,7 +114,8 @@ def test_apply_preserves_the_agent_block():
                                        "zones": {"stop_level": 176}}
     cr.apply(cr.plan(doc, _episode()), doc)
 
-    assert doc["tickers"]["NBIS"]["agent"]["zones"]["stop_level"] == 176
+    assert doc["tickers"]["NBIS"]["exit_info"]["closed_agent"]["zones"]["stop_level"] == 176
+    assert not doc["tickers"]["NBIS"]["agent"].get("zones")
 
 
 # ── run(): dry-run 绝不写盘 ───────────────────────────────────────
@@ -149,3 +150,44 @@ def test_run_writes_and_then_has_nothing_left_to_do(state):
     body = json.loads(state.read_text())["tickers"]["NBIS"]
     assert body["status"] == "closed" and body["lots"]["position"] == []
     assert cr.run()["reconciled"] == []
+
+
+def test_empty_active_card_is_closed_and_idempotent():
+    doc = {"tickers": {"NBIS": _body()}}
+    cr.apply(cr.plan(doc, _episode()), doc)
+    assert doc["tickers"]["NBIS"]["exit_info"]["closed_at"] == "2026-07-28T16:48:17-04:00"
+    assert cr.plan(doc, _episode()) == []
+
+
+def test_shadow_archive_preserves_exit_and_can_return_to_watchlist():
+    from quant.sync.watchlist_sync import closed_analysis
+    body = _body(status="closed")
+    body["agent"] = {"thesis": {"summary": "history"}, "zones": {"stop_level": 10},
+                     "current_regime": {"cap_pct_nav": .4}}
+    body["exit_info"] = {"closed_at": "2026-07-28", "closed_lots": LOTS,
+                         "watchlist_readd": {"closed_at": "2026-07-28"}}
+    doc = {"tickers": {"NBIS": body}}
+    cr.apply(cr.plan(doc, {}), doc)
+    assert not body["agent"].get("current_regime")
+    assert body["exit_info"]["closed_lots"] == LOTS
+    assert body["exit_info"]["watchlist_readd"] == {"closed_at": "2026-07-28"}
+    assert closed_analysis(doc, set())["NBIS"]["agent"]["current_regime"]["cap_pct_nav"] == .4
+    assert cr.plan(doc, {}) == []
+
+
+def test_unknown_broker_quantity_is_not_flat():
+    body = _body(lots=LOTS)
+    body["broker"] = {}
+    assert cr.plan({"tickers": {"NBIS": body}}, {}) == []
+
+
+def test_archived_card_remains_schema_valid_even_when_broker_reports_reentry():
+    from quant.core.schema import validate_positions_doc
+    body = _body(lots=LOTS)
+    body.update(pending_orders=[], agent={"thesis": {"summary": "x"},
+                "action": {"intent": "hold"}, "zones": {"stop_level": 176}})
+    doc = {"tickers": {"NBIS": body}}
+    cr.apply(cr.plan(doc, _episode()), doc)
+    assert validate_positions_doc(doc)[0] == []
+    body["broker"]["qty"] = 1
+    assert validate_positions_doc(doc)[0] == []

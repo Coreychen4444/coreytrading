@@ -15,9 +15,12 @@
    │           valuation_daily（独立日更估值：刷新/冻结/宏观→估值/去重/归档）
    │           agent_snapshots / agent_submit / agent_doctor / agent_health（快照、受控写卡、任务元数据盘点、健康与租约）
    │           agent_evidence（显式冻结组合输入 → 既有机械 sizing 收据，零取数/写入）
+   │           agent_desktop（Desktop 交接：后台启动原控制器，会话领取 / 提交研究请求）· macro_state（宏观文档校验与原子发布；pre_event 必须从事件剧本编译）
    ├── report  报告层（读时计算，不产生新状态）
    │           portfolio_brief · perf_report · gate_ladder_report · gate_audit
-   │           chart_read（每日收盘判读，**判读层零授权效力**）
+   │           chart_read（每日收盘判读 = 两种模式已形成/即将形成清单，**判读层零授权效力**）
+   │           transition_report（转移达标条件收据）· risk_receipt（机械风控收据）· agent_metrics（Agent 层周基线）
+   │           macro_report（宏观研究只读摘要）· macro_playbook_report（事件剧本校验 / 渲染 / 编译）
    │           nav_report（NAV 区间变动剔除外部现金流，周复盘 NAV 变动的唯一口径）
    │           valuation_report（冻结估值收据 → 当轮 FYI，缺口不回退到旧价）
    ├── journal 账本写入层（prose-only 不算落库）
@@ -52,8 +55,10 @@
                sizing · structure · drift · technical · holdings
                episodes · book · earnings · sectors · patterns（形态判别式，Lo 2000 工序）
                dow（短期道氏四步状态机，提供趋势终止观察与结构排序）
+               reversal（抄底入场类判别式：信号 / 止跌低 / 域 / 有效期；授权归 entry_guard）· setups（两种模式判读：抄底 = 空头衰竭的价格行为 / 趋势确认 = gate 接近度；零授权）
                market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
                agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· valuation_contracts（情景单位、期限与传导约束）· motto（可选尾行，未配置即空）
+               macro_analysis / macro_evidence（宏观研究模块 schema 与逐项证据收据）· macro_playbook（事件剧本形状，零授权）· interpreter（生产入口解释器守卫）
 
   research     验证层（可复用机械件/合成脚手架）—— 旁路，不参与实时决策
 ```
@@ -77,10 +82,11 @@
 ## 约定
 
 **市场情报**——本仓不采集新闻 / 宏观；情报数据目录 `trade/intelligence/`（公开仓只有 README 与合成示例）与运行状态 `var/intelligence/` 由用户自有的可选采集流程维护，交易代码只读。不把报告、任务或数据整包放进 quant；现有 `valuation/event_data.py` 继续服务估值，出现第二个实际消费者再提取通用实现。新代码层仍须通过依赖与测试镜像守卫，不预建空层。
+`core/macro_analysis.py` 定义宏观因果与市场结构研究模块的 schema 及证据约束，由 agent_contracts 验证，不是新决策层；宏观 worker 的结构化研究不改变宏观发布 schema、数据采集或交易授权。`core/macro_evidence.py` 将已有捕获整理为逐项时间与来源收据，只计算同源样本变化和同日官方利率差；不取数、不宣称实时或因果。`report/macro_report.py` 从验证后的结果派生摘要和只读报告；ops 负责把初始 / 追问分别保留在工作流与任务回执中，报告层不修改交易或宏观发布状态。
 
 **领域 Agent**——职责定义在 `agents/`，运行方式见 `agents/README.md`。角色不拥有文件/券商写权限；
-`ops` 控制器选择 Claude/Codex runner，验证冻结输入与研究结果；技术提案仅经现有 writer 和 revision 检查落卡。
-现有 `decision/risk/sync` 的机械规则不迁入模型 prompt。`card_autopaint` 与 `agent_jobs` 只在跨模型复核通过后申请受控写卡；金额、退出、CAS 与最终开关均由宿主检查。
+`ops` 控制器选择 Claude/Codex 执行通道（`routing.json` 的 `execution_transport`：Desktop 交接或 CLI），验证冻结输入与研究结果；技术提案仅经现有 writer 和 revision 检查落卡。每日循环只跑 technical 模型（同收盘同卡片版本复用 run），风控收据由 `report/risk_receipt` 代码渲染，三角色工作流只在 weekly；基线指标 `report/agent_metrics`；入口解释器守卫 `core/interpreter`。
+现有 `decision/risk/sync` 的机械规则不迁入模型 prompt。`card_autopaint` 与 `agent_jobs` 保留跨模型复核后的受控自动写卡能力，是否要求复核由 `routing.json` 的 `autopaint.review` 决定；金额、退出、CAS 与最终开关均由宿主检查。
 
 **运行**——每个模块既能 import 也能直接跑：
 

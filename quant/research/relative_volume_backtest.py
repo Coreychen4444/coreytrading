@@ -51,7 +51,9 @@ NEED = 2                   # days 腿固定 ×2 (escape_velocity C + gate2 已�
 WINDOW = 120               # 价格腿等待窗 (episodes_of 的 repair 窗, gate2 同)
 SIM_TAIL = 60              # 模拟窗 = p+60
 TERMINALS = (20, 60)
-VOL_RATIO = 1.2
+VOL_RATIO = 1.2            # 研究层历史常量 = **前三轮裁决当时的 live 量腿阈值**。
+                           # live 已裁 1.1 (V:θ=1.1); 本值**故意不跟随** —— 历史世界
+                           # (W0/W1/W2/W3/W1F/W5) 一漂, 回归门与既往 Verdict 就不可复现。改它 = 作废三份裁决。
 VOL_LB = 20
 REL_FLOOR = 0.4
 STOP_MULT = 2.0

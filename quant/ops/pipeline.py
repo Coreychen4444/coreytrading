@@ -313,6 +313,31 @@ def _bold_head(card: str) -> str:
     return f"**{first.strip()}**{sep}{rest}"
 
 
+def format_agent_health(health: Dict) -> str:
+    """Summarize current issues separately from historical recovery events."""
+    pending = health.get("pending_events", [])
+    issues = health.get("issues", [])
+    recovered = [e for e in pending if e.get("kind") == "recovered"]
+    lines = ["⚠️ 领域 Agent 待处理" if issues else "✅ 领域 Agent 状态更新"]
+    if issues:
+        groups = {}
+        for issue in issues:
+            target = issue.get("ticker") or issue.get("job_kind") or issue.get("role") or issue.get("source", "unknown")
+            key = (target, issue.get("code", "unknown"))
+            groups[key] = groups.get(key, 0) + 1
+        lines.append(f"当前未解决：{len(issues)} 项")
+        for (target, code), count in sorted(groups.items()):
+            lines.append(f"- {target}：{code}" + (f"（{count} 条记录）" if count > 1 else ""))
+    else:
+        lines.append("当前无未解决告警。")
+    if recovered:
+        tickers = sorted({e["issue"]["ticker"] for e in recovered if e.get("issue", {}).get("ticker")})
+        lines.append(f"历史恢复：{len(recovered)} 条记录（非新增故障）" +
+                     ("；涉及 " + "、".join(tickers) if tickers else ""))
+    lines.append("详细事件与运行回执保留在本地 var/agent-runs/。")
+    return "\n".join(lines)
+
+
 def stamp_heartbeat() -> None:
     """dead-man 专属时间戳。**只有 heartbeat 模式写**, briefing 不能碰 ——
     briefing 每天也跑 portfolio_brief, 用 lastChecks.portfolio_brief 判死活会
@@ -350,7 +375,7 @@ def run_stage(s: Stage, extra: Optional[List[str]] = None,
 def classify_agents_stage(r: Dict) -> Dict:
     """agents 阶段的退出码 1 盖住三种回执: failed / partial / needs_review (agent_jobs 语义)。
 
-    partial = 领域任务**已结束**, 但有缺失角色、未落卡或超出每轮 2 张的待办 —— 这不是
+    partial = 领域任务**已结束**, 但有缺失角色、未落卡或超出本轮 repaint_bound 的待办 —— 这不是
     "这一步挂了" (简报按 reports / cards / pending_cards 逐项列待办), 所以不进 `failed`,
     改记 `partial`。failed / 回执解析不了 仍是失败。待办数据仍在 r["data"] 里原样保留。
     """
@@ -376,6 +401,8 @@ def plan(mode: str) -> List[Stage]:
 
 
 def main(argv: List[str]) -> int:
+    from quant.core.interpreter import require_project_interpreter
+    require_project_interpreter()  # : system python killed three card jobs with a calendar error
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", required=True, choices=[HEARTBEAT, BRIEFING, POSTCLOSE])
@@ -493,10 +520,7 @@ def main(argv: List[str]) -> int:
         result["agent_health"] = health
         pending = health.get("pending_events", [])
         if pending and send:
-            lines = ["⚠️ 领域 Agent 运行状态"]
-            for event in pending:
-                lines.append(json.dumps(event, ensure_ascii=False))
-            if notify("\n".join(lines)):
+            if notify(format_agent_health(health)):
                 acknowledge_events(AGENT_RUNS_DIR, [e["event_id"] for e in pending])
     # dead-man 只在 heartbeat 模式、且没有 fatal 中止时落点
     if a.mode == HEARTBEAT and ok and not a.read_only:

@@ -13,7 +13,7 @@
     手工步骤 + 无人看的警告 = 这一步实际上不存在。
 
 判据是**对账不是事件**:
-    触发条件是 `broker.qty == 0 且 lots 非空`, 不是"收到了一条 close 事件"。
+    触发条件是显式 `broker.qty == 0` 且状态未收尾或仍有现行分析/lots, 不是"收到了一条 close 事件"。
     对账幂等、与事件到达顺序无关、漏跑一轮下一轮补上; 事件驱动则要求恰好那一轮
     跑到, 且一次失败就永久错过。
 
@@ -39,12 +39,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from quant.core import env  # noqa: F401,E402  (.env → os.environ)
 
+import copy
 import argparse  # noqa: E402
 import json  # noqa: E402
 from typing import Any, Dict, List  # noqa: E402
 
 from quant.core import ledger as _ledger  # noqa: E402
-from quant.core.holdings import live_tickers, lot_qty  # noqa: E402
+from quant.core.holdings import held_incl_option_underlyings, lot_qty  # noqa: E402
 from quant.sync import state_io  # noqa: E402
 
 EMPTY_SUMMARY = {
@@ -66,16 +67,24 @@ def plan(doc: dict, episodes: Dict[str, List[dict]] | None = None) -> List[dict]
     """返回待收尾的卡片, 不写盘。episodes 传 None 时从事件流重建。"""
     if episodes is None:
         episodes = _ledger.build_episodes(warn=lambda _m: None)
-    live = live_tickers(doc)
+    live = held_incl_option_underlyings(doc)
     out: List[dict] = []
     for ticker, body in (doc.get("tickers") or {}).items():
-        if ticker in live or not lot_qty(body):
+        if ticker in live or (body.get("broker") or {}).get("qty") != 0:
+            continue
+        agent = body.get("agent") or {}
+        archive = bool(agent.get("zones") or agent.get("current_regime"))
+        finalize = bool(lot_qty(body) or body.get("status") != "closed")
+        if not archive and not finalize:
             continue
         ep = _last_closed_episode(ticker, episodes)
         exits = (ep or {}).get("exits") or []
         last = exits[-1] if exits else {}
         out.append({
             "ticker": ticker,
+            "finalize": finalize,
+            "archive_analysis": archive,
+            "synthetic_retired": bool((body.get("broker") or {}).get("synthetic") and ep is None),
             "lot_qty": lot_qty(body),
             "prev_status": body.get("status"),
             "closed_at": (ep or {}).get("closed_at"),
@@ -92,6 +101,19 @@ def apply(items: List[dict], doc: dict) -> dict:
     for item in items:
         body = doc["tickers"][item["ticker"]]
         exit_info = dict(body.get("exit_info") or {})
+        if item.get("archive_analysis"):
+            # Full historical snapshot, outside the live authorization namespace.
+            previous = exit_info.get("closed_agent")
+            if previous and previous != body.get("agent"):
+                exit_info.setdefault("prior_closed_agents", []).append(previous)
+            exit_info["closed_agent"] = copy.deepcopy(body.get("agent") or {})
+            body["agent"] = {
+                "thesis": {"summary": "已平仓分析归档于 exit_info.closed_agent", "status": "intact"},
+                "action": {"intent": "cleanup", "reason": "历史卡，无现行入场授权"},
+            }
+        if not item.get("finalize", True):
+            body["exit_info"] = exit_info
+            continue
         exit_info.update({
             "closed_at": item["closed_at"],
             "order_id": item["exit_order_id"],
@@ -99,9 +121,12 @@ def apply(items: List[dict], doc: dict) -> dict:
             "realized_pnl_usd": item["realized_pnl_usd"],
             "reconciled_by": "close_reconcile",
             # 归档而非删除 —— cost basis 留在文件里, 不是只留在 git 历史里
-            "closed_lots": body.get("lots") or {"base": [], "position": []},
+            "closed_lots": (body.get("lots") if lot_qty(body) else
+                            exit_info.get("closed_lots", {"base": [], "position": []})),
         })
-        if not item["episode_found"]:
+        if item.get("synthetic_retired"):
+            exit_info["note"] = "期权标的行情行已停用；非正股平仓，不推定正股成交日期或盈亏。"
+        elif not item["episode_found"]:
             exit_info["note"] = ("事件流里没有对应的已平 episode —— broker 说 0 股但账本"
                                  "对不上, 需人工查 events/。lots 已归档未丢失。")
         body["exit_info"] = exit_info
@@ -127,10 +152,16 @@ def run(*, dry_run: bool = False) -> dict:
 def render(res: dict) -> str:
     items = res.get("planned") or []
     if not items:
-        return "close_reconcile: 无待收尾卡片 (lots 与 broker qty 一致)"
+        return "close_reconcile: 无待收尾卡片 (状态、lots、现行分析均已对账)"
     verb = "待收尾" if res.get("dry_run") else "已收尾"
     lines = [f"close_reconcile: {verb} {len(items)} 张卡"]
     for it in items:
+        if not it.get("finalize", True):
+            lines.append(f"  {it['ticker']}: 现行分析移入 exit_info.closed_agent；原平仓记录保留")
+            continue
+        if it.get("synthetic_retired"):
+            lines.append(f"  {it['ticker']}: 期权标的行情行停用 → closed；非正股成交")
+            continue
         pnl = it["realized_pnl_usd"]
         pnl_s = f"{pnl:+,.2f}" if isinstance(pnl, (int, float)) else "?"
         lines.append(

@@ -20,9 +20,10 @@ import tempfile
 import time
 import uuid
 
-from quant.core.agent_contracts import (CONTRACT_VERSION, ROLES, canonical_hash,
+from quant.core.agent_contracts import (CONTRACT_VERSION, ROLES, canonical_hash, card_revision,
                                         result_schema, validate_result, validate_snapshot)
 from quant.core.io_json import atomic_write_json, read_json, state_lock
+from quant.core.macro_analysis import usable_evidence_refs
 from quant.core.paths import (AGENT_CONTROL_DIR, AGENT_ROUTES_PATH, AGENT_RUNS_DIR,
                               AGENT_SPEC_DIR, ROOT)
 from quant.ops.agent_snapshots import capture_card, make_snapshot
@@ -35,11 +36,26 @@ _RULES = {
     "valuation": (),
 }
 _METHODS = {
-    "macro": ("agents/methods/macro-inference-contract.md", "quant/valuation/README.md"),
-    "technical": ("trade/strategy/trading-rules.md",),
-    "risk": ("trade/strategy/trading-rules.md",),
+    "macro": ("agents/methods/macro-inference-contract.md",
+              "agents/methods/market-structure-analysis.md", "quant/valuation/README.md"),
+    # trading-rules.md (24 KB master index of the whole
+    # decision stack) was sent on every technical/risk call; the operative
+    # painting rules are zone-maintenance / position-tiers. The host session
+    # contract file is likewise not worker policy.
+    "technical": (),
+    "risk": (),
     "valuation": ("agents/methods/news-valuation-overlay.md", "quant/valuation/README.md"),
 }
+# Worker-facing excerpt of the project contract: the parts that bind a worker.
+_WORKER_CONTRACT = (
+    "节奏优先：只执行计划内的动作，计划外的意图先过规则，不因错过而追单。\n"
+    "技术面优先 v3：入场授权（gate / regime / zone / cap）= 纯价格结构；财报·thesis·研报·宏观一律 [FYI]。\n"
+    "cap 二值 {0, 0.4 NAV}；实际可下金额由 quant/core/sizing.entry_cap 六臂取小，worker 不算钱。\n"
+    "退出无 override：卡片 stop / 棘轮地板 / 趋势死亡线 / G-01 任一成立即当日执行。\n"
+    "gate 是被发现的市场地标，多维收敛，证据标准不放宽；转移只由机械转移机执行。\n"
+    "worker 只读冻结证据、只返回契约 JSON；没有工作区、券商、消息或下单权限。"
+)
+BYTES_PER_TOKEN_ESTIMATE = 1.9  # measured CLI bytes-per-token ratio
 
 
 def load_routes(path: Path | None = None) -> dict:
@@ -67,7 +83,7 @@ def _validate_endpoint(endpoint: dict, *, explicit: bool = False) -> dict:
 def _resolve_profiles(routes: dict) -> dict:
     """Resolve the editable profile contract into the existing dispatch shape."""
     required = {"version", "model_profiles", "roles", "limits", "autopaint"}
-    if not required <= set(routes) or set(routes) - required - {"global_limits"}:
+    if not required <= set(routes) or set(routes) - required - {"global_limits", "execution_transport"}:
         raise ValueError("unsupported routing contract")
     profiles = routes["model_profiles"]
     if type(profiles) is not dict or not profiles:
@@ -89,12 +105,16 @@ def _resolve_profiles(routes: dict) -> dict:
         if len({canonical_hash(endpoint) for endpoint in endpoints}) != len(endpoints):
             raise ValueError("duplicate model profile endpoint")
         resolved[name] = endpoints
+    if routes.get("execution_transport", "cli") not in ("cli", "desktop"):
+        raise ValueError("invalid execution transport")
     if type(routes["roles"]) is not dict or set(routes["roles"]) != set(ROLES):
         raise ValueError("routing must define exactly four roles")
     normalized = {key: deepcopy(value) for key, value in routes.items() if key != "model_profiles"}
     normalized.update(version=1, roles={})
     for role, route in routes["roles"].items():
-        if type(route) is not dict or set(route) != {"profile", "reviewer_profile", "timeout_s"}:
+        required = {"profile", "reviewer_profile", "timeout_s"}
+        if (type(route) is not dict or not required <= set(route)
+                or set(route) - required - {"fallback_profile"}):
             raise ValueError(f"invalid route fields: {role}")
         if any(not isinstance(route[key], str) or route[key] not in resolved
                for key in ("profile", "reviewer_profile")):
@@ -102,7 +122,18 @@ def _resolve_profiles(routes: dict) -> dict:
         primary, reviewer = resolved[route["profile"]], resolved[route["reviewer_profile"]]
         if primary[0]["provider"] == reviewer[0]["provider"]:
             raise ValueError("reviewer profile must use an independent runtime")
-        normalized["roles"][role] = {**deepcopy(primary[0]), "fallback": deepcopy(primary[1:]),
+        fallback = primary[1:]
+        if "fallback_profile" in route:
+            name = route["fallback_profile"]
+            if not isinstance(name, str) or name not in resolved:
+                raise ValueError("unknown fallback profile")
+            alternate = resolved[name]
+            if alternate[0]["provider"] == primary[0]["provider"]:
+                raise ValueError("fallback profile must use another runtime")
+            # Put provider failover before secondary models, including when a
+            # workflow can reserve only two attempts for this role.
+            fallback = [alternate[0], *primary[1:], *alternate[1:]]
+        normalized["roles"][role] = {**deepcopy(primary[0]), "fallback": deepcopy(fallback),
                                       "reviewer": deepcopy(reviewer[0]),
                                       "reviewer_fallback": deepcopy(reviewer[1:]),
                                       "timeout_s": route["timeout_s"]}
@@ -114,9 +145,11 @@ def validate_routes(routes: dict) -> dict:
         raise ValueError("unsupported routing contract")
     if routes["version"] == 2:
         routes = _resolve_profiles(routes)
-    if set(routes) not in ({"version", "roles", "limits", "autopaint"},
+    if set(routes) - {"execution_transport"} not in ({"version", "roles", "limits", "autopaint"},
                            {"version", "roles", "limits", "autopaint", "global_limits"}) or routes["version"] != 1:
         raise ValueError("unsupported routing contract")
+    if routes.get("execution_transport", "cli") not in ("cli", "desktop"):
+        raise ValueError("invalid execution transport")
     if type(routes["roles"]) is not dict or set(routes["roles"]) != set(ROLES):
         raise ValueError("routing must define exactly four roles")
     for role, route in routes["roles"].items():
@@ -127,23 +160,25 @@ def validate_routes(routes: dict) -> dict:
         endpoints = [{key: route[key] for key in ("provider", "model", "effort") if key in route}, route["reviewer"]]
         for key in ("fallback", "reviewer_fallback"):
             fallback = route.get(key, [])
-            if type(fallback) is not list or len(fallback) > 1:
-                raise ValueError("at most one fallback is supported")
+            if type(fallback) is not list or len(fallback) > 3:
+                raise ValueError("at most three fallback endpoints are supported")
             endpoints += fallback
         for endpoint in endpoints:
             _validate_endpoint(endpoint)
         if type(route["timeout_s"]) is not int or not 1 <= route["timeout_s"] <= 1800:
             raise ValueError("timeout_s must be 1..1800")
     limits = routes["limits"]
-    if type(limits) is not dict or set(limits) != {"max_parallel", "max_calls"} or any(type(v) is not int for v in limits.values()):
+    if (type(limits) is not dict or not {"max_parallel", "max_calls"} <= set(limits)
+            or set(limits) - {"max_parallel", "max_calls", "max_followup_rounds"}
+            or any(type(v) is not int for v in limits.values())):
         raise ValueError("invalid workflow limits")
+    if limits.get("max_followup_rounds", 1) not in (0, 1):
+        raise ValueError("max_followup_rounds must be 0 or 1")
     if not 1 <= limits["max_parallel"] <= 4 or not 4 <= limits["max_calls"] <= 12:
         raise ValueError("workflow exceeds supported budget")
     autopaint = routes["autopaint"]
     if type(autopaint) is not dict or set(autopaint) != {"enabled", "apply", "review"} or any(type(v) is not bool for v in autopaint.values()):
         raise ValueError("invalid autopaint policy")
-    if autopaint["apply"] and not autopaint["review"]:
-        raise ValueError("autopaint apply requires independent review")
     result = deepcopy(routes)
     global_limits = result.setdefault("global_limits", {
         "max_parallel": 3, "window_s": 3600, "max_calls": 24, "lease_grace_s": 60})
@@ -159,10 +194,10 @@ def validate_routes(routes: dict) -> dict:
 def policy_context(role: str) -> dict:
     if role not in ROLES:
         raise ValueError("unknown role")
-    paths = [ROOT / "CLAUDE.md", AGENT_SPEC_DIR / f"{role}.md"]
+    paths = [AGENT_SPEC_DIR / f"{role}.md"]
     paths += [ROOT / ".claude" / "rules" / name for name in _RULES[role]]
     paths += [ROOT / name for name in _METHODS[role]]
-    policy, missing = {}, []
+    policy, missing = {"project_contract_excerpt": _WORKER_CONTRACT}, []
     for path in paths:
         key = str(path.relative_to(ROOT))
         if not path.exists() and key.startswith(("agents/methods/", "trade/")):
@@ -185,19 +220,34 @@ def policy_context(role: str) -> dict:
             "nested_json_flags": ["--reclaim-gates", "--next-regime"],
             "gate_fields": sorted(GATE_KEYS), "next_regime_fields": sorted(NEXT_KEYS),
             "nested_zone_fields": sorted(ZONE_KEYS),
+            "next_regime_required_fields": ["name", "entry_gate"],
+            "next_regime_unknown_fields": "Future cap_pct_nav and zones may be omitted or null, matching transition-engine skeletons. A supplied cap must use the existing binary policy; never fill unknown future zones with invented prices.",
             "host_owned": ["ticker", "bucket", "expected_revision", "instrument_type", "role"],
             "required_flags": ["--anchored-on", "--anchor-basis", "--reasoning-summary"],
             "anchor_rule": "anchored-on and every nested gate/zone anchor date must equal snapshot.data.latest_completed_session, not today's calendar date.",
+            "repair_anchor_rule": "When redrawing, also examine existing last_regime.repair_gate. If its anchor is older than the completed session, reverify the existing line against frozen bars and provide --repair-gate-anchor-basis with actual evidence. Do not merely restamp an unverified line; report insufficient evidence explicitly.",
             "format": "Flat list of flag/value strings. JSON values must each be one string. No shell, duplicate flags or abbreviations.",
             "state_policy": "Keep current authorization and exit constraints. Describe future regimes only through next-regime; omit any value unsupported by evidence.",
         }
     return policy
 
 
-def execution_schema(role: str, snapshot: dict, review_target=None) -> dict:
+def execution_schema(role: str, snapshot: dict, review_target=None, *, bind_inputs=True) -> dict:
     """Constrain generation to this call's IDs and permitted handoff targets."""
     schema = result_schema(role)
     properties = schema["properties"]
+    if not bind_inputs:
+        # Native structured-output schemas are part of the cache prefix. Keep
+        # the wire contract independent of each capture's hashes/times/catalog.
+        # validate_result below still enforces every exact input binding.
+        properties["requests"]["items"]["properties"]["role"]["enum"] = [r for r in ROLES if r != role]
+        if review_target:
+            properties["proposal"] = {"type": "null"}
+            properties["review"] = properties["review"]["anyOf"][1]
+        else:
+            properties["review"] = {"type": "null"}
+        return schema
+    allowed_refs = usable_evidence_refs(snapshot) if role == "macro" else snapshot["evidence_refs"]
     for key in ("snapshot_id", "input_hash"):
         properties[key] = {"type": "string", "const": snapshot[key]}
     for key, value in (("generated_at", snapshot["as_of"]), ("expires_at", snapshot["expires_at"])):
@@ -205,15 +255,31 @@ def execution_schema(role: str, snapshot: dict, review_target=None) -> dict:
     properties["requests"]["items"]["properties"]["role"]["enum"] = [r for r in ROLES if r != role]
     for field in ("observations", "hypotheses", "risks", "requests"):
         refs = properties[field]["items"]["properties"]["evidence_refs"]
-        if snapshot["evidence_refs"]:
-            refs["items"] = {"type": "string", "enum": snapshot["evidence_refs"]}
+        if allowed_refs:
+            refs["items"] = {"type": "string", "enum": allowed_refs}
         else:
             refs["maxItems"] = 0
     if role == "macro":
+        # Bind every nested research reference, including future schema additions.
+        def bind_references(node):
+            if isinstance(node, dict):
+                for name, child in node.items():
+                    if name == "evidence_refs" and isinstance(child, dict):
+                        if allowed_refs:
+                            child["items"] = {"type": "string", "enum": allowed_refs}
+                        else:
+                            child["maxItems"] = 0
+                    else:
+                        bind_references(child)
+            elif isinstance(node, list):
+                for child in node:
+                    bind_references(child)
+        for field in ("macro_diagnosis", "market_structure"):
+            bind_references(properties[field])
         scenarios = properties["valuation_scenarios"]
-        if snapshot["evidence_refs"]:
+        if allowed_refs:
             scenarios["items"]["properties"]["evidence_refs"]["items"] = {
-                "type": "string", "enum": snapshot["evidence_refs"]}
+                "type": "string", "enum": allowed_refs}
         else:
             scenarios["maxItems"] = 0
     if review_target:
@@ -222,6 +288,21 @@ def execution_schema(role: str, snapshot: dict, review_target=None) -> dict:
         properties["review"]["properties"]["run_id"] = {"type": "string", "const": review_target["run_id"]}
     else:
         properties["review"] = {"type": "null"}
+    if role == "macro" and allowed_refs:
+        # One enum instead of repeating every long source ID at every node.
+        # Wire-only factoring; result_schema and host validation stay unchanged.
+        schema["$defs"] = {"evidence_ref": {"type": "string", "enum": allowed_refs}}
+        def share_reference_items(node):
+            if isinstance(node, dict):
+                for name, child in node.items():
+                    if name == "evidence_refs" and isinstance(child, dict):
+                        child["items"] = {"$ref": "#/$defs/evidence_ref"}
+                    else:
+                        share_reference_items(child)
+            elif isinstance(node, list):
+                for child in node:
+                    share_reference_items(child)
+        share_reference_items(properties)
     return schema
 
 
@@ -244,11 +325,16 @@ def build_prompt(role: str, task: str, snapshot: dict, policy: dict,
         "and do not request it unless it is necessary for your own conclusion. "
         "Requests may target OTHER roles only, never yourself. Every evidence_refs value must "
         "be copied exactly from snapshot.evidence_refs; no file paths, invented subreferences "
-        "or duplicates. All claim IDs must be globally unique across observations/hypotheses/risks."
+        "or duplicates. All claim IDs must be globally unique across observations/hypotheses/risks "
+        "and macro_diagnosis.causal_hypotheses when present."
     )
-    packet = {"role": role, "contract_version": CONTRACT_VERSION, "task": task,
-              "snapshot": snapshot, "review_target": review_target,
-              "project_rules": policy, "output_schema": execution_schema(role, snapshot, review_target)}
+    # Stable policy comes before per-call task/evidence. Both native runners
+    # already transmit the schema; duplicating it here wastes input tokens.
+    packet = {"role": role, "contract_version": CONTRACT_VERSION,
+              "project_rules": policy,
+              "output_contract": {"schema_version": result_schema(role)["properties"]["schema_version"].get("const"),
+                                  "schema_delivery": "native structured output; host validates the complete contract"},
+              "task": task, "snapshot": snapshot, "review_target": review_target}
     if review_target:
         instructions += (
             " Independently check the target against original evidence, source timing, "
@@ -257,7 +343,7 @@ def build_prompt(role: str, task: str, snapshot: dict, policy: dict,
         )
     else:
         instructions += " Set review=null."
-    return instructions + "\n" + json.dumps(packet, ensure_ascii=False, allow_nan=False)
+    return instructions + "\n" + json.dumps(packet, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
 
 def _run_path(root: Path, run_id: str) -> Path:
@@ -311,12 +397,21 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
              control_dir: Path | None = None) -> dict:
     snapshot = validate_snapshot(snapshot, now=datetime.now(timezone.utc))
     routes = validate_routes(routes) if routes is not None else load_routes()
+    if (review or _review_target is not None) and not routes["autopaint"]["review"]:
+        raise ValueError("model review is disabled in routing policy")
     if role not in ROLES or not isinstance(task, str) or not task.strip() or len(task) > 32000:
         raise ValueError("invalid role/task")
     injected_runner = runner is not None
-    if runner is None:
-        from quant.ops.agent_runners import run as runner
     root = Path(run_dir or AGENT_RUNS_DIR)
+    desktop_runner = (runner is None and routes.get("execution_transport") == "desktop") or getattr(runner, "_desktop_transport", False)
+    if runner is None:
+        if desktop_runner:
+            from quant.ops.agent_desktop import exchange
+            def runner(provider, prompt, schema, **kwargs):
+                return exchange(provider, prompt, schema, root=root, **kwargs)
+            runner._desktop_transport = True
+        else:
+            from quant.ops.agent_runners import run as runner
     native_runner = getattr(runner, "__module__", None) == "quant.ops.agent_runners"
     # Native callers share one ledger even with a custom artifact directory.
     # Explicit fake runners keep tests entirely inside their scratch tree.
@@ -325,7 +420,9 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
     policy = policy_context(role)
     request = {"role": role, "task": task, "snapshot": snapshot,
                "policy_hash": canonical_hash(policy), "contract_version": CONTRACT_VERSION,
-               "route": route, "review_required": bool(review)}
+               "route": route, "review_required": bool(review), "transport_version": 2,
+               "submission_review_required": routes["autopaint"]["review"],
+               "execution_transport": "desktop" if desktop_runner else "cli"}
     if _review_target:
         request["reviewed_result_hash"] = canonical_hash(_review_target["result"])
     key = canonical_hash({"request": request, "idempotency_key": idempotency_key,
@@ -333,13 +430,33 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
     endpoints = [{key: route[key] for key in ("provider", "model", "effort") if key in route}, *route["fallback"]]
     # Each endpoint can wait for the global queue and then use its full runtime
     # deadline. The parent lease also covers its independent review chain.
-    reserved_calls = len(endpoints) + (1 + len(route.get("reviewer_fallback", [])) if review else 0)
-    record, claimed = _claim(root, key, request, route["timeout_s"] * 2 * reserved_calls + 120)
+    review_candidates = [route["reviewer"], *route.get("reviewer_fallback", []), *endpoints]
+    review_candidates = list({canonical_hash(e): e for e in review_candidates}.values())
+    reserved_calls = len(endpoints) + (len(review_candidates) if review else 0)
+    evidence_remaining = max(1, int((datetime.fromisoformat(snapshot["expires_at"].replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()))
+    runtime_timeout = evidence_remaining if desktop_runner else route["timeout_s"]
+    record, claimed = _claim(root, key, request, runtime_timeout * 2 * reserved_calls + 120)
     if not claimed:
         return record
     try:
         prompt = build_prompt(role, task, snapshot, policy, _review_target)
+        wire_schema = execution_schema(role, snapshot, _review_target, bind_inputs=False)
+        prompt_bytes = len(prompt.encode("utf-8"))
+        record["input_metrics"] = {
+            "prompt_utf8_bytes": prompt_bytes,
+            "schema_utf8_bytes": len(json.dumps(wire_schema, ensure_ascii=False).encode("utf-8")),
+            "schema_hash": canonical_hash(wire_schema),
+            "transport_version": 2,
+            "token_count_measured": False,
+            "estimated_tokens": round(prompt_bytes / BYTES_PER_TOKEN_ESTIMATE),
+            "estimate_basis": "bytes / 1.9 (empirical ratio); not a metered count",
+        }
+        blocked_providers = set()
+        record["skipped_endpoints"] = []
         for index, endpoint in enumerate(endpoints):
+            if endpoint["provider"] in blocked_providers:
+                record["skipped_endpoints"].append({**endpoint, "reason": "provider_session_limit"})
+                continue
             validate_snapshot(snapshot, now=datetime.now(timezone.utc))
             from quant.ops.agent_health import acquire_call, attach_call_process, release_call
             # Same-runtime model fallbacks are distinct charged attempts. A
@@ -350,7 +467,8 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
             while True:
                 reservation = acquire_call(control, routes["global_limits"],
                                            provider=endpoint["provider"], role=role,
-                                           run_id=call_id, timeout_s=route["timeout_s"])
+                                           run_id=call_id, timeout_s=runtime_timeout,
+                                           **({"execution_transport": "desktop"} if desktop_runner else {}))
                 if reservation["status"] != "concurrency_limit" or time.monotonic() >= queue_deadline:
                     break
                 # A parallel daily workflow must coexist with detached card jobs.
@@ -370,8 +488,8 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
                     runner_options["on_spawn"] = lambda pid: attach_call_process(
                         control, reservation["lease_id"], pid)
                 with tempfile.TemporaryDirectory(prefix="domain-agent-") as temp:
-                    attempt = runner(endpoint["provider"], prompt, execution_schema(role, snapshot, _review_target),
-                                     model=endpoint["model"], timeout_s=route["timeout_s"], cwd=Path(temp),
+                    attempt = runner(endpoint["provider"], prompt, wire_schema,
+                                     model=endpoint["model"], timeout_s=runtime_timeout, cwd=Path(temp),
                                      **runner_options)
                 if type(attempt) is not dict:
                     raise TypeError("runner result must be an object")
@@ -393,6 +511,9 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
                 try:
                     payload = validate_result(role, attempt["payload"], snapshot=snapshot,
                                               now=datetime.now(timezone.utc))
+                    if (payload["generated_at"] != snapshot["as_of"]
+                            or payload["expires_at"] != snapshot["expires_at"]):
+                        raise ValueError("result timestamps do not match frozen execution contract")
                     target = payload["review"]
                     if _review_target:
                         if not target or target["run_id"] != _review_target["run_id"]:
@@ -414,25 +535,26 @@ def run_role(role: str, task: str, snapshot: dict, *, routes: dict | None = None
             # Keep provenance but avoid a second copy of every potentially large payload.
             attempt.pop("payload", None)
             record["attempts"].append(attempt)
+            if attempt.get("error") == "provider_session_limit":
+                blocked_providers.add(endpoint["provider"])
             if record["result"] is not None:
                 break
         if record["result"] is None:
             record["status"] = "failed"
         elif review:
-            reviewer = route["reviewer"]
-            if reviewer["provider"] == record["provider"]:
+            independent = [e for e in review_candidates
+                           if e["provider"] != record["provider"]
+                           and e["provider"] not in blocked_providers]
+            if not independent:
                 record["status"] = "needs_review"
                 record["review_error"] = "independent provider unavailable after fallback"
             else:
                 reviewer_routes = deepcopy(routes)
                 reviewer_route = reviewer_routes["roles"][role]
                 reviewer_route.pop("effort", None)
-                # A legacy primary fallback can change runtime. Filter every
-                # reviewer attempt against the runtime that actually produced
-                # the result, including the reviewer's secondary model.
-                reviewer_route.update(reviewer, fallback=[
-                    deepcopy(endpoint) for endpoint in route.get("reviewer_fallback", [])
-                    if endpoint["provider"] != record["provider"]])
+                # Review follows the actual research provider, not its default.
+                # Never allow research failover to become same-provider approval.
+                reviewer_route.update(independent[0], fallback=deepcopy(independent[1:]))
                 target = {"run_id": record["run_id"], "result": record["result"]}
                 rr = run_role(role, "复核此提案的证据、规则和失效条件。", snapshot,
                               routes=reviewer_routes, run_dir=root, runner=runner,
@@ -463,15 +585,21 @@ def submit_run(run_id: str, *, apply: bool = False, run_dir: Path | None = None,
         job = read_json(root / "jobs" / f"{record['job_key']}.json")
         if job["run_id"] != run_id or job["status"] != "complete":
             raise ValueError("run is not the current completed job")
-        preview = apply_proposal(record, apply=False)
+        # Only new host-recorded opt-outs under the current policy waive model
+        # review. Legacy records fail closed; model output cannot set this flag.
+        require_review = (record.get("submission_review_required", True) is not False
+                          or load_routes()["autopaint"]["review"])
+        preview = apply_proposal(record, apply=False, require_review=require_review)
         if not apply:
             return preview
         if not preview.get("can_apply", False):
             raise SubmitError("submission blocked: " + ", ".join(preview.get("blocked_reasons", [])))
         def check_live_switch():
+            current = load_routes()["autopaint"]
+            if current["review"] and not require_review:
+                raise SubmitError("model review requirement restored before submission")
             if automatic:
-                current = load_routes()["autopaint"]
-                if not current["enabled"] or not current["apply"] or not current["review"]:
+                if not current["enabled"] or not current["apply"]:
                     raise SubmitError("automatic submission disabled by current routing policy")
         check_live_switch()
         # A crash after the state write leaves an explicit uncertain receipt, never an automatic retry.
@@ -484,7 +612,7 @@ def submit_run(run_id: str, *, apply: bool = False, run_dir: Path | None = None,
                     raise SubmitError("policy changed before card commit")
                 record["submission"]["prepared"] = receipt
                 atomic_write_json(path, record)
-            receipt = apply_proposal(record, apply=True, on_precommit=prepared)
+            receipt = apply_proposal(record, apply=True, require_review=require_review, on_precommit=prepared)
         except SubmitError as exc:
             # A writer may fail after replacing state. Keep the durable retry barrier
             # unless the submission boundary can prove there was no state effect.
@@ -516,17 +644,22 @@ def reconcile_run(run_id: str, *, run_dir: Path | None = None) -> dict:
         if submission.get("status") != "applying" or not prepared:
             raise ValueError("no prepared uncertain submission to reconcile")
         original = record["snapshot"]["data"]
+        if not record.get("review") and record.get("submission_review_required", True) is not False:
+            raise ValueError("unreviewed submission lacks host policy authorization")
         expected = {"run_id": run_id, "ticker": original["ticker"], "bucket": original["bucket"],
                     "before_revision": original["card_revision"],
                     "proposal_hash": canonical_hash(record["result"]), "policy_hash": record["policy_hash"],
-                    "review_run_id": record["review"]["run_id"]}
+                    "review_run_id": (record.get("review") or {}).get("run_id")}
+        if not record.get("review"):
+            expected["review_policy"] = "not_required_by_host"
         if prepared.get("bucket") not in ("positions", "watchlist") or any(
                 prepared.get(k) != v for k, v in expected.items()):
-            raise ValueError("prepared submission is not bound to the original reviewed run")
+            raise ValueError("prepared submission is not bound to the original proposal run")
         with state_lock(STATE_LOCK_PATH):
             source = POSITIONS_PATH if prepared["bucket"] == "positions" else WATCHLIST_PATH
             card = (read_json(source).get("tickers") or {}).get(prepared["ticker"])
-            receipt = reconcile_submission(prepared, canonical_hash(card))
+            # 与 writer/snapshot 同一判别式 (card_revision), 否则对账永远 needs_review。
+            receipt = reconcile_submission(prepared, card_revision(card))
             receipt.update(run_id=run_id, prepared=prepared, reconciled_at=datetime.now(timezone.utc).isoformat())
             record["submission"] = receipt
             atomic_write_json(path, record)

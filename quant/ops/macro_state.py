@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from quant.core import macro_playbook  # noqa: E402
 from quant.core.io_json import atomic_write_json, read_json, state_lock  # noqa: E402
 from quant.core.paths import (  # noqa: E402
     MACRO_CURRENT_PATH,
@@ -457,6 +458,49 @@ def _check_event_link(doc: dict, events_dir: Path,
         raise MacroStateError("post-event metric baselines differ from immutable plan")
 
 
+def _playbook_path(events_dir: Path, event_id: str) -> Path:
+    return events_dir / f"{event_id}-playbook.json"
+
+
+def _check_playbook_link(doc: dict, events_dir: Path) -> None:
+    """Tier-1 plans are authored as an event playbook; the plan's scenarios are compiled from it.
+
+    Rationale: the scenario tree used to be hand-written schema prose with no levels,
+    no participants and no second leg. The playbook (`quant/core/macro_playbook.py`) is the
+    single authoring source for both the human report and the published scenarios, so a
+    pre_event commit requires `<event-id>-playbook.json` next to the plan and refuses
+    scenarios that were not compiled from it. Post-event runs re-check the same file, which
+    freezes the playbook alongside the immutable plan; plans authored before playbooks
+    existed have no sibling file and are accepted as legacy.
+    """
+    event = doc.get("next_event")
+    kind = doc.get("run_kind")
+    if not isinstance(event, dict) or event.get("tier") != "tier1" or kind not in {"pre_event", "post_event"}:
+        return
+    path = _playbook_path(events_dir, event["event_id"])
+    if not path.exists():
+        if kind == "pre_event":
+            raise MacroStateError(
+                f"pre_event requires an event playbook: {path} "
+                "(author it as quant/core/macro_playbook JSON; compile scenarios with "
+                "quant/report/macro_playbook_report.py --schema-scenarios)")
+        return
+    try:
+        playbook = macro_playbook.from_dict(read_json(path))
+    except (ValueError, TypeError) as exc:
+        raise MacroStateError(f"event playbook unreadable: {exc}") from exc
+    errors = macro_playbook.validate(playbook)
+    if errors:
+        raise MacroStateError("event playbook invalid: " + "; ".join(errors[:5]))
+    if playbook.event_id != event["event_id"] or playbook.scheduled_at_et != event["scheduled_at_et"]:
+        raise MacroStateError("event playbook event_id/scheduled_at_et differ from next_event")
+    if macro_playbook.to_schema_scenarios(playbook) != event["scenarios"]:
+        what = "plan" if kind == "pre_event" else "immutable plan (playbook edited after publication?)"
+        raise MacroStateError(
+            f"next_event.scenarios were not compiled from the event playbook; {what} and playbook desync. "
+            "Regenerate with quant/report/macro_playbook_report.py --schema-scenarios, do not hand-edit")
+
+
 def _same_payload(left: dict, right: dict) -> bool:
     """Writer-owned linkage/hash may change on retries; evidence may not."""
     ignored = {"previous_run_id", "state_hash"}
@@ -540,6 +584,7 @@ def commit_state(
             raise MacroStateError("; ".join(final_errors[:20]))
 
         _check_event_link(doc, events_dir, schema_path)
+        _check_playbook_link(doc, events_dir)
         event_target = _event_target(doc, events_dir)
         if event_target:
             path, kind = event_target

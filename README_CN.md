@@ -38,12 +38,12 @@ flowchart TD
 
 ## 默认 Agent 分工
 
-| Agent | 默认运行器 | 独立复核运行器 | 职责 |
+| Agent | 运行器（运行时点） | 独立复核运行器 | 职责 |
 |---|---|---|---|
-| **宏观** | **Codex CLI** | Claude Code | 解读既有宏观证据、相位与不确定性，提供环境先验 |
-| **技术分析** | **Claude Code** | Codex CLI | 判读价格结构、gate 与 zone，提出单卡更新提案 |
-| **风控／仓位管理** | **Claude Code** | Codex CLI | 检查全组合敞口、购买力、退出约束和机械 sizing 收据 |
-| **估值** | **Codex CLI** | Claude Code | 解读财务报表、估值账本、情景和隐含预期 |
+| **宏观** | **Codex**（周复盘 / 估值日更） | Claude | 解读既有宏观证据、相位与不确定性，提供环境先验；每日简报直接读情报流程发布的 `macro/current.json` |
+| **技术分析** | **Claude**（每日唯一模型角色；同收盘同卡片版本复用 run） | Codex | 判读价格结构、gate 与 zone，提出单卡更新提案 |
+| **风控／仓位管理** | 每日 = 代码渲染（`quant/report/risk_receipt.py`）；周复盘 = **Claude** | Codex | 检查全组合敞口、购买力、退出约束和机械 sizing 收据 |
+| **估值** | **Codex**（独立日更） | Claude | 解读财务报表、估值账本、情景和隐含预期 |
 
 [agents/routing.json](agents/routing.json) 是配置真源。领域角色、运行器、模型提供方和模型 ID 是四个概念：宏观是角色，Codex CLI 是运行器，OpenAI 是模型提供方，某个具体 GPT 版本才是模型。路由 v2 通过 `model_profiles` 集中定义具体模型，各角色引用主用 profile 与独立复核 profile。
 
@@ -52,9 +52,9 @@ flowchart TD
 | Anthropic / Claude Code | `claude-fable-5-1` | `claude-opus-5` | `xhigh`，即 extra high |
 | OpenAI / Codex CLI | `gpt-6-astra` | `gpt-5.6-sol` | `high` |
 
-主用、备用和复核调用都明确传入 model 与 effort，不继承桌面对话中选中的模型。回执分别保存请求参数和 CLI 元数据实际报告的模型 ID；未报告或报告多个模型时，如实记录，不用请求值代替确认结果。请求复核时才调用 reviewer，卡片提交必须取得独立批准。
+主用、备用和复核调用都明确传入 model 与 effort，不继承桌面对话中选中的模型。回执分别保存请求参数和 CLI 元数据实际报告的模型 ID；未报告或报告多个模型时，如实记录，不用请求值代替确认结果。请求复核时才调用 reviewer；卡片提交是否需要独立批准由 `autopaint.review` 决定。
 
-模型有依据地弃权时，系统保留弃权结果。运行失败、超时或结果契约不合规，才可以尝试同一 profile 的次选模型。复核使用另一运行器，并可在失败时尝试其自身的次选模型；复核不批准不触发换模型重问。后续模型迭代按[模型维护规则](agents/MODEL_POLICY.md)核验版本、完成验证后更新。
+模型有依据地弃权时，系统保留弃权结果。当前生产配置关闭模型备用与独立复核：失败保留为失败，不转交其他模型。控制器保留可配置的故障接管与复核能力，供显式重新启用。明确的 session 额度错误会跳过本次运行中该运行器的其余模型。复核选择与实际研究运行器相反的一方；该方不可用时研究保留为 needs_review，不能提交。复核不批准不触发换模型重问。后续模型迭代按[模型维护规则](agents/MODEL_POLICY.md)核验版本、完成验证后更新。
 
 ## Agent 如何协作
 
@@ -63,11 +63,13 @@ flowchart TD
 3. **组合复核。** 风控读取自己的原始输入与本轮宏观、技术报告。风控视图覆盖全部受管持仓，包括期权自身退出规则与可用 Greeks；金额来自既有机械计算。
 4. **定向追问。** 跨领域请求按接收角色合并，最多追加一轮，未解决的问题留在记录中。同一结论经另一模型转述，不增加独立证据。
 
-默认配置允许单次 workflow 最多 3 个并行调用、8 次模型调用。宿主另设所有任务共享的上限：原生调用并发最多 3 个，滚动一小时内最多 24 次。备用同样消耗预算，并发排队有超时。这些额度约束本系统的工作量，不代表任一模型账户的剩余额度或费用。
+当前配置允许单次 workflow 最多 2 个并行调用、8 次模型调用，不自动追问。宿主另设所有任务共享的上限：原生调用并发最多 2 个，滚动一小时内最多 12 次。备用同样消耗预算，并发排队有超时。这些额度约束本系统的工作量，不代表任一模型账户的剩余额度或费用。
+
+`execution_transport = desktop` 时宿主不启动模型 CLI：数据包写入 `var/agent-runs/desktop/`，各运行器的 Desktop 会话按 [tasks/desktop-research.md](tasks/desktop-research.md) 领取、作答并提交；编排、冻结证据、受控提交与 applied 回执仍归宿主。每日循环只跑技术角色，风控收据由代码渲染，三角色工作流只在周复盘。
 
 ## 复核后的自动写卡
 
-默认配置开启 `autopaint.enabled`、`autopaint.apply` 和 `autopaint.review`。符合条件的缺卡、失效卡可进入自动更新流程。组合报告本身不写卡；每个目标通过独立单卡任务生成技术提案并接受复核。
+当前配置开启 `autopaint.enabled` 与 `autopaint.apply`，`autopaint.review=false`：技术提案通过宿主证据、revision 与机械政策检查后写入，不做第二模型复核。新研究记录绑定该复核政策，旧记录默认仍要求复核；回执标明模型复核「不需要」，而不是「已批准」。符合条件的缺卡、失效卡可进入自动更新流程。组合报告本身不写卡；每个目标通过独立单卡任务生成技术提案，是否做独立模型复核由宿主政策决定。
 
 宿主检查原始证据、结果与政策绑定、有效期、参数白名单和目标卡当前版本，保存原卡备份及提交准备回执，再调用既有的[卡片 writer](.claude/skills/trading-analysis/scripts/update_position_zones.py)。券商字段、lots、在途订单和绑定约束继续受到保护。
 
@@ -89,10 +91,10 @@ flowchart TD
 | 任务 | 领域工作 |
 |---|---|
 | `heartbeat` | 券商与状态同步、机械风控和退出告警、健康检查、非阻塞缺卡派发 |
-| `overnight-briefing` | 刷新每日输入，运行宏观、技术与风控协作，处理复核重画队列并生成入场计划 |
-| `postclose-transition` | 先评估退出，再执行完整收盘后的机械转移，运行技术／风控研究并处理复核重画 |
+| `overnight-briefing` | 刷新每日输入，运行技术角色（同收盘同卡片版本复用）并附代码渲染风控收据，处理重画队列并生成入场计划 |
+| `postclose-transition` | 先评估退出，再执行完整收盘后的机械转移，渲染转移达标收据，运行技术研究并附代码渲染风控收据，处理重画 |
 | `gate-ladder-report` | 等待同交易日 postclose 完结后，输出机械 gate 阶梯表 |
-| `chart-read` | 基于完整日线及已完成盘后处理的状态，生成技术判读和机械结构 digest |
+| `chart-read` | 代码渲染两种可交易形态（抄底 / 趋势确认）已形成或即将形成的清单；零模型调用 |
 | `weekly-portfolio-review` | 用既有绩效、宏观与技术证据完成组合风控复盘，NAV 周变剔除外部现金流 |
 
 独立的 `valuation-daily` 任务（[tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)）自行刷新数据并运行宏观情景与估值链，报告归档在 `var/valuation-daily/`。盘前与周复盘不运行估值角色。
@@ -108,7 +110,7 @@ flowchart TD
 → 生成入场计划
 ```
 
-同步重画阶段每轮最多处理两张卡，余下目标留在待办中。缺卡检测也可以后台派发，使用同一个单卡控制器与全局额度。
+同步重画阶段每轮至少处理五张卡，队列更长时按 ⌈N/2⌉ 取整以保证两轮排空，余下目标留在待办中。缺卡检测也可以后台派发，使用同一个单卡控制器与全局额度。
 
 [market_sessions.py](quant/core/market_sessions.py) 通过 XNYS 日历处理休市、半日市和夏令时。每份 prompt 先跑 `quant/ops/agent_jobs.py due --kind <kind>`；postclose、ladder、chart 分别在实际收盘后 10、20、35 分钟开放运行窗口，统一在收盘后 60 分钟截止。时间放行与上游任务完成是两项独立检查。固定版本的日历当前覆盖 2000–2028 年；数据不可用或超出支持范围时停止判断，不退回按星期几猜。
 

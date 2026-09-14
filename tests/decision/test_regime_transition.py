@@ -130,6 +130,40 @@ def test_up_transition_relative_volume_leg_rescues_quiet_tape(monkeypatch):
     assert "rel SMH" in tr["reason"] and "2.00" in tr["reason"]
 
 
+def test_volume_leg_threshold_is_the_ruled_1_1(monkeypatch):
+    """量腿阈值 = **RelVR ≥1.1** (adaptive_volume_leg round-3 预注册回测)。
+
+    典型形状: 自身 1.41 / SMH 1.19 → RelVR 1.18 —— 老阈值 1.2 差 0.02 被拦,
+    新阈值放行。同时钉死**下边界仍在**: 1.05 不过 (放松是有限的, 不是拆腿)。
+    """
+    monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 1.19)
+    card = _card(next_regime={**NEXT, "entry_gate": {
+        **NEXT["entry_gate"], "volume_ratio_min": rt.RECLAIM_VOL_RATIO_MIN}})
+    bars = _bars([1010.0] * 25)
+    bars[-1]["volume"] = 1_434_700                    # 自身量比 1.404 → RelVR 1.404/1.19 = 1.18
+    tr = rt.detect_transition("MU", card, bars)
+    assert tr and tr["direction"] == "up" and "1.18" in tr["reason"]
+
+    old = _card(next_regime={**NEXT, "entry_gate": {**NEXT["entry_gate"], "volume_ratio_min": 1.2}})
+    assert rt.detect_transition("MU", old, bars) is None      # 卡上写死 1.2 的仍按 1.2 拦
+
+    quiet = _bars([1010.0] * 25)
+    quiet[-1]["volume"] = 1_253_300                   # RelVR 1.238/1.19 = 1.04 < 1.1 — 下边界仍在
+    assert rt.detect_transition("MU", card, quiet) is None
+
+
+def test_card_field_not_the_constant_drives_the_volume_leg(monkeypatch):
+    """🚫 改常量 ≠ 改 live: 转移机读的是**卡片字段**。这条钉死接线里最容易漏的一步
+    (光改 RECLAIM_VOL_RATIO_MIN 而不迁卡 → 行为一点不变, 见 ops/migrate_volume_leg_threshold)。"""
+    monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 1.19)
+    bars = _bars([1010.0] * 25)
+    bars[-1]["volume"] = 1_434_700                    # RelVR 1.18: 落在 1.1 与 1.2 之间
+    stale = _card(next_regime={**NEXT, "entry_gate": {**NEXT["entry_gate"], "volume_ratio_min": 1.2}})
+    migrated = _card(next_regime={**NEXT, "entry_gate": {**NEXT["entry_gate"], "volume_ratio_min": 1.1}})
+    assert rt.detect_transition("MU", stale, bars) is None     # 未迁的卡: 常量改了也没用
+    assert rt.detect_transition("MU", migrated, bars)          # 迁过的卡: 才是新行为
+
+
 def test_volume_leg_floor_and_fallback(monkeypatch):
     """分母地板 0.4 (基准 0.2 不放大成 5×); 基准缺日 → 绝对兜底且 note 说出口。"""
     monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 0.2)
@@ -264,7 +298,7 @@ def test_down_transition_fills_the_volume_leg_default_on_the_reclaim_gate():
     bars = _bars([850.0] * 24 + [790.0, 780.0])
     rt.apply_transition(card, rt.detect_transition("TST", card, bars), bars)
     eg = card["agent"]["next_regime"]["entry_gate"]
-    assert eg["volume_ratio_min"] == rt.RECLAIM_VOL_RATIO_MIN == 1.2
+    assert eg["volume_ratio_min"] == rt.RECLAIM_VOL_RATIO_MIN == 1.1   # round-3 阈值
 
     explicit = _card(last_regime={"zones": {}, "repair_gate": {
         "level": 800.0, "days": 2, "volume_ratio_min": 1.5}})
@@ -548,3 +582,94 @@ def test_option_card_cannot_black_out_the_whole_bucket(monkeypatch):
     assert [t["ticker"] for t in out["transitions"]] == ["MU"]      # 正股照常转移
     assert written["pos"] is pos
     assert not schema.validate_positions_doc(pos)[0]               # 写得进去
+
+
+# ── 量腿对齐日 = streak 内任一日 (volume_clock round-2) ──
+
+def test_streak_above_counts_consecutive_closes_from_the_end():
+    assert rt.streak_above(_bars([100, 101, 99, 102, 103]), 100.5) == 2
+    assert rt.streak_above(_bars([100, 101, 102]), 100.5) == 2
+    assert rt.streak_above(_bars([100, 99]), 100.5) == 0
+    assert rt.streak_above([], 100.5) == 0
+
+
+def test_volume_leg_accepts_an_earlier_streak_day_and_names_it(monkeypatch):
+    """突破日放量签名: day-1 放量 (RelVR ≥1.2), 完成日平量。streak=2 过, 旧口径 (streak=1) 不过;
+    note 写明来自哪一日, 数字仍在末位 (gate_ladder_report.vol_short 取末位 token)。"""
+    monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 1.0)
+    bars = _bars([100.0] * 25)
+    bars[-2]["volume"] = 5_000_000                    # day-1 放量 → 量比 ≈ 4.2
+    ok1, note1 = rt.volume_leg(bars, 1.2, "MU", streak=1)
+    assert ok1 is False
+    ok2, note2 = rt.volume_leg(bars, 1.2, "MU", streak=2)
+    assert ok2 is True and "streak第1日" in note2 and bars[-2]["time"][5:10] in note2
+    assert float(note2.rsplit(" ", 1)[-1]) >= 1.2      # 末位 = 那一日的 RelVR
+    ok3, note3 = rt.volume_leg(bars, 1.2, "MU", streak=5)   # streak 更长也只看得到这一天
+    assert ok3 is True and "streak第4日" in note3
+    bars[-1]["volume"] = 5_000_000                    # 完成日自己过 → note 与旧口径逐字相同
+    assert rt.volume_leg(bars, 1.2, "MU", streak=2) == rt.volume_leg(bars, 1.2, "MU")
+
+
+def test_up_transition_fires_on_day_one_volume_while_price_holds(monkeypatch):
+    """×2 价格腿在完成日成立, 量腿由 streak 首日顶上 → 转移; reason 带「streak第1日」收据。"""
+    monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 1.0)
+    card = _card(next_regime={**NEXT, "entry_gate": {"level": 1005.0, "days": 2,
+                                                     "volume_ratio_min": 1.2}})
+    bars = _bars([1000.0] * 23 + [1010.0, 1012.0])
+    bars[-2]["volume"] = 5_000_000                    # 突破日放量, 完成日平量
+    tr = rt.detect_transition("MU", card, bars, today="2026-09-08")
+    assert tr and tr["direction"] == "up" and tr["days"] == 2 and "streak第1日" in tr["reason"]
+    flat = _bars([1000.0] * 23 + [1010.0, 1012.0])   # 两天都平量 → 仍不切
+    assert rt.detect_transition("MU", card, flat, today="2026-09-08") is None
+
+
+def test_day_one_volume_is_forgotten_after_a_dip_below_the_gate(monkeypatch):
+    """跌回归零: 放量日之后收盘跌回 gate 之下, 再站上的两天平量 → 不切 (day-1 的量作废)。"""
+    monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 1.0)
+    card = _card(next_regime={**NEXT, "entry_gate": {"level": 1005.0, "days": 2,
+                                                     "volume_ratio_min": 1.2}})
+    bars = _bars([1000.0] * 21 + [1010.0, 1000.0, 1010.0, 1012.0])
+    bars[-4]["volume"] = 5_000_000
+    assert rt.detect_transition("MU", card, bars, today="2026-09-08") is None
+
+
+def test_volume_leg_view_never_disagrees_with_its_structured_receipt():
+    """`volume_leg` 是 `volume_leg_detail` 的二元视图, 两者同一次计算。
+    这条守卫防的是「同概念双判别式」—— 收据说过了、授权说没过。"""
+    bars = _bars([100.0] * 25)
+    for min_ratio in (None, 0.5, 1.1, 99.0):
+        for streak in (1, 2, 5):
+            d = rt.volume_leg_detail(bars, min_ratio, "MU", streak=streak)
+            assert rt.volume_leg(bars, min_ratio, "MU", streak=streak) == (d["ok"], d["note"])
+
+
+def test_transition_receipt_carries_the_qualifying_condition(monkeypatch):
+    """转移达标条件必须明确可读: 不能只活在 reason 散文里。"""
+    monkeypatch.setattr(rt, "_klines", lambda t: [])
+    monkeypatch.setattr(rt, "rel_volume_detail", lambda k, t=None: {
+        "value": 1.68, "note": "量比(rel SMH 0.51) 1.68", "degraded": False,
+        "mode": "relative", "own_ratio": 0.855, "benchmark": "SMH",
+        "benchmark_ratio": 0.51, "date": "2026-09-09"})
+    bars = _bars([90.0] * 20 + [101.25, 104.75])
+    card = {"agent": {"zones": {}, "next_regime": {
+        "name": "R_突破_100", "entry_gate": {"level": 100.0, "days": 2, "volume_ratio_min": 1.1}}}}
+    tr = rt.detect_transition("SYN", card, bars, today="2026-09-09")
+    assert tr["confirm"]["mode"] == "close_x2" and tr["confirm"]["level"] == 100.0
+    assert [c["close"] for c in tr["confirm"]["closes"]] == [101.25, 104.75]
+    assert [c["date"] for c in tr["confirm"]["closes"]] == ["2026-07-21", "2026-07-22"]
+    assert tr["volume"]["required"] == 1.1 and tr["volume"]["actual"] == 1.68
+    assert tr["volume"]["benchmark"] == "SMH" and tr["volume"]["mode"] == "relative"
+    assert tr["volume"]["aligned_date"] == "2026-09-09"
+    # 落卡: regime_history 同时留下结构化收据
+    rt.apply_transition(card, tr)
+    hist = card["agent"]["regime_history"][-1]
+    assert hist["confirm"]["mode"] == "close_x2" and hist["volume"]["actual"] == 1.68
+
+
+def test_unknown_ticker_still_resolves_to_the_default_benchmark():
+    """`benchmark_for` 对 None/未知一律给 QQQ —— 结构化重构时
+    一个 `if ticker else None` 守卫差点把它改成「没有基准」。"""
+    bars = _bars([100.0] * 25)
+    for tk in (None, "", "ZZZZ"):
+        assert rt.rel_volume_detail(bars, tk)["benchmark"] == "QQQ"
+    assert rt.rel_volume_detail(bars, "MU")["benchmark"] == "SMH"

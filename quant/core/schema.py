@@ -32,11 +32,25 @@ LEGACY_TIER_MAP = {"core": "position", "trading": "position"}
 # 改写 auth {cap_pct_nav, gate_no} (sizing.derive_auth)。round_no =
 # 当天那一版的键 (lots 近似轮号), 只读留存 —— tier_legacy / classification 先例。
 CLASSIFICATIONS = {"confirmed", "probe", "early_risky"}
-ZONE_AT_FILL = {
-    "zone1", "zone2", "waiting", "trim", "above_no_chase", "unknown",
-    "gap_z1_z2", "below_zones",
-}
-PRICE_FLAGS = {"above_no_chase", "in_trim_zone"}
+ZONE_AT_FILL = {"zone1", "zone2", "waiting", "trim", "above_no_chase", "unknown",
+                # 补齐 core.structure.zone_position 的全值域 (落库即盖
+                # zone_at_fill, 机械盖章不做有损映射):
+                "gap_z1_z2", "below_zones"}
+# BUY fill 的价位违规标记 (INFRA-5(b)): trade_history_sync 落库即盖,
+# brief 的 INFRA:fill_price_breach 点名。带 auth 标签的违规此前完全静默。
+PRICE_FLAGS = {"above_no_chase", "in_trim_zone",
+               # 期权 BUY 的**正股**价位 (期权限价锚 = 正股 z1 回踩, 追高 =
+               # 规则外): 判别式 core.structure.option_fill_flags, 60m bar 整根在带外才判。
+               "above_z1", "below_z2",
+               # reversal_probe 类: 阶梯首档 = 信号日收盘, 整根 60m bar 在其上
+               # 成交 = 追高 (本类不看 z1, z1 是 gate 类的锚)。
+               "above_signal_close"}
+# 入场类: gate = 正股 gate 授权的常规通道 (缺省, 不写即是);
+# reversal_probe = 反转探针 (core.reversal), 只给期权, 授权住 option_plans.json 不住正股卡。
+# 期权持仓卡 agent.entry_class 决定 exit_guard 的退出栈形状 (gate = 卡 stop, S1 关)。
+ENTRY_CLASSES = {"gate", "reversal_probe"}
+# 期权 BUY 落库时正股价的来源 (trade_history_sync.underlying_bar_at): 60m 优先 / 当日日线 / 拉不到
+UNDERLYING_AT_FILL_BASES = {"60m", "1d", "unknown"}
 STOP_BASES = {"underlying", "option_price"}
 
 QTY_TOL = 1e-6
@@ -289,6 +303,9 @@ def validate_positions_doc(doc: dict) -> tuple[list[str], list[str]]:
             errors.append(f"{p}.agent.thesis.summary missing")
         if not (agent.get("action") or {}).get("intent"):
             errors.append(f"{p}.agent.action.intent missing")
+        ec = agent.get("entry_class")
+        if ec is not None and ec not in ENTRY_CLASSES:
+            errors.append(f"{p}.agent.entry_class must be one of {sorted(ENTRY_CLASSES)} (got {ec!r})")
 
         zones = agent.get("zones")
         if isinstance(zones, dict):
@@ -360,6 +377,9 @@ def validate_watchlist_doc(doc: dict) -> tuple[list[str], list[str]]:
         agent = t.get("agent") or {}
         if not (agent.get("thesis") or {}).get("summary"):
             errors.append(f"{p}.agent.thesis.summary missing")
+        ec = agent.get("entry_class")
+        if ec is not None and ec not in ENTRY_CLASSES:
+            errors.append(f"{p}.agent.entry_class must be one of {sorted(ENTRY_CLASSES)} (got {ec!r})")
         zones = agent.get("zones")
         if isinstance(zones, dict):
             for zk in ("accumulation_zone_1", "accumulation_zone_2", "trim_zone"):
@@ -418,12 +438,19 @@ def validate_event(event: dict) -> list[str]:
             gn = auth.get("gate_no", auth.get("round_no"))
             if not isinstance(gn, int) or gn < 1:
                 errors.append("auth.gate_no must be int >= 1")
-    price_flags = event.get("price_flags")
-    if price_flags is not None:
-        if not isinstance(price_flags, list) or not set(price_flags) <= PRICE_FLAGS:
-            errors.append(
-                f"price_flags must be a list ⊆ {sorted(PRICE_FLAGS)} (got {price_flags!r})"
-            )
+            ec = auth.get("entry_class")
+            if ec is not None and ec not in ENTRY_CLASSES:
+                errors.append(f"auth.entry_class must be one of {sorted(ENTRY_CLASSES)} (got {ec!r})")
+    pf = event.get("price_flags")
+    if pf is not None:
+        if not isinstance(pf, list) or not set(pf) <= PRICE_FLAGS:
+            errors.append(f"price_flags must be a list ⊆ {sorted(PRICE_FLAGS)} (got {pf!r})")
+    uf = event.get("underlying_at_fill")
+    if uf is not None:
+        if (not isinstance(uf, dict) or uf.get("basis") not in UNDERLYING_AT_FILL_BASES
+                or (uf.get("price") is not None and not _is_num(uf.get("price")))):
+            errors.append("underlying_at_fill must be {price: num|null, basis: "
+                          + str(sorted(UNDERLYING_AT_FILL_BASES)) + "} (got " + repr(uf) + ")")
     if event.get("fees") is not None and not _is_num(event.get("fees")):
         errors.append("fees must be numeric when present")
     return errors

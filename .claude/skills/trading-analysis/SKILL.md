@@ -62,7 +62,7 @@ Every meaningful trading analysis should try to produce these fields when enough
 - `accumulation_zone_2`
 - `trim_zone`
 - `no_chase_above`
-- `stop_level`（期权 entry 必须配 `stop_level_basis`: underlying | option_price）
+- `stop_level`（期权 entry 必须配 `stop_level_basis`: underlying | option_price）；**重画必须显式传 `--stop-level`**（保持 = 传原值 + 原 `--stop-level-days`；不传 = writer 拒绝，不是保持；只传 `--stop-level` = 并入不重画）
 - `invalid_if`
 - `timeframe`
 - `valid_until`

@@ -166,11 +166,27 @@ def test_claude_schema_rejects_unknown_keywords_without_dropping_named_propertie
         ar._claude_schema({**schema, "unevaluatedProperties": False})
 
 
+def test_claude_projection_preserves_shared_evidence_definition_and_bindings():
+    from quant.ops.agent_runtime import execution_schema
+    from quant.ops.agent_snapshots import make_snapshot
+
+    source = execution_schema("macro", make_snapshot({"synthetic": True}, evidence_refs=["source-1"]))
+    before = json.dumps(source, sort_keys=True)
+    wire = ar._claude_schema(source)
+    assert wire["$defs"] == {"evidence_ref": {"type": "string", "enum": ["source-1"]}}
+    chain = wire["properties"]["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]
+    assert chain["upstream"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
+    assert chain["feedback"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
+    assert json.dumps(source, sort_keys=True) == before
+
+
 @pytest.mark.parametrize("field,value", [("summary", ""), ("summary", "x" * 12001),
                                         ("unknowns", ["synthetic"] * 101)])
 def test_projected_claude_output_still_fails_the_full_host_contract(
         field, value, monkeypatch, fake_cli, tmp_path):
-    from quant.core.agent_contracts import CONTRACT_VERSION, RESULT_SCHEMA_VERSION
+    from quant.core.agent_contracts import CONTRACT_VERSION
+    from quant.core.macro_analysis import MACRO_RESULT_SCHEMA_VERSION
+    from tests.core.test_macro_analysis import macro_fields
     from quant.ops import agent_runtime as runtime
     from quant.ops.agent_snapshots import make_snapshot
 
@@ -181,10 +197,14 @@ def test_projected_claude_output_still_fails_the_full_host_contract(
         if "--print" not in argv:
             return capture(argv, prompt, cwd, env, timeout_s, limit)
         packet = json.loads(prompt.split("\n", 1)[1])
-        # The transport projection never replaces the complete prompt contract.
-        assert packet["output_schema"]["properties"]["summary"]["maxLength"] == 12000
+        # The full host contract remains enforced even without a duplicate in
+        # prompt text; unsupported wire bounds remain generation descriptions.
+        assert "output_schema" not in packet
+        wire = json.loads(argv[argv.index("--json-schema") + 1])
+        assert '"maxLength": 12000' in wire["properties"]["summary"]["description"]
         snapshot = packet["snapshot"]
-        payload = {"schema_version": RESULT_SCHEMA_VERSION, "contract_version": CONTRACT_VERSION,
+        payload = {"schema_version": MACRO_RESULT_SCHEMA_VERSION, "contract_version": CONTRACT_VERSION,
+                   **macro_fields(),
                    "valuation_scenarios": [], "role": "macro", "snapshot_id": snapshot["snapshot_id"],
                    "input_hash": snapshot["input_hash"], "generated_at": snapshot["as_of"],
                    "expires_at": snapshot["expires_at"], "summary": "synthetic",
@@ -215,6 +235,41 @@ def test_missing_runner_and_unsupported_provider(monkeypatch):
     monkeypatch.setattr(ar, "_binary", lambda p: None)
     assert ar.run("claude", "evidence", SCHEMA)["status"] == "unavailable"
     assert ar.run("unknown", "evidence", SCHEMA)["error"] == "unsupported_provider"
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("message,expected", [
+    ("You've hit your session limit · resets 10:30pm (Asia/Singapore) private-value",
+     "provider_session_limit"),
+    ("rate limited private-value", "provider_rate_limit"),
+])
+def test_claude_quota_error_is_classified_without_raw_text(
+        monkeypatch, fake_cli, tmp_path, exit_code, message, expected):
+    original = ar._capture
+
+    def capture(argv, *args, **kwargs):
+        if "--print" in argv:
+            return exit_code, claude_result(is_error=True, api_error_status=429,
+                                            result=message), "secret-stderr"
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(ar, "_capture", capture)
+    result = ar.run("claude", "evidence", SCHEMA, cwd=tmp_path)
+    assert result["status"] == "failed" and result["error"] == expected
+    assert result["payload"] is None
+    assert "private-value" not in json.dumps(result)
+    assert "secret-stderr" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("stdout", [
+    "not-json",
+    '[]',
+    '{"type":"result","is_error":true,"api_error_status":"429"}',
+    claude_result(result="You've hit your session limit", api_error_status=429),
+    claude_result(is_error=True, result="You've hit your session limit", api_error_status=400),
+])
+def test_quota_classification_requires_error_envelope(stdout):
+    assert ar._claude_failure_code(stdout) is None
 
 
 def test_nonzero_exit_does_not_echo_secret_stderr(monkeypatch, fake_cli, tmp_path):

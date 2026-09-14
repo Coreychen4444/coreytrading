@@ -173,3 +173,15 @@ def test_price_breach_alert_reaches_the_brief(events, monkeypatch):
     out = pb.build_brief([], "ticker", mutate_state=False)
     assert any("成交价位违规" in alert for alert in out.get("alerts") or [])
     assert any(t.get("type") == "fill_price_breach" for t in out.get("triggers") or [])
+
+
+def test_option_breach_line_shows_the_underlying_price(events):
+    """期权 BUY 的价位违规: flag 是 above_z1, 行尾带正股成交时刻价与来源。"""
+    events.append({**_fill(ticker="SYN270115C100000"), "price_flags": ["above_z1", "above_no_chase"],
+                   "underlying_at_fill": {"price": 118.4, "basis": "60m", "ambiguous": False}})
+    events.append({**_fill(ticker="NVDA270319C220000"), "price_flags": ["above_z1"],
+                   "underlying_at_fill": {"price": 231.2, "basis": "1d", "ambiguous": True}})
+    out = pb.price_breach_fills()
+    assert len(out) == 2
+    assert "above_z1+above_no_chase" in out[0] and "正股≈118.4@60m" in out[0] and "跨带" not in out[0]
+    assert "正股≈231.2@1d (bar 跨带)" in out[1]

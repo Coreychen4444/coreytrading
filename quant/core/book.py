@@ -33,6 +33,7 @@ from .occ import parse_occ
 from .paths import KLINE_CACHE_DIR, NAV_HISTORY_PATH, POSITIONS_PATH
 from .sizing import book_usage
 from .technical import atr as _atr
+from .technical import hv as _hv, hv_percentile as _hv_pct
 from .timeutil import et_today
 
 ATR_PERIOD = 20            # 算钱口径; 调用点不要传别的 period 进来
@@ -69,6 +70,25 @@ def atr20_of(ticker: str, kdir: Optional[Path] = None) -> Optional[float]:
         return None
     series = _atr(rows, ATR_PERIOD)
     return series[-1] if series else None
+
+
+HV_PCT_LOOKBACK = 252       # IV 分位代理的窗 = iv_logger.percentile 同款 252 日
+HV_PCT_MIN_SAMPLES = 120    # 分位可信线 (与 research 回测同口径; <120 = 噪声, 返回 None)
+
+
+def hv20_percentile_of(ticker: str, kdir: Optional[Path] = None) -> Optional[Dict]:
+    """HV20 在自身 252 日窗的分位 (IV percentile 的代理) →
+    {"hv20": 年化小数, "pct": 0-100 或 None, "samples": n}; 无缓存/未暖机 → None。
+    单一读法: entry_guard 的 IV 门 / option_plan 的硬门槛 / reversal_probe 三处同读。"""
+    rows = bars(ticker, kdir)
+    series = _hv(rows, ATR_PERIOD)
+    if not series or series[-1] is None:
+        return None
+    i = len(series) - 1
+    pct = _hv_pct(series, i, HV_PCT_LOOKBACK, HV_PCT_MIN_SAMPLES)
+    samples = sum(1 for x in series[max(0, i - HV_PCT_LOOKBACK):i] if x is not None)
+    return {"hv20": series[-1], "pct": (round(pct * 100, 1) if pct is not None else None),
+            "samples": samples}
 
 
 def latest_nav() -> Optional[float]:

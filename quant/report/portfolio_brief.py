@@ -156,6 +156,8 @@ def _agent_block_to_legacy_zone(body: Dict) -> Dict:
         out["stop_level_basis"] = zones["stop_level_basis"]
     if zones.get("stop_level_days"):
         out["stop_level_days"] = zones["stop_level_days"]
+    if agent.get("entry_class"):
+        out["entry_class"] = agent["entry_class"]      # reversal_probe (抄底): at-risk 按止跌低处投影
     if zones.get("valid_until"):
         out["valid_until"] = zones["valid_until"]
     if zones.get("update_trigger"):
@@ -358,11 +360,13 @@ def price_breach_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
             when = parse_ts(ts)
             if not when or when < cutoff:
                 continue
-            out.append(
-                f"{row.get('ticker')} {row.get('qty')}@{row.get('price')} "
-                f"({ts[:10]}) {'+'.join(flags)}"
-                + (" ⚠️跨日盖章" if row.get("stamp_stale_card_risk") else "")
-            )
+            und = row.get("underlying_at_fill") or {}          # 期权 BUY: 正股成交时刻价
+            und_txt = (f" 正股≈{und['price']:g}@{und.get('basis')}"
+                       + (" (bar 跨带)" if und.get("ambiguous") else "")
+                       if und.get("price") is not None else "")
+            out.append(f"{row.get('ticker')} {row.get('qty')}@{row.get('price')} "
+                       f"({ts[:10]}) {'+'.join(flags)}{und_txt}"
+                       + (" ⚠️跨日盖章" if row.get("stamp_stale_card_risk") else ""))
     return out
 
 
@@ -664,6 +668,36 @@ def enrich_with_zone_context(item: Dict, current_zones: Dict[str, dict],
     return item
 
 
+def _observation_zone_line(ticker: str, cfg: Dict, zone1, zone2) -> Optional[str]:
+    """cap 0 候选卡的「Watchlist plans」行 —— 观察带, 不是买带。
+
+    词汇故意与仓位层不互借 (CLAUDE.md 语义分层): 首档/二档/减仓/不追价 是仓位层
+    词汇, 只有拿到 cap 的卡配得上; cap 0 的卡回答的是「价格下去大概到哪」, 所以
+    用 落点①/②/图作废/解除。有效期也不印 —— 一张不授权的图没有「有效期至」可言,
+    它的过期出口在 Watchlist stale 那一节。
+    """
+    regime = cfg.get("current_regime") if isinstance(cfg.get("current_regime"), dict) else {}
+    name = regime.get("name")
+    head = f"{ticker} ⛔ cap 0" + (f" [{name}]" if name else "")
+    parts = [head, "观察带不是买带"]
+    if zone1:
+        parts.append(f"落点① {zone1[0]:.2f}-{zone1[1]:.2f}")
+    if zone2:
+        parts.append(f"落点② {zone2[0]:.2f}-{zone2[1]:.2f}")
+    stop = normalize_num(cfg.get("stop_level"))
+    if stop is not None:
+        parts.append(f"图作废<{stop:.2f}")
+    nxt = cfg.get("next_regime") if isinstance(cfg.get("next_regime"), dict) else {}
+    gate = nxt.get("entry_gate") if isinstance(nxt.get("entry_gate"), dict) else {}
+    lvl = normalize_num(gate.get("level"))
+    if lvl is not None:
+        days = gate.get("days")
+        cap_after = normalize_num(nxt.get("cap_pct_nav"))
+        after = f" → cap {cap_after * 100:g}%" if cap_after else ""
+        parts.append(f"解除=收复 {lvl:g}" + (f"×{int(days)}" if days else "") + after)
+    return " | ".join(parts) if len(parts) > 2 else None
+
+
 def build_watchlist_zone_lines(watchlist_rows: List[dict], watchlist_zones: Dict[str, dict]) -> List[str]:
     lines: List[str] = []
     for row in watchlist_rows:
@@ -679,6 +713,17 @@ def build_watchlist_zone_lines(watchlist_rows: List[dict], watchlist_zones: Dict
         zone2 = normalize_zone_pair(cfg.get("accumulation_zone_2"))
         trim_zone = normalize_zone_pair(cfg.get("trim_zone"))
         no_chase = normalize_num(cfg.get("no_chase_above"))
+        # cap 0 的卡不是「计划」: 本行此前只读 zones, **从不看
+        # current_regime.cap_pct_nav** —— 于是一张 entry_guard 判 VETO 的观察卡
+        # 与真挂单计划在「Watchlist plans」里长得一模一样, 有的还带着「有效期至」
+        # = **一个 tell 都没有**。
+        # 判据与 wl_zone_touch / z2_breach_buy_freeze 同款 fail-closed (None 与 0
+        # 都不是计划, sizing.regime_cap_frac 的消费侧约定), 不写第二份。
+        if not normalize_num(row.get("cap_pct_nav")):
+            obs = _observation_zone_line(ticker, cfg, zone1, zone2)
+            if obs:
+                lines.append(obs)
+            continue
         parts = [ticker]
         if zone1:
             parts.append(f"首档 {zone1[0]:.2f}-{zone1[1]:.2f}")
@@ -1203,14 +1248,38 @@ def at_risk_breach_signal(item: Dict, cfg: Optional[Dict], guard: Optional[Dict]
     if occ:
         mult = occ.get("multiplier") or 100
         per_unit = price * mult * sizing.OPTION_ATRISK_LOSS_FRAC
+        basis = f"保费 × {sizing.OPTION_ATRISK_LOSS_FRAC:.0%} (S1 premium stop)"
+        stop_lvl = None
+        # reversal_probe (止损放在 gate, 倒推 cap): 本类无 S1, at-risk =
+        # 正股跌到卡 stop (反转支撑) 时的保费投影损失 —— 与入场侧倒推 cap 同一把尺。
+        # 投影缺 (无 IV/DTE/正股价) → 退回 S1 名义并说出口, 不静默。
+        if (cfg or {}).get("entry_class") == "reversal_probe" \
+                and (cfg or {}).get("stop_level") is not None \
+                and ((cfg or {}).get("stop_level_basis") or "underlying") == "underlying":
+            from quant.options import premium_proj                 # 显示层折算, 单一投影实现
+            stop_lvl = normalize_num(cfg.get("stop_level"))
+            try:
+                dte_days = premium_proj.dte_of(item["ticker"], et_today())
+            except Exception:                                      # noqa: BLE001
+                dte_days = None
+            pj = premium_proj.project_call_premium(
+                stop_lvl, mark=price, spot=book.price_of(occ["underlying"]),
+                strike=occ.get("strike"), dte_days=dte_days,
+                iv_pct=normalize_num(item.get("iv_pct")), delta=normalize_num(item.get("delta")))
+            if pj and pj["premium"] < price:
+                per_unit = (price - pj["premium"]) * mult
+                basis = (f"正股跌到反转支撑 {stop_lvl:g} 的保费投影 ({pj['method']}) "
+                         f"→ 每张亏 ${per_unit:,.0f} (reversal_probe, 无 S1)")
+            else:
+                basis += " ⚠️ reversal_probe 投影缺 (IV/DTE/正股价), 退 S1 名义"
         at_risk = qty * per_unit
         if at_risk <= cap:
             return None
         keep = int(cap // per_unit)
         return {"ticker": item["ticker"], "kind": "option_premium",
                 "at_risk_usd": round(at_risk, 2), "cap_usd": round(cap, 2),
-                "pct_nav": round(at_risk / nav * 100, 1), "stop": None,
-                "stop_basis": f"保费 × {sizing.OPTION_ATRISK_LOSS_FRAC:.0%} (S1 premium stop)",
+                "pct_nav": round(at_risk / nav * 100, 1), "stop": stop_lvl,
+                "stop_basis": basis,
                 "trim_units": int(qty - keep)}
     card = normalize_num((cfg or {}).get("stop_level"))
     trail = normalize_num(((guard or {}).get("trail") or {}).get("trail"))
@@ -2154,7 +2223,38 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             triggers.append({"ticker": "INFRA", "type": "card_missing_next_gate",
                              "value": len(no_next_gate)})
 
-    # 画了卡没归估值原型: 新候选卡画完
+    # 有价位带却没有 stop 的卡会被点名; writer 与提交守卫拒绝擦除 stop。
+    # regime_transition 下行分支 `if stop is not None` 整段不评估 → 破位不降级, cap/Today 授权挂着。
+    # 这里兜任何路径留下的无 stop 卡, 只报不拦。
+    no_stop = structure.cards_missing_stop(
+        pos_doc_infra, _load_state_doc(STATE_WATCHLIST_PATH))
+    if no_stop:
+        active_keys.add(alert_key("INFRA", "card_missing_stop"))
+        all_conditions.append({"ticker": "INFRA", "type": "card_missing_stop",
+                               "value": len(no_stop)})
+        if emit_gate("INFRA", "card_missing_stop"):
+            alerts.append("🚨 卡有价位带但无 stop_level (转移机下行分支不评估, 破位不降级): "
+                          + "; ".join(no_stop)
+                          + " → 补 update_position_zones --stop-level <价> --stop-level-days <n>"
+                            " (只传 stop = 并入不重画); 原值查 var/agent-runs/card-backups 或 git")
+            triggers.append({"ticker": "INFRA", "type": "card_missing_stop",
+                             "value": len(no_stop)})
+
+    # 抄底成交落了 lot 但持仓卡没盖 entry_class / 止损 ≠ 止跌低 (试行接线): 授权住计划不住卡,
+    # exit_guard 正股止损读卡 stop —— 卡不盖 = 机器按旧 stop 走。只报不拦, 修法一条命令。
+    unstamped = structure.cards_missing_bottom_stamp(pos_doc_infra)
+    if unstamped:
+        active_keys.add(alert_key("INFRA", "bottom_card_unstamped"))
+        all_conditions.append({"ticker": "INFRA", "type": "bottom_card_unstamped",
+                               "value": len(unstamped)})
+        if emit_gate("INFRA", "bottom_card_unstamped"):
+            alerts.append("🚨 抄底 (reversal_probe) 持仓卡未盖章 (止损应 = 止跌低 ×1): "
+                          + "; ".join(unstamped)
+                          + " → update_position_zones --entry-class reversal_probe --stop-level <止跌低> --stop-level-days 1")
+            triggers.append({"ticker": "INFRA", "type": "bottom_card_unstamped",
+                             "value": len(unstamped)})
+
+    # 画了卡没归估值原型 : 新候选卡画完
     # 一周, 估值层人工区没有它们, 周复盘估值一览只能印 ✗。判断层零授权 —— 只报不拦, 与
     # card_missing_next_gate 同款出口; 修法一条命令 (archetypes.py set), 不是让人手填 JSON。
     try:
@@ -2277,14 +2377,11 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             "ticker": "INFRA", "type": "fill_price_breach", "value": len(breached),
         })
         if emit_gate("INFRA", "fill_price_breach"):
-            alerts.append(
-                "⚠️ 成交价位违规 (>no_chase 追价 / trim 区加仓, 带授权标签也点名): "
-                + "; ".join(breached)
-                + " → 规则外成交清单, annotate_event 补注 + 落评分"
-            )
-            triggers.append({
-                "ticker": "INFRA", "type": "fill_price_breach", "value": len(breached),
-            })
+            alerts.append("⚠️ 成交价位违规 (>no_chase 追价 / trim 区加仓 / 期权正股在 z1 之上, 带授权标签也点名): "
+                          + "; ".join(breached)
+                          + " → 规则外成交清单, annotate_event 补注 + 落评分")
+            triggers.append({"ticker": "INFRA", "type": "fill_price_breach",
+                             "value": len(breached)})
 
     # earnings 日历陈旧 (BACKLOG §3.5-4): 重建只挂 briefing 模式, briefing 连续
     # 失败时 heartbeat/postclose 会**静默用旧日历**—— earnings.py 自陈"静默不缩仓

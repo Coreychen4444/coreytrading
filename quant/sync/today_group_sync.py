@@ -13,13 +13,12 @@ membership 判据：**只读取当前 regime 是否给出 cap**。
 Schema 要求每张有 zones 的正股卡显式携带 current_regime，
 因此这句话在数据层字面成立，
 (schema 同生同死强制), 本模块 = 纯字段读, 零推断:
-    cap_pct_nav > 0  → 授权(转移机落的 gate 达标 cap, 或 card 源常规参与天花板)
+    cap_pct_nav > 0  → 授权(转移机落的 gate 达标 cap; card 源「常规参与」 已退役, 新卡 cap 0 等 gate)
     cap 0 / 无 regime → 稳态静默(修复观察·持仓无加仓授权·观察层·stub)
     期权 key          → 不进(白名单是正股层语义)
     **够格但被拦**(补画锁/zones 过期/台账未落账)必须报出来, 不静默丢
     卖出/减仓永远允许, 不需要白名单。
-历史注(读侧推断纪元,  当日走完): v2 错锚 GO verdict(执行时点≠授权状态,
-MRVL/MSFT 案) → v3 显式 cap → v3.2 补默认 probe 推断(GOOGL 案) → 统一后推断删除。
+历史注(读侧推断纪元): v2 错锚 GO verdict(执行时点≠授权状态) → v3 显式 cap → v3.2 补默认 probe 推断 → 统一后推断删除。
 
 授权生命周期(定版, 用户—— **成交不再终止授权**): 额度按**爬过几个
 gate**给, 「没有 r1 r2 r3 概念了 —— gate1 max 2.5% gate2 max 4% gate3 max 5%」;
@@ -263,11 +262,35 @@ def desired_members(positions_doc: dict, watchlist_doc: dict, today: str,
             continue
         _admit(tk, card, today, members, notes, bars_of=bars_of)
     for und, plan in sorted((option_plans or {}).items()):
-        if und not in members:
-            continue                      # 正股无授权 → 合约不进 (选约文件可能滞后一晚)
         code, expiry = plan.get("code"), str(plan.get("expiry") or "")
+        if plan.get("entry_class") == "reversal_probe":
+            # 抄底 (正股腿 + 空仓前提): 授权住计划本身, 不住正股卡 ——
+            # 正股腿 (stock 段) 与合约腿各自进组; 信号有效期过 = 错过, 不追 (座右铭);
+            # 持仓票 entry_guard 已不出计划 (空仓前提), 这里再守一道: 已持有的不进。
+            vu = str(plan.get("valid_until") or "")
+            if not vu or vu < today:
+                notes.append(f"{und} 抄底 {code or '正股'} 信号已过期 (有效至 {vu or '?'}) — 不进组, 错过不追")
+                continue
+            if und in live:
+                notes.append(f"{und} 抄底计划但已持仓 — 不进组 (抄底前提 = 空仓)")
+                continue
+            st = plan.get("stock") or {}
+            if st.get("tiers") and _is_stock(und):
+                t0 = st["tiers"][0]
+                members[und] = (f"抄底 reversal_probe 正股: 止跌低 {plan.get('support')} 首档 "
+                                f"{t0.get('shares') or '?'} 股 @ ≤{t0.get('price', '?')} (有效至 {vu}; 止损 = 止跌低 ×1)")
+            if code:
+                if expiry and expiry <= today:
+                    notes.append(f"{und} 抄底 {code} 合约已到期 — 合约不进组")
+                else:
+                    t0 = (plan.get("tiers") or [{}])[0]
+                    members[code] = (f"抄底 reversal_probe call: {und} 止跌低 {plan.get('support')} 首档 "
+                                     f"{t0.get('contracts') or '?'} 张 @ ≤{t0.get('premium', '?')} (有效至 {vu})")
+            continue
         if not code:
             continue
+        if und not in members:
+            continue                      # 正股无授权 → 合约不进 (选约文件可能滞后一晚)
         if expiry and expiry <= today:
             notes.append(f"{und} 选约 {code} 已到期 — 不进组, 等重选")
             continue
@@ -299,6 +322,8 @@ def annotate_actual_caps(members: Dict[str, str], positions_doc: dict,
     live = {t for t in live_tickers(positions_doc) if _is_stock(t)}
     notes: List[str] = []
     for tk in list(members):
+        if not _is_stock(tk):
+            continue                      # 合约成员的 label 由选约/探针计划给, 无正股 cap 可注
         src = positions_doc if tk in live else watchlist_doc
         card = (src.get("tickers") or {}).get(tk) or {}
         ac = grant_actual_cap(tk, card, nav, usage,

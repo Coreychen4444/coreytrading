@@ -345,19 +345,32 @@ LONG_CALL_IV_ABS_MAX = 50.0    # 绝对 ATM IV % 上限, 仅 percentile 不可�
 
 
 def long_call_iv_gate(pct: Optional[float], reliable: bool,
-                      abs_iv: Optional[float]) -> dict:
+                      abs_iv: Optional[float],
+                      hv_pct: Optional[float] = None) -> dict:
     """单腿 long call 的 IV 硬门槛 → {"allowed", "basis", "reason"}。
 
-    basis ∈ {"pct", "abs", "none"}: pct = percentile 可信 (≥60 样本) 用 percentile;
-    abs = 样本不足回落绝对 ATM IV; none = 无数据 → 不放行。reason 是播报原文。
+    basis ∈ {"pct", "hv_pct", "abs", "none"}:
+      pct     percentile 可信 (≥60 样本) 用 IV percentile;
+      hv_pct  **IV 序列不可信时用 HV20 的 252 日分位代理** (不同标的 IV
+              绝对值本身水平不同, 应看分位而不是绝对值; 阈值同一个 LONG_CALL_IV_PCT_MAX,
+              代理的是分位不是水平, 读法 core.book.hv20_percentile_of);
+      abs     两个分位都没有才回落绝对 ATM IV (老兜底, 只剩 K 线也不够 252 日的新票);
+      none    无数据 → 不放行。reason 是播报原文, basis 必须播出去 (代理 ≠ 真 IVP)。
     """
     p = coerce_float(pct)
     a = coerce_float(abs_iv)
+    h = coerce_float(hv_pct)
     if reliable and p is not None:
         ok = p < LONG_CALL_IV_PCT_MAX
         return {"allowed": ok, "basis": "pct",
                 "reason": (f"IV percentile {p:g} {'<' if ok else '≥'} {LONG_CALL_IV_PCT_MAX:g}"
                            + (f" (ATM IV {a:g}%)" if a is not None else ""))}
+    if h is not None:
+        ok = h < LONG_CALL_IV_PCT_MAX
+        return {"allowed": ok, "basis": "hv_pct",
+                "reason": (f"HV20 分位 {h:g} {'<' if ok else '≥'} {LONG_CALL_IV_PCT_MAX:g}"
+                           f" (IV 序列不可信, HV 分位代理 IVP"
+                           + (f"; ATM IV {a:g}%" if a is not None else "") + ")")}
     if a is not None:
         ok = a < LONG_CALL_IV_ABS_MAX
         return {"allowed": ok, "basis": "abs",
@@ -365,6 +378,30 @@ def long_call_iv_gate(pct: Optional[float], reliable: bool,
                            " (序列 <60 天, percentile 不可信 → 绝对值兜底)")}
     return {"allowed": False, "basis": "none",
             "reason": "无 IV 数据 → 不放行 (先跑 iv_logger --tickers <T>)"}
+
+
+# ── reversal_probe 入场类的保费 cap ──────────
+#
+# 保费预算按 gate1 取, 止损放在 gate, 由此倒推 cap:
+#   风险预算 = gate1 的本档新增 risk (gate_step_frac(1) = 2.5% NAV), 与 gate 类同一个数;
+#   止损     = 本类的 gate = 反转波段低点 (core.reversal.signal_at["support"]), underlying 基;
+#   cap      = 风险预算 ÷ 正股跌到 gate 时保费的投影亏损比例 (option_plan.loss_frac_at_stop,
+#              BS 同 IV / DTE−fill_days 重估), 不再拿固定 |S1| 0.20 当分母 —— gate 类的
+#              12.5% 上限本来就只是 2.5% ÷ 0.20 的产物, 本类没有 S1 (止损只有 gate 一条)。
+#   其余臂照旧取小 (单票 delta 名义 NOTIONAL_CAP / 冲击预算 / gross / 购买力), 由
+#   option_plan.build 的 notional_cap 折算兜住; at-risk 5% ÷ loss_frac 恒 ≥ 本数不另列。
+# ⚠️ 已知低估同 OPTION_ATRISK_LOSS_FRAC: 跳空日止损线 ≠ 损失, 投影是 BS 估计不是报价。
+REVERSAL_PROBE_RISK_GATE = 1
+
+
+def reversal_probe_premium_cap(nav: Optional[float],
+                               loss_frac_at_stop: Optional[float]) -> Optional[float]:
+    """reversal_probe 的保费上限 (美元) = gate1 风险预算 ÷ gate 处投影亏损比例。
+    None = 算不出 (NAV 缺 / 投影缺 / 投影 ≤0 = stop 在价上或链数据坏), **不编数**。"""
+    lf = coerce_float(loss_frac_at_stop)
+    if not nav or nav <= 0 or lf is None or lf <= 0 or lf > 1:
+        return None
+    return float(nav) * gate_step_frac(REVERSAL_PROBE_RISK_GATE) / lf
 
 
 def at_risk_nominal_cap(nav: Optional[float], price: Optional[float],
@@ -710,7 +747,8 @@ def constraint_active(constraints: dict, today: str) -> bool:
 
 
 def derive_auth(ticker: str, cards: dict,
-                today: Optional[str] = None) -> tuple[Optional[dict], str]:
+                today: Optional[str] = None,
+                option_plans: Optional[dict] = None) -> tuple[Optional[dict], str]:
     """成交事件的授权快照 —— 跟随系统授权, → (auth | None, 依据)。
 
      分类轴退役后 `derive_classification` 的接替者 (D4): 不再反查分类词,
@@ -733,6 +771,31 @@ def derive_auth(ticker: str, cards: dict,
     card = cards.get(key) or {}
     src = key
     occ = parse_occ(key)
+    # reversal_probe : 授权不住正股卡 (它 cap 0 也能出计划), 住
+    # entry_guard 落的 option_plans.json —— 合约 code 对上 + 落库日在有效期内 = 本类
+    # 授权成交; gate_no 记风险预算所在档 (REVERSAL_PROBE_RISK_GATE), cap 记保费上限占 NAV。
+    if option_plans:
+        und_key = str(occ.get("underlying") or "").upper() if occ else key
+        plan = (option_plans or {}).get(und_key) or {}
+        leg = None
+        if plan.get("entry_class") == "reversal_probe":
+            if occ and str(plan.get("code") or "").upper() == key:
+                leg = ("call", coerce_float(plan.get("cap_frac")))
+            elif not occ and isinstance(plan.get("stock"), dict):
+                leg = ("正股", coerce_float((plan.get("stock") or {}).get("cap_frac")))   # 正股腿
+        if leg:
+            vu = str(plan.get("valid_until") or "")
+            day = str(today or "")[:10]
+            if vu and day and day > vu:
+                return None, (f"{key} 抄底 (reversal_probe) 计划已过期 (valid_until {vu} < {day}) — "
+                              "过期成交 = 无授权, 归人判")
+            vehicle, cap_frac = leg
+            if cap_frac and cap_frac > 0:
+                return ({"cap_pct_nav": float(cap_frac), "gate_no": REVERSAL_PROBE_RISK_GATE,
+                         "entry_class": "reversal_probe", "support": coerce_float(plan.get("support")),
+                         "signal_date": plan.get("signal_date"), "vehicle": vehicle},
+                        f"抄底 (reversal_probe) 计划 {plan.get('signal_date')} {vehicle} (止跌低 {plan.get('support')}, "
+                        f"cap {cap_frac:.1%} NAV, 有效至 {vu or '?'})")
     if occ and not ((card.get("agent") or {}).get("current_regime")):
         card = cards.get(occ["underlying"]) or card      # 期权授权住正股卡
         src = occ["underlying"]

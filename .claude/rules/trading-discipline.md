@@ -15,6 +15,7 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 - **结构修复了吗？** `structure_repair_veto`：trend down / transition 且未收回 last swing high = VETO，整笔不做（无中间档）。
 - **regime cap 给了吗？** 卡片 `current_regime.cap_pct_nav`：0 = 无授权 = VETO。
 - **爬到第几个「给了 cap 的」gate？** `sizing.gate_count`（判据 = 卡上 `regime_history`，不是成交记录）。gate1 max 2.5% / gate2 4% / gate3 5% NAV risk（累计，减当前敞口市值；同一 gate 内可分多笔；破位 / 平仓归第一档）。期权保费上限按本档新增 risk ÷ 0.20 → gate1 12.5% / gate2 7.5% / gate3 5% NAV；gate1 起可期权但须过 IV 硬门槛（`sizing.long_call_iv_gate`），期权正股退出线 = 授予 cap 的 gate ×1 日。
+- **抄底 `reversal_probe`（试行）**：**空仓**候选卡若 entry_guard 印出 `🔁 抄底 reversal_probe — PLAN`，那是第二授权通道（正股阶梯 + 合约计划在块内；**持仓票一律不走**，加仓走 cap + Iron Rule #2 v2）；`VETO` / `正股 0 股且 call 0 张` 不是授权。信号 = 止跌低之后次日未新低 或 止跌日长下影，有效 3 个交易日，过期 = 错过不追；止损 = 止跌低（下影线低点）收盘 ×1，无 S1，破了当日清仓；持有几个交易日看反弹还是反转（越前高 × 回踩更高低点），反弹尽早了结是裁量点不是机械线。
 - 说不清 → "先跑 entry_guard，别动。"
 
 ### Q2 错了怎么认？
@@ -41,6 +42,8 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 | 破 stop 后心存侥幸 | 退出栈告警成立后说 "再看一天 / 盘后收回来了 / 基本面没坏" | 逐字引用 "**stop 破了 ×1 立即清仓退出，不能再心存侥幸**"。不提供看一天选项，不起草 override（棘轮 / 趋势线 / G-01 同样无 override）；未执行 = 规则外评 C 起步，`exit_overdue` 逐日点名 |
 | 30-minute rule | ET 09:30–10:00 表达交易意图 | "开盘 30 分钟内除明确风险削减外先观察。" 订单时间是 ET；pre-market / after-hours 不适用 |
 | Undoing defense | 刚减仓 / 止损后立即想卖 put 或同向买回 | "这笔会不会抵消你刚完成的防守？" |
+| 抄底过期追单 | 抄底 PLAN 过了 `有效至` 日期还想挂 / 价格已涨离信号收盘还想追 / 想在持仓票上「抄底加仓」 | "抄底有效期 3 个交易日，过期 = 错过不追。成交价（正股）或整根 60m bar（call）在信号收盘之上 = `above_signal_close` 规则外评 C 起步。持仓票不走抄底。" 止跌低收破了 = 信号作废，不重挂 |
+| 期权追高 | 想在确认日盘中买 call / 正股在 z1 上沿之上还想买期权 / "先买一张再说" | "期权锚定正股回踩 z1 的价格，不追高。" 期权限价 = 正股 z1 回踩投影（`entry_guard` 期权阶梯一律 zone 档，所有非 `vehicle=stock` 的 PLAN 卡都出投影 + oz1 线）；成交时正股整根 60m bar 在 z1 上沿之上 = `above_z1`（`trade_history_sync` 落库即盖，跨带归人判）→ `INFRA:fill_price_breach` 点名，规则外评 C 起步 |
 
 ### Parabolic 3 档 ladder（强制；整股约束下先算股数）
 首档 current×0.98–1.00 占 50%（买参与权）/ 二档 5d high×0.92–0.95 占 30% / 三档 10d high×0.85–0.90 占 20%；未成交档每 2 个交易日按最新高点重锚，只升不降。`shares = floor(cap/price)`：≥3 → 3 档；2 → 1+1；1 → 单档（豁免单档禁令）；0 → 买 1 股 + `decisions.jsonl` 书面例外（声称落库 ≠ 落库）。代码真源 `quant/core/sizing.py` `share_ladder()`。硬禁止：主升浪单档挂单、挂单价 < 昨日 intraday low、因 "missed $X" 拒绝今天 $Y。
@@ -48,12 +51,12 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 ### Iron Rule #2 v2（加仓）
 先按 lots 均价分流：**新价 < 均价 = averaging down**——每 thesis 最多 1 次，且 thesis 未证伪 + 在 z1 / z2 + size ≤ 原仓 50%，违反硬拦 "越跌越买是失败者陷阱"；**新价 > 均价 = pyramiding up**——允许多次：higher low 确认（违反只警告）+ size ≤ 前笔 75% + 单票 ≤ 40% 名义上限（`sizing.NOTIONAL_CAP`）+ 加仓点在 zone / 突破回测位（违反硬拦）。同一 session 不得既 average down 又 pyramid up。
 
-## Sell put quick check（canonical = 私有策略目录的 sell-put 规则）
-4 项各 0–2 分：strike 舒服吗 / expiry 合理（14–30 天）/ 事件风险 / 真想接货还是赌权利金。7–8 健康，5–6 激进，<5 赌博。第 5 问硬 veto：会不会抵消刚做完的防守？会 = 不做。
+## Sell put（已退役）
+两种模式（抄底 / 趋势确认）之外坚决不做：卖 put / sell premium 不再是入场工具。私有策略目录里的 sell-put 规则只读留档；有人提卖 put → 引本条，不跑 quick check。
 
 ## 框架触发器（一句话；正文住私有策略规则，本文件只放触发）
 - **Trend Exit System**：浮盈峰值 ≥+50% / brief 出现 FIRED·BROKEN·MARGIN / "基本面没坏拿着" → 棘轮（+50%→保本，+100%→回吐上限 1/3）与趋势死亡线（3×ATR / parabolic 5d×0.92）是硬线，宏观不豁免，告警当日执行，无 override；no-add lock 期间禁加仓；卖飞恐惧的答案是重进协议不是不卖。schema `trade/strategy/trend-exit-system.example.md`；`quant/decision/exit_guard.py` 每轮自动跑。
-- **Capital Deployment While Waiting**：等大 entry 时闲置 cash + IV percentile ≥60% → 同 thesis 反方向 sell premium。
+- **Capital Deployment While Waiting**（已退役：sell premium 不在两种模式内，私有文档只读留档）。
 - **Sell飞 vs Rebalance**：真账 = redirected capital vs 被卖标的同期表现；现金真闲置才是卖飞。
 - **Natural Humility Anchor**：深亏 ≥30% 是否主动止损 → thesis 未证伪 + 成本 ≤5% cap 可不卖；严禁用 anchor 价值 justify 加仓。
 - **Mindset × Structure Pairing**：持有心态的资格由结构授予（正股 + 零杠杆 + 无到期）不由 conviction；期权 / margin 归 exit_guard 无例外；浮盈期加杠杆先答"下桌还是重新押上"。

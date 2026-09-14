@@ -99,15 +99,27 @@ def _closes(klines: List[dict], n: int) -> List[float]:
     return [c for c in out if c is not None][-n:] if n else []
 
 
+def _close_rows(klines: List[dict], n: int) -> List[Dict]:
+    """达标收盘的**日期 + 收盘价** (与 `_closes` 同一过滤口径)。
+    : 转移收据要能逐条指出「哪两天的收盘达标」, 不再让人回去翻 kline。"""
+    rows = [{"date": str(r.get("time") or "")[:10], "close": coerce_float(r.get("close"))}
+            for r in klines]
+    return [r for r in rows if r["close"] is not None][-n:] if n else []
+
+
 def _atr(klines: List[dict]) -> Optional[float]:
     s = technical.atr(klines, PARAMS["atr_period"])
     return s[-1] if s and s[-1] else None
 
 
-REL_FLOOR = 0.4     # RelVR denominator floor
-RECLAIM_VOL_RATIO_MIN = 1.2   # 机器写 reclaim gate 的量腿缺省 = 证据标准 canonical
-                              # (RelVR ≥1.2); without it volume_leg(None) skips
-                              # the evidence leg entirely.
+REL_FLOOR = 0.4     # RelVR 分母地板 — 相对量比口径锁定值
+RECLAIM_VOL_RATIO_MIN = 1.1   # 量腿阈值 canonical = 证据标准 (zone-maintenance 检查表 #3)。
+                              # 阈值 1.1 由预注册回测 (adaptive_volume_leg round-3) 确定:
+                              # 非劣效判据锁在看数据前; 1.0 被否; 收紧有代价 (更高阈值期望更差)。
+                              # 缺省即整条跳过 (volume_leg None→True)。
+                              # 🚫 研究层**不再** import 本常量: 历史世界 (W1/W1F/W5) 冻结在裁决当时的 1.2,
+                              #    否则回归门与既往裁决不可复现 (research/*_backtest.py HISTORICAL_VOL_RATIO)。
+                              # 复测 +12 月: Δmean 下界破 −0.10pp 或 T60 止损率上界破 +3pp → 撤回。
 
 _BENCH_RATIOS: Dict[str, Dict[str, float]] = {}
 
@@ -124,29 +136,61 @@ def _bench_ratio(bench: str, day: str) -> Optional[float]:
     return _BENCH_RATIOS[bench].get(day)
 
 
-def rel_volume(klines: List[dict], ticker: Optional[str] = None):
-    """RelVR 的**计算**单一真源 → (value, note, degraded)。value=None = 算不出。
+def rel_volume_detail(klines: List[dict], ticker: Optional[str] = None) -> Dict:
+    """RelVR 一次计算的**结构化收据**。`rel_volume` 是它的三元视图, 两者同一份数字。
 
-     从 `volume_leg` 里提出来: 判读层 (`report/chart_read`) 要的是
-    **读数本身**, 授权层要的是**它过没过 min_ratio**。两个需求共读这一份 ——
-    否则判读层会手搓第二个 RelVR, 而那正是本仓「同概念双判别式」的形状
-    (GOOGL 卡裸奔 6 天的病根)。`volume_leg` 的行为一字未改。
+    转移达标条件必须可读: 此前量腿证据只活在
+    note 散文里 —— 「量比(rel SMH 0.51) 1.68」要靠人去解析才知道基准是谁、
+    读数多少、对齐在哪一天。转移收据与 regime_history 现在存结构化字段,
+    note 仍逐字保留 (gate_ladder_report.vol_short 靠末位 token 取数)。
     """
     vols = [int(r.get("volume") or 0) for r in klines]
     ratios = technical.volume_ratio(vols, 20)
     r = ratios[-1] if ratios and ratios[-1] is not None else None
+    day = str(klines[-1].get("time") or "")[:10] if klines else None
+    bench = benchmark_for(ticker)   # None/未知 → QQQ (与既有行为一致, 不要加 falsy 守卫)
     if r is None:
-        return None, "量比不可算(K线不足)", False
-    bench = benchmark_for(ticker)
-    day = str(klines[-1].get("time") or "")[:10]
+        return {"value": None, "note": "量比不可算(K线不足)", "degraded": False,
+                "mode": "unavailable", "own_ratio": None, "benchmark": bench,
+                "benchmark_ratio": None, "date": day}
     b = _bench_ratio(bench, day)
     if b is None:
-        return r, f"量比(abs兜底,{bench}缺{day or '?'}) {r:.2f}", True
-    return r / max(b, REL_FLOOR), f"量比(rel {bench} {b:.2f}) {r / max(b, REL_FLOOR):.2f}", False
+        return {"value": r, "note": f"量比(abs兜底,{bench}缺{day or '?'}) {r:.2f}",
+                "degraded": True, "mode": "absolute_fallback", "own_ratio": r,
+                "benchmark": bench, "benchmark_ratio": None, "date": day}
+    value = r / max(b, REL_FLOOR)
+    return {"value": value, "note": f"量比(rel {bench} {b:.2f}) {value:.2f}",
+            "degraded": False, "mode": "relative", "own_ratio": r,
+            "benchmark": bench, "benchmark_ratio": b, "date": day}
+
+
+def rel_volume(klines: List[dict], ticker: Optional[str] = None):
+    """RelVR 的**计算**单一真源 → (value, note, degraded)。value=None = 算不出。
+
+    从 `volume_leg` 里提出来: 判读层 (`report/chart_read`) 要的是
+    **读数本身**, 授权层要的是**它过没过 min_ratio**。两个需求共读这一份 ——
+    否则判读层会手搓第二个 RelVR, 而那正是本仓「同概念双判别式」的形状
+    (单卡长期无有效退出线的已知失效形状)。`volume_leg` 的行为一字未改。
+    实现搬进 `rel_volume_detail`, 本函数是它的三元视图, 契约不变。
+    """
+    d = rel_volume_detail(klines, ticker)
+    return d["value"], d["note"], d["degraded"]
+
+
+def streak_above(klines: List[dict], level: float) -> int:
+    """收盘 > level 的**连续**日数, 从最新 bar 往回数 (跌回 = 归零)。
+    = entry_guard._gate_streak 的长度 (同口径, 只数已完成收盘); 量腿对齐日的输入。"""
+    n = 0
+    for r in reversed(klines or []):
+        c = coerce_float(r.get("close"))
+        if c is None or c <= level:
+            break
+        n += 1
+    return n
 
 
 def volume_leg(klines: List[dict], min_ratio: Optional[float],
-               ticker: Optional[str] = None):
+               ticker: Optional[str] = None, streak: int = 1):
     """量腿 canonical (relative_volume 回测裁决 R): **相对量比**
     RelVR = 个股20日量比 / max(基准量比, 0.4) ≥ min_ratio; 基准 = 半导体→SMH
     其余→QQQ (core.sectors 冻结表)。回测: 2,874 修复 episodes, W1−W0 ΔT60
@@ -154,13 +198,58 @@ def volume_leg(klines: List[dict], min_ratio: Optional[float],
     基准缺当日 → **绝对量比兜底, note 必须说出口**(降级不静默)。
     → (ok, note); min_ratio 缺省 = 卡片没设量腿 → (True, None)。
     消费方: detect_transition (授权) + gate_ladder_report (播报) — 同一函数,
-    报表与转移机永不分叉。"""
+    报表与转移机永不分叉。
+
+    **对齐日 (预注册回测 volume_clock round-2 确定, +12 月复测)**:
+    `streak` = 连续收盘 > gate 的日数 (调用方按 `streak_above` 数出来), 量腿在 streak 内
+    **任一日** RelVR ≥ min_ratio 即过 —— 「放量突破 + 平量站稳」不再被罚 (突破日 RelVR 1.27 ✓ /
+    跟进日 ✗ 的签名); 跌回归零, day-1 的量随之作废。streak=1 =
+    旧口径 (快车道首日 / ×1 gate 不受影响)。过在早前某日时 note 写明是哪一日, 数字仍在
+    末位 (gate_ladder_report.vol_short 靠末位 token 取数)。"""
+    d = volume_leg_detail(klines, min_ratio, ticker, streak=streak)
+    return d["ok"], d["note"]
+
+
+def volume_leg_detail(klines: List[dict], min_ratio: Optional[float],
+                      ticker: Optional[str] = None, streak: int = 1) -> Dict:
+    """量腿一次判定的**结构化收据** —— `volume_leg` 是它的二元视图。
+
+    转移达标条件必须可读: 达标条件此前只能从
+    note 散文里读出来, 且格式随对齐日变化 (最后一日过 = 只有数字; 早前某日过 =
+    多一段「MM-DD streak第N日 X」)。转移收据改存这里的字段, note 逐字不动。
+    判定逻辑一字未改: 同一个循环, 同一个 `rel_volume_detail`。
+    """
+    k = max(1, int(streak or 1))
+    out = {"ok": True, "note": None, "required": min_ratio, "actual": None,
+           "mode": "skipped", "benchmark": None, "benchmark_ratio": None,
+           "own_ratio": None, "aligned_date": None, "aligned_streak_day": None,
+           "streak": k, "degraded": False}
     if not min_ratio:
-        return True, None
-    val, note, _ = rel_volume(klines, ticker)
-    if val is None:
-        return False, note
-    return val >= min_ratio, note
+        return out
+    latest = None
+    for back in range(min(k, len(klines))):
+        sub = klines[:len(klines) - back] if back else klines
+        d = rel_volume_detail(sub, ticker)
+        val, note = d["value"], d["note"]
+        if back == 0:
+            latest = d
+        if val is not None and val >= min_ratio:
+            if back != 0:
+                day = str(sub[-1].get("time") or "")[:10]
+                head, _, num = note.rpartition(" ")
+                note = f"{head}; {day[5:] or '?'} streak第{k - back}日 {num}"
+            return {**out, "ok": True, "note": note, "actual": val,
+                    "mode": d["mode"], "benchmark": d["benchmark"],
+                    "benchmark_ratio": d["benchmark_ratio"], "own_ratio": d["own_ratio"],
+                    "aligned_date": d["date"], "aligned_streak_day": k - back,
+                    "degraded": d["degraded"]}
+    d = latest or {"value": None, "note": "量比不可算(K线不足)", "mode": "unavailable",
+                   "benchmark": None, "benchmark_ratio": None, "own_ratio": None,
+                   "date": None, "degraded": False}
+    return {**out, "ok": False, "note": d["note"], "actual": d["value"],
+            "mode": d["mode"], "benchmark": d["benchmark"],
+            "benchmark_ratio": d["benchmark_ratio"], "own_ratio": d["own_ratio"],
+            "aligned_date": None, "aligned_streak_day": None, "degraded": d["degraded"]}
 
 
 # ── 观察级 regime 的机械推导 ────────────────────────────────────
@@ -260,6 +349,8 @@ def detect_transition(ticker: str, card: Dict, klines: Optional[List[dict]] = No
         if len(closes) == days and all(c < stop for c in closes):
             return {"ticker": ticker, "direction": "down", "level": stop, "days": days,
                     "closes": closes, "date": today,
+                    "confirm": {"mode": "stop_break", "days": days, "level": stop,
+                                "closes": _close_rows(klines, days), "volume_required": False},
                     "reason": f"收盘 {closes[-1]:g} < 卡片 stop {stop:g} 连续 {days} 日"}
 
     nr = agent.get("next_regime") or {}
@@ -269,12 +360,18 @@ def detect_transition(ticker: str, card: Dict, klines: Optional[List[dict]] = No
         gdays = max(1, int(coerce_float(gate.get("days")) or PARAMS["default_days"]))
         closes = _closes(klines, gdays)
         if len(closes) == gdays and all(c > level for c in closes):
-            vok, vnote = volume_leg(klines, coerce_float(gate.get("volume_ratio_min")),
-                                    ticker)
+            streak = streak_above(klines, level)
+            vol = volume_leg_detail(klines, coerce_float(gate.get("volume_ratio_min")),
+                                    ticker, streak=streak)
+            vok, vnote = vol["ok"], vol["note"]
             if vok:
                 return {"ticker": ticker, "direction": "up", "level": level,
                         "days": gdays, "closes": closes, "date": today,
                         "to": nr.get("name"), "fastlane": False,
+                        "confirm": {"mode": f"close_x{gdays}", "days": gdays, "level": level,
+                                    "closes": _close_rows(klines, gdays), "streak": streak,
+                                    "volume_required": bool(vol["required"])},
+                        "volume": vol,
                         "reason": f"收盘 {closes[-1]:g} > gate {level:g} 连续 {gdays} 日"
                                   + (f"; {vnote}" if vnote else "")}
         fl = _fastlane(klines, level, gate, ticker, nr, today)
@@ -335,13 +432,19 @@ def _fastlane(klines: List[dict], level: float, gate: Dict, ticker: str,
     dok, dnote = _repair_domain(ticker, klines, level)          # ⓪ (放①②后省 IO)
     if not dok:
         return None
-    vok, vnote = volume_leg(klines, coerce_float(gate.get("volume_ratio_min")), ticker)
+    vol = volume_leg_detail(klines, coerce_float(gate.get("volume_ratio_min")), ticker)
+    vok, vnote = vol["ok"], vol["note"]
     if not vok:                                                 # ③
         return None
     over = (two[1] - level) / atr
     return {"ticker": ticker, "direction": "up", "level": level,
             "days": 1, "closes": two[1:], "date": today, "to": nr.get("name"),
             "fastlane": True, "fastlane_over_n": round(over, 2),
+            "confirm": {"mode": "fastlane", "days": 1, "level": level,
+                        "closes": _close_rows(klines, 1), "over_n": round(over, 2),
+                        "threshold_n": k, "domain": dnote,
+                        "volume_required": bool(vol["required"])},
+            "volume": vol,
             "reason": f"⚡快车道: 首日收盘 {two[1]:g} > gate {level:g} + {k}N "
                       f"(超出 {over:.2f}N) — 幅度替代第二日确认; {dnote}"
                       + (f"; {vnote}" if vnote else "")}
@@ -394,9 +497,15 @@ def apply_transition(card: Dict, tr: Dict, klines: Optional[List[dict]] = None) 
     cur_zones = dict(agent.get("zones") or {})
     action = agent.setdefault("action", {})
     history = agent.setdefault("regime_history", [])
-    history.append({"date": tr["date"], "direction": tr["direction"],
-                    "level": tr["level"], "reason": tr["reason"],
-                    "fastlane": bool(tr.get("fastlane"))})
+    entry = {"date": tr["date"], "direction": tr["direction"],
+             "level": tr["level"], "reason": tr["reason"],
+             "fastlane": bool(tr.get("fastlane"))}
+    # 达标条件同时以结构化形式落卡 —— 此前只有 reason 散文,
+    # 事后要复核「那天靠什么达标的」必须解析中文句子 (gate_count 只数条数)。
+    for key in ("confirm", "volume"):
+        if tr.get(key):
+            entry[key] = tr[key]
+    history.append(entry)
 
     if tr["direction"] == "up":
         nr = dict(agent.get("next_regime") or {})

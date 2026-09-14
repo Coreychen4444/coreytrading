@@ -95,6 +95,22 @@ def latest_completed_session(now: datetime) -> date:
     return result
 
 
+def add_sessions(day: date | str, n: int) -> date:
+    """day 之后第 n 个交易日 (n=0 → day 本身若是交易日, 否则其前一交易日)。
+
+    reversal_probe 信号有效期 (valid_days 个交易日) 的唯一日历口径 —— 休市/半日由
+    XNYS 日历裁定, 不用 weekday 近似。范围外或无依赖 → MarketSessionError (fail closed)。
+    """
+    day = _day(day)
+    calendar = _calendar()
+    session = calendar.date_to_session(day.isoformat(), direction="previous")
+    target = calendar.session_offset(session, int(n))
+    result = target.date()
+    if not SUPPORTED_START <= result <= SUPPORTED_END:
+        raise MarketSessionError(f"session outside supported range {SUPPORTED_START}..{SUPPORTED_END}")
+    return result
+
+
 def calendar_metadata() -> dict:
     """Detached provenance for frozen evidence; no claim of live market status."""
     return {"exchange": CALENDAR_NAME, "scope": "regular_cash_equity",

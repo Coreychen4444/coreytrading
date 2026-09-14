@@ -815,3 +815,54 @@ def test_entry_cap_gate_budget_never_exceeds_the_at_risk_ceiling():
         assert c["n_unit_cap"] <= c["at_risk_cap"] + 1e-9, g
     r3 = sizing.entry_cap(20000.0, FULL, atr=3.0, price=100.0, stop=75.0, gate_no=3)
     assert r3["n_unit_cap"] == pytest.approx(r3["at_risk_cap"])
+
+
+# ── IV 门的分位代理 + reversal_probe 倒推 cap + 盖章  ──
+
+def test_long_call_iv_gate_hv_proxy_sits_between_percentile_and_absolute():
+    """IV percentile 可信 > HV20 分位代理 > 绝对 IV 兜底 > 无数据; basis 必须说出来。"""
+    g = sizing.long_call_iv_gate(12.0, True, 88.0, hv_pct=90.0)
+    assert g["allowed"] and g["basis"] == "pct"                    # 可信 IVP 赢过代理
+    g = sizing.long_call_iv_gate(3.0, False, 67.0, hv_pct=31.0)
+    assert g["allowed"] and g["basis"] == "hv_pct" and "HV20 分位 31" in g["reason"]
+    g = sizing.long_call_iv_gate(None, False, 30.0, hv_pct=55.0)
+    assert not g["allowed"] and g["basis"] == "hv_pct"             # 代理分位高, 绝对 IV 低也不放
+    g = sizing.long_call_iv_gate(None, False, 39.0, hv_pct=None)
+    assert g["allowed"] and g["basis"] == "abs"                    # 没有任何分位才退绝对值
+    assert sizing.long_call_iv_gate(None, False, None, hv_pct=None)["basis"] == "none"
+
+
+def test_reversal_probe_premium_cap_is_gate1_risk_over_projected_loss():
+    nav = 20000.0
+    assert sizing.REVERSAL_PROBE_RISK_GATE == 1
+    cap = sizing.reversal_probe_premium_cap(nav, 0.28)
+    assert cap == pytest.approx(nav * sizing.gate_step_frac(1) / 0.28)
+    assert sizing.reversal_probe_premium_cap(nav, 0.20) == pytest.approx(nav * 0.125)  # = gate 类 12.5% 那一点
+    for bad in (None, 0.0, -0.1, 1.5):
+        assert sizing.reversal_probe_premium_cap(nav, bad) is None
+    assert sizing.reversal_probe_premium_cap(None, 0.3) is None
+
+
+def test_derive_auth_reversal_probe_lives_in_option_plans_not_the_stock_card():
+    cards = {"TST": {"agent": {"current_regime": {"name": "观察", "cap_pct_nav": 0.0}}}}
+    plans = {"TST": {"entry_class": "reversal_probe", "code": "TST270115C90000",
+                      "signal_date": "2026-08-25", "support": 78.4, "valid_until": "2026-08-28",
+                      "cap_frac": 0.09}}
+    auth, why = sizing.derive_auth("TST270115C90000", cards, today="2026-08-26", option_plans=plans)
+    assert auth == {"cap_pct_nav": 0.09, "gate_no": 1, "entry_class": "reversal_probe",
+                    "support": 78.4, "signal_date": "2026-08-25", "vehicle": "call"}
+    assert "reversal_probe" in why and "止跌低 78.4" in why
+    # 正股腿: key = 正股本身, cap 取 plan.stock.cap_frac; 没有 stock 段的计划正股不沾光
+    auth, _ = sizing.derive_auth("TST", cards, today="2026-08-26", option_plans=plans)
+    assert auth is None
+    plans_s = {"TST": {**plans["TST"], "stock": {"tiers": [{"price": 80.0, "shares": 5}], "cap_frac": 0.05}}}
+    auth, why = sizing.derive_auth("TST", cards, today="2026-08-26", option_plans=plans_s)
+    assert auth == {"cap_pct_nav": 0.05, "gate_no": 1, "entry_class": "reversal_probe",
+                    "support": 78.4, "signal_date": "2026-08-25", "vehicle": "正股"}
+    assert sizing.derive_auth("TST", cards, today="2026-08-31", option_plans=plans_s)[0] is None
+    auth, why = sizing.derive_auth("TST270115C90000", cards, today="2026-08-31", option_plans=plans)
+    assert auth is None and "过期" in why                          # 过期成交 = 无授权
+    auth, _ = sizing.derive_auth("TST270115C95000", cards, today="2026-08-26", option_plans=plans)
+    assert auth is None                                            # 别的合约不沾光, 退回正股卡 cap 0
+    auth, _ = sizing.derive_auth("TST270115C90000", cards, today="2026-08-26", option_plans=None)
+    assert auth is None

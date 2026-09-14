@@ -11,7 +11,8 @@ import threading
 import pytest
 
 from quant.core import io_json, paths
-from quant.core.agent_contracts import CONTRACT_VERSION, RESULT_SCHEMA_VERSION, canonical_hash
+from quant.core.agent_contracts import (CONTRACT_VERSION, RESULT_SCHEMA_VERSION,
+                                        canonical_hash, card_revision)
 from quant.ops import agent_submit as submit
 from quant.ops.agent_snapshots import make_snapshot
 
@@ -52,7 +53,7 @@ def record(monkeypatch):
                       "next_regime": {"name": "R_next", "cap_pct_nav": 0.4,
                                       "entry_gate": {"level": 115, "days": 2, "volume_ratio_min": 1.2},
                                       "zones": {"accumulation_zone_1": [115, 118], "stop_level": 110}}}}
-    data = {"ticker": "SYN", "bucket": "watchlist", "card": card, "card_revision": canonical_hash(card),
+    data = {"ticker": "SYN", "bucket": "watchlist", "card": card, "card_revision": card_revision(card),
             "completed_bars": [{"time": "2026-09-04", "open": 106, "high": 111, "low": 105,
                                 "close": 108, "volume": 1000}],
             "latest_completed_session": "2026-09-04", "level_map": {}, "technical": {},
@@ -94,6 +95,10 @@ def writer(record, monkeypatch, tmp_path):
 
 
 def test_preview_never_imports_writer_or_reads_live(record, monkeypatch):
+    # Warm the installed calendar dependency before denying file I/O; loading
+    # its package metadata is distinct from reading live trading data.
+    from quant.core.market_sessions import session_close
+    session_close(NOW.date())
     def forbidden(*args, **kwargs):
         pytest.fail("dry run attempted I/O or writer import")
     monkeypatch.setattr(submit, "_load_writer", forbidden)
@@ -108,13 +113,39 @@ def test_preview_never_imports_writer_or_reads_live(record, monkeypatch):
     assert record == before
 
 
-def test_unreviewed_preview_is_visible_but_never_an_apply_bypass(record):
+def test_unreviewed_apply_requires_explicit_host_opt_out(record, writer):
     record["review"] = None
     assert submit.apply_proposal(record)["review_required"] is True
     assert submit.apply_proposal(record)["can_apply"] is False
     assert submit.apply_proposal(record, require_review=False)["review_required"] is False
     with pytest.raises(submit.SubmitError, match="requires independent review"):
+        submit.apply_proposal(record, apply=True)
+    receipt = submit.apply_proposal(record, apply=True, require_review=False)
+    assert receipt["applied"] and receipt["review_run_id"] is None
+    assert receipt["prepared"]["review_policy"] == "not_required_by_host"
+    target = json.loads(writer.WATCHLIST_PATH.read_text())["tickers"]["SYN"]
+    assert receipt["after_revision"] == card_revision(target)
+
+
+@pytest.mark.parametrize("failure", ["revision", "expired", "protected_flag", "stop_relaxation"])
+def test_no_review_retains_write_guards(record, writer, monkeypatch, failure):
+    record["review"] = None
+    if failure == "revision":
+        # 并发写必须是 writer 自己的地盘 (agent 块) —— broker 报价刷新不再算冲突,
+        # 见 agent_contracts.card_revision。
+        doc = json.loads(writer.WATCHLIST_PATH.read_text())
+        doc["tickers"]["SYN"]["agent"]["key_risk"] = "concurrent redraw"
+        writer.WATCHLIST_PATH.write_text(json.dumps(doc))
+    elif failure == "expired":
+        monkeypatch.setattr(submit, "_now", lambda: NOW + timedelta(hours=2))
+    elif failure == "protected_flag":
+        record["result"]["proposal"]["zone_update_args"] += ["--ticker", "OTHER"]
+    else:
+        record["result"]["proposal"]["zone_update_args"] += ["--stop-level-days", "99"]
+    before = writer.WATCHLIST_PATH.read_bytes()
+    with pytest.raises(submit.SubmitError):
         submit.apply_proposal(record, apply=True, require_review=False)
+    assert writer.WATCHLIST_PATH.read_bytes() == before
 
 
 @pytest.mark.parametrize("extra", [
@@ -147,6 +178,22 @@ def test_nested_next_regime_cannot_smuggle_protected_state(record, mutate):
     record["result"]["proposal"]["zone_update_args"] += ["--next-regime", json.dumps(nr)]
     with pytest.raises(submit.SubmitError):
         submit.apply_proposal(record)
+
+
+@pytest.mark.parametrize("optional", [{}, {"cap_pct_nav": None, "zones": None},
+                                     {"cap_pct_nav": 0.4}])
+def test_future_gate_skeleton_applies_without_changing_current_authority(record, writer, optional):
+    before = deepcopy(record["snapshot"]["data"]["card"]["agent"])
+    future = {"name": "pending_after_repair", "entry_gate": {
+        "level": 130, "days": 2, "volume_ratio_min": 1.2}, **optional}
+    record["result"]["proposal"]["zone_update_args"] += ["--next-regime", json.dumps(future)]
+    bind_review(record)
+    receipt = submit.apply_proposal(record, apply=True)
+    assert receipt["status"] == "applied"
+    after = json.loads(writer.WATCHLIST_PATH.read_text())["tickers"]["SYN"]["agent"]
+    assert after["current_regime"] == before["current_regime"]
+    assert after["zones"]["stop_level"] == before["zones"]["stop_level"]
+    assert after["next_regime"] == future
 
 
 @pytest.mark.parametrize("mutate", [
@@ -276,7 +323,7 @@ def test_existing_explicit_gate_exception_is_preserved(record, writer):
     agent = record["snapshot"]["data"]["card"]["agent"]
     agent["next_regime"]["entry_gate"].update(days=1, volume_ratio_min=1.0)
     writer.WATCHLIST_PATH.write_text(json.dumps({"tickers": {"SYN": record["snapshot"]["data"]["card"]}}))
-    record["snapshot"]["data"]["card_revision"] = canonical_hash(record["snapshot"]["data"]["card"])
+    record["snapshot"]["data"]["card_revision"] = card_revision(record["snapshot"]["data"]["card"])
     nr = deepcopy(agent["next_regime"])
     record["result"]["proposal"]["zone_update_args"] += ["--next-regime", json.dumps(nr)]
     rebind_snapshot(record)
@@ -297,7 +344,7 @@ def test_errors_distinguish_prewrite_rejection_from_uncertain_writer_failure(rec
 
 def test_new_gate_uses_existing_policy_defaults(record, writer):
     record["snapshot"]["data"]["card"]["agent"].pop("next_regime")
-    record["snapshot"]["data"]["card_revision"] = canonical_hash(record["snapshot"]["data"]["card"])
+    record["snapshot"]["data"]["card_revision"] = card_revision(record["snapshot"]["data"]["card"])
     writer.WATCHLIST_PATH.write_text(json.dumps({"tickers": {"SYN": record["snapshot"]["data"]["card"]}}))
     nr = {"name": "new", "cap_pct_nav": 0.4, "entry_gate": {"level": 115, "volume_ratio_min": 1.2},
           "zones": {"stop_level": 110, "accumulation_zone_1": [115, 118]}}
@@ -408,8 +455,8 @@ def test_precommit_receipt_is_the_final_target_hash_and_precedes_any_write(recor
     target = json.loads(writer.WATCHLIST_PATH.read_text())["tickers"]["SYN"]
     assert len(prepared) == 1
     assert applied["prepared"] == prepared[0]
-    assert applied["after_revision"] == prepared[0]["after_revision"] == canonical_hash(target)
-    assert applied["before_revision"] == canonical_hash(record["snapshot"]["data"]["card"])
+    assert applied["after_revision"] == prepared[0]["after_revision"] == card_revision(target)
+    assert applied["before_revision"] == card_revision(record["snapshot"]["data"]["card"])
     assert applied["before_revision"] != applied["after_revision"]
 
 
@@ -450,3 +497,56 @@ def test_reconciliation_only_classifies_exact_target_hashes():
     assert submit.reconcile_submission({"before_revision": before, "after_revision": before}, before)["status"] == "needs_review"
     with pytest.raises(submit.SubmitError):
         submit.reconcile_submission({"before_revision": before}, after)
+
+
+# ── : 「消失」比「变松」更严重, 却不在旧判别式里 ──────────────
+#
+# 受控重画的提案带价位带、不带 --stop-level,
+# writer 整块替换擦掉转移机刚写的 bfloor, 本守卫只比 days 于是放行, 回执 applied;
+# regime_transition 下行分支 `if stop is not None` 整段不评估 = 破位不降级。
+
+def _drop_stop(record):
+    args = record["result"]["proposal"]["zone_update_args"]
+    i = args.index("--stop-level")
+    del args[i:i + 2]
+    return bind_review(record)
+
+
+def test_apply_rejects_a_repaint_that_drops_the_existing_stop(record, writer):
+    _drop_stop(record)
+    before = writer.WATCHLIST_PATH.read_bytes()
+    with pytest.raises(submit.SubmitError, match="remove existing stop") as ei:
+        submit.apply_proposal(record, apply=True)
+    assert ei.value.side_effect_possible is False          # merge 之前拒, 不是 writer 失败
+    assert writer.WATCHLIST_PATH.read_bytes() == before
+
+
+def test_preview_blocks_stop_removal_before_the_run_is_accepted(record, writer):
+    """Desktop 会话在提交预览就该看到, 不是 applied 之后读回卡片才发现。"""
+    _drop_stop(record)
+    receipt = submit.preview_candidate(record, require_review=False)
+    assert receipt["can_apply"] is False
+    assert any("remove existing stop" in r for r in receipt["blocked_reasons"])
+
+
+def test_keeping_the_stop_means_restating_it(record, writer):
+    """保持 = 传原值; writer 同值时自动带过 days / 来历, 守卫放行。"""
+    data = record["snapshot"]["data"]
+    data["card"]["agent"]["zones"]["stop_level_days"] = 1
+    data["card"]["agent"]["zones"]["stop_derivation"] = "bfloor_buf: synthetic"
+    data["card_revision"] = card_revision(data["card"])
+    rebind_snapshot(record)
+    writer.WATCHLIST_PATH.write_text(json.dumps({"tickers": {"SYN": deepcopy(record["snapshot"]["data"]["card"])}}))
+    receipt = submit.apply_proposal(record, apply=True)
+    assert receipt["status"] == "applied"
+    after = json.loads(writer.WATCHLIST_PATH.read_text())["tickers"]["SYN"]["agent"]["zones"]
+    assert after["stop_level"] == 90 and after["stop_level_days"] == 1
+    assert after["stop_derivation"] == "bfloor_buf: synthetic"
+
+
+def test_worker_cannot_use_the_clear_stop_escape_hatch(record):
+    """--clear-stop 是人工 CLI 的显式删除通道, 不在受控路径白名单里。"""
+    record["result"]["proposal"]["zone_update_args"] += ["--clear-stop"]
+    bind_review(record)
+    with pytest.raises(submit.SubmitError, match="unauthorized"):
+        submit.apply_proposal(record, apply=False)

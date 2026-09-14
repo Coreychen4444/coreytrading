@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from quant.core.agent_contracts import (
-    CONTRACT_VERSION, RESULT_SCHEMA_VERSION, ROLES, ContractError,
-    canonical_hash, result_schema, validate_result, validate_snapshot,
+    CONTRACT_VERSION, ROLES, ContractError,
+    canonical_hash, card_revision, result_schema, validate_result, validate_snapshot,
 )
+from tests.core.test_macro_analysis import macro_fields
 
 NOW = "2026-09-05T12:30:00+08:00"
 
@@ -25,8 +26,8 @@ def snapshot():
 
 def result(role, snapshot):
     return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        **({"valuation_scenarios": []} if role == "macro" else {}),
+        "schema_version": result_schema(role)["properties"]["schema_version"]["const"],
+        **({"valuation_scenarios": [], **macro_fields()} if role == "macro" else {}),
         "contract_version": CONTRACT_VERSION,
         "role": role, "snapshot_id": snapshot["snapshot_id"],
         "input_hash": snapshot["input_hash"],
@@ -53,6 +54,50 @@ def test_hash_is_canonical_strict_json():
     assert canonical_hash(value) == expected
     assert canonical_hash({"a": 1, "中文": [None, True, 3.5]}) == expected
     assert canonical_hash(None) == hashlib.sha256(b"null").hexdigest()
+
+
+def _card():
+    return {"instrument": {"type": "stock"}, "status": "watching",
+            "broker": {"current_price": 99.83, "quote_retrieved_at": "2026-09-09T04:26:09Z"},
+            "moomoo_synced_at": "2026-09-09T04:26:11Z",
+            "agent": {"zones": {"stop_level": 91.7}, "valuation": {"fair": 120.0},
+                      "current_regime": {"cap_pct_nav": 0.4}}}
+
+
+@pytest.mark.parametrize("refresh", [
+    lambda c: c["broker"].update(current_price=100.01),
+    lambda c: c.update(broker=None),
+    lambda c: c.pop("broker"),
+    lambda c: c.update(moomoo_synced_at="2026-09-09T10:00:00Z"),
+    lambda c: c["agent"]["valuation"].update(fair=131.0),
+    lambda c: c["agent"].pop("valuation"),
+], ids=["quote", "broker_null", "broker_absent", "membership", "valuation", "valuation_absent"])
+def test_card_revision_ignores_host_refreshed_fields(refresh):
+    """报价/自选同步/估值镜像每轮都动, 它们不是并发写。"""
+    before = _card()
+    revision = card_revision(before)
+    refresh(before)
+    assert card_revision(before) == revision
+    assert canonical_hash(before) != revision, "整卡哈希必须仍然是另一个值"
+
+
+@pytest.mark.parametrize("change", [
+    lambda c: c["agent"]["zones"].update(stop_level=95.0),
+    lambda c: c["agent"]["current_regime"].update(cap_pct_nav=0),
+    lambda c: c["agent"].update(key_risk="new"),
+    lambda c: c.update(status="active"),
+    lambda c: c["instrument"].update(type="option"),
+    lambda c: c.update(lots={"base": [], "position": [{"qty": 1}]}),
+], ids=["zones", "regime", "agent_new", "status", "instrument", "lots"])
+def test_card_revision_still_catches_every_writer_owned_change(change):
+    before = _card()
+    revision = card_revision(before)
+    change(before)
+    assert card_revision(before) != revision
+
+
+def test_card_revision_of_a_missing_card_is_defined():
+    assert card_revision(None) == canonical_hash(None)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"),

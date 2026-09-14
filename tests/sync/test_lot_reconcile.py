@@ -302,3 +302,16 @@ def test_render_names_blocked_cards(state):
     doc = _doc(_body(qty=1.0))
     txt = lr.render({"planned": lr.plan(doc, _episode(exits=[{"qty": 3.0, "price": 99.0}]))})
     assert "⚠️" in txt and "未动手" in txt
+
+
+def test_bottom_fill_lot_takes_the_stop_from_the_auth_support_not_the_card():
+    """抄底 : 授权住计划不住卡 → lot 止损 = auth.support (止跌低), 并带 entry_class 供 brief 核卡。"""
+    from quant.sync.lot_reconcile import _build_lot
+    fills = [{"qty": 5, "price": 205.0, "timestamp": "2026-09-02T10:00:00-04:00", "order_id": "BT1",
+              "auth": {"cap_pct_nav": 0.05, "gate_no": 1, "entry_class": "reversal_probe",
+                       "support": 194.8, "signal_date": "2026-09-02", "vehicle": "正股"}}]
+    lot = _build_lot(fills, {"zones": {"stop_level": 180.0, "trim_zone": [230.0, 240.0]}}, "BT1")
+    assert lot["stop_loss"] == 194.8 and lot["entry_class"] == "reversal_probe" and "止跌低 194.8" in lot["notes"]
+    plain = _build_lot([{**fills[0], "auth": {"cap_pct_nav": 0.4, "gate_no": 1}}],
+                       {"zones": {"stop_level": 180.0}}, "G1")
+    assert plain["stop_loss"] == 180.0 and "entry_class" not in plain

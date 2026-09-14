@@ -483,3 +483,17 @@ def test_no_overdue_no_fault_line():
     agent = {"zones": {"accumulation_zone_1": [89.0, 93.0], "stop_level": 88.0}}
     out = "\n".join(glr.render_ticker("TST", agent, bars, held=True))
     assert "⬇" not in out
+
+
+def test_gate_volume_leg_from_an_earlier_streak_day_is_reported_as_passed(monkeypatch):
+    """对齐日 = streak 内任一日: streak 首日放量、完成日平量 →
+    报表与转移机同一份: 不再标「量能闸未过」, ✅ 行写明量腿来自哪一日。"""
+    monkeypatch.setattr(rt, "_bench_ratio", lambda bench, day: 1.0)
+    agent = json.loads(json.dumps(AGENT))
+    agent["next_regime"]["entry_gate"]["volume_ratio_min"] = 1.2
+    bars = _bars([150] * 20 + [170, 175, 180])          # streak = 175, 180 (>172.5)
+    bars[-2]["volume"] = 3000                           # streak 首日放量, 完成日平量
+    out = "\n".join(glr.render_ticker("NBIS", agent, bars))
+    assert "✅ 172.5" in out and "量能闸未过" not in out
+    assert "量腿 ✓" in out and "streak第1日" in out
+    assert rt.streak_above(bars, 172.5) == len(glr._gate_streak(bars, 172.5)) == 2

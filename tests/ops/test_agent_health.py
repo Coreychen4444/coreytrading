@@ -270,3 +270,138 @@ def test_corrupt_health_state_and_malformed_run_are_reported_without_content(tmp
     (tmp_path / "health.json").write_text('{"version":1,"sequence":0,"issues":{"bad":null},"outbox":[]}')
     with pytest.raises(health.HealthError, match="health_state_invalid"):
         health.update_health(tmp_path, now=1102)
+
+
+def card_attempt(root, identity, *, ticker="TEST", bucket="watchlist", start=1000,
+                 finish=1050, status="failed", receipt=None):
+    run_id = ("a" if identity == "old" else "b") * 32
+    metadata = dict(job_kind="card", ticker=ticker, bucket=bucket, status=status,
+                    started_at_ts=start, finished_at_ts=finish, run_id=run_id)
+    if receipt is not None:
+        metadata["submission"] = receipt
+    return write(root, "task-jobs", identity, **metadata)
+
+
+def applied_card(root, **kwargs):
+    receipt = dict(status="applied", applied=True, after_revision="c" * 64, run_id="b" * 32)
+    return card_attempt(root, "new", start=1100, finish=1150, status="applied",
+                        receipt=receipt, **kwargs)
+
+
+def test_later_applied_card_recovers_old_job_and_linked_run_without_rewriting(tmp_path):
+    job = card_attempt(tmp_path, "old")
+    run = write(tmp_path, "runs", "a" * 32, role="technical", status="failed",
+                started_at_ts=1001, finished_at_ts=1049)
+    originals = {p: p.read_bytes() for p in (job, run)}
+    first = health.update_health(tmp_path, now=1070)
+    assert len(first["active_issues"]) == 2
+    applied_card(tmp_path)
+    result = health.update_health(tmp_path, now=1200)
+    assert result["healthy"] and result["counts"]["failed"] == 2
+    assert len(result["new_events"]) == 2
+    assert all(e["kind"] == "recovered" and e["issue"]["recovered_by"] == "task_job:new"
+               for e in result["new_events"])
+    assert all(p.read_bytes() == content for p, content in originals.items())
+    # Delivery of opened events may already have happened; keep the durable outbox.
+    assert len(result["pending_events"]) == 4
+    assert health.update_health(tmp_path, now=1201)["new_events"] == []
+    fresh = health.update_health(tmp_path, state_dir=tmp_path / "fresh", now=1201)
+    assert fresh["healthy"] and fresh["new_events"] == []
+
+
+@pytest.mark.parametrize("change", [
+    {"status": "succeeded"}, {"status": "completed"}, {"status": "needs_review"},
+    {"status": "running", "lease_until": 2000}, {"ticker": "OTHER"},
+    {"bucket": "positions"}, {"started_at_ts": 1040}, {"finished_at_ts": 1300},
+    {"submission": {"status": "applied", "applied": True}},
+    {"submission": {"status": "applying", "outcome_uncertain": True}},
+])
+def test_unconfirmed_unrelated_overlapping_or_future_retry_does_not_recover(tmp_path, change):
+    card_attempt(tmp_path, "old")
+    health.update_health(tmp_path, now=1070)
+    path = applied_card(tmp_path)
+    doc = json.loads(path.read_text())
+    doc.update(change)
+    path.write_text(json.dumps(doc))
+    result = health.update_health(tmp_path, now=1200)
+    assert any(i["source_id"] == "task_job:old" for i in result["active_issues"])
+    assert not any(e["kind"] == "recovered" for e in result["new_events"])
+
+
+def test_new_failure_and_uncertain_submission_stay_actionable(tmp_path):
+    card_attempt(tmp_path, "old", receipt={"status": "uncertain", "outcome_uncertain": True})
+    applied_card(tmp_path)
+    card_attempt(tmp_path, "later", start=1160, finish=1170)
+    result = health.scan_health(tmp_path, now=1200)
+    assert result["recoveries"] == {}
+    assert {i["source_id"] for i in result["issues"]} == {"task_job:old", "task_job:later"}
+    assert "submission_uncertain" in {i["code"] for i in result["issues"]}
+
+
+def test_rejected_submission_on_a_succeeded_run_recovers_with_its_card(tmp_path):
+    """典型: 研究成功、提交撞 revision conflict (未写盘), 4 分钟后重跑
+    applied —— 旧判据下 run 的 status 是 succeeded, 不在 _FAILURES 里, 这条 warning
+    每轮 heartbeat 报到天荒地老。"""
+    run_id = "a" * 32
+    card_attempt(tmp_path, "old")
+    write(tmp_path, "runs", run_id, role="technical", status="succeeded",
+          started_at_ts=1001, finished_at_ts=1049,
+          submission={"status": "rejected", "run_id": run_id,
+                      "reason": "revision conflict: … — abort, 未写盘",
+                      "outcome_uncertain": False})
+    first = health.scan_health(tmp_path, now=1070)
+    assert "submission_rejected" in {i["code"] for i in first["issues"]}
+    applied_card(tmp_path)
+    result = health.scan_health(tmp_path, now=1200)
+    assert result["healthy"], result["issues"]
+    assert result["recoveries"]["run:" + run_id] == "task_job:new"
+
+
+@pytest.mark.parametrize("receipt", [
+    {"status": "rejected", "outcome_uncertain": True},
+    {"status": "needs_review"},
+    {"status": "applying", "outcome_uncertain": True},
+])
+def test_uncertain_or_reviewable_submission_never_auto_recovers(tmp_path, receipt):
+    """"写没写不确定" 与 "被拒但确定没写" 不是一回事: 前者永远留人判。"""
+    run_id = "a" * 32
+    card_attempt(tmp_path, "old")
+    write(tmp_path, "runs", run_id, role="technical", status="succeeded",
+          started_at_ts=1001, finished_at_ts=1049, submission=dict(receipt, run_id=run_id))
+    applied_card(tmp_path)
+    result = health.scan_health(tmp_path, now=1200)
+    assert not result["healthy"]
+    assert any(i["source_id"] == "run:" + run_id for i in result["issues"])
+
+
+def test_same_role_unlinked_run_is_not_recovered(tmp_path):
+    card_attempt(tmp_path, "old")
+    applied_card(tmp_path)
+    write(tmp_path, "runs", "d" * 32, role="technical", status="failed", finished_at_ts=1040)
+    result = health.scan_health(tmp_path, now=1200)
+    assert [i["source_id"] for i in result["issues"]] == ["run:" + "d" * 32]
+
+
+@pytest.mark.parametrize("block", [None, "missing_workflow", "partial_workflow", "failed_role",
+                                    "missing_card", "uncertain_card"])
+def test_partial_parent_requires_completed_research_and_every_card_resolved(tmp_path, block):
+    reports = {role: {"status": "succeeded"} for role in ("macro", "technical", "risk")}
+    if block == "failed_role":
+        reports["risk"]["status"] = "failed"
+    card = {"ticker": "TEST", "bucket": "watchlist", "status": "failed"}
+    if block == "uncertain_card":
+        card["submission"] = {"status": "uncertain"}
+    write(tmp_path, "task-jobs", "parent", job_kind="briefing", stage="finished",
+          status="partial", started_at_ts=900, finished_at_ts=1060, reports=reports,
+          cards=[card], pending_cards=[{"ticker": "OTHER", "bucket": "watchlist"}]
+          if block == "missing_card" else [])
+    if block != "missing_workflow":
+        write(tmp_path, "workflows", "parent", status="partial" if block == "partial_workflow" else "completed",
+              result="secret-workflow")
+    health.update_health(tmp_path, now=1070)
+    applied_card(tmp_path)
+    result = health.update_health(tmp_path, now=1200)
+    assert result["healthy"] == (block is None)
+    assert "secret-workflow" not in json.dumps(result)
+    if block is None:
+        assert result["new_events"][0]["issue"]["recovered_by"] == ["task_job:new"]

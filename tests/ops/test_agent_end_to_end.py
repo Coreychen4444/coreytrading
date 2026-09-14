@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from quant.core.agent_contracts import CONTRACT_VERSION, RESULT_SCHEMA_VERSION, canonical_hash
+from quant.core.agent_contracts import (CONTRACT_VERSION, RESULT_SCHEMA_VERSION,
+                                        canonical_hash, card_revision)
 from quant.core.market_sessions import session_close
 from quant.ops import agent_runtime as runtime, agent_submit as submit
 from quant.ops.agent_snapshots import capture_card
@@ -25,6 +26,8 @@ def test_reviewed_runtime_commit_is_targeted_idempotent_and_revision_fenced(
     monkeypatch.setattr(runtime, "policy_context", lambda role: {
         "synthetic-policy": "Use frozen price evidence; existing deterministic rules retain authority."})
     routes = runtime.load_routes()
+    # This case owns the reviewed path; it must not track the live review toggle.
+    routes["autopaint"]["review"] = True
     routes["roles"]["technical"].update(provider="claude", model=None,
                                           reviewer={"provider": "codex", "model": None}, fallback=[])
     document = json.loads(writer.WATCHLIST_PATH.read_text())
@@ -49,7 +52,7 @@ def test_reviewed_runtime_commit_is_targeted_idempotent_and_revision_fenced(
                             kline_dir=writer.KLINE_CACHE_DIR, macro_path=tmp_path / "absent-macro.json")
     assert snapshot["data"]["technical"] is not None
     assert snapshot["data"]["level_map"] is not None
-    assert snapshot["data"]["card_revision"] == canonical_hash(document["tickers"]["SYN"])
+    assert snapshot["data"]["card_revision"] == card_revision(document["tickers"]["SYN"])
     frozen_snapshot = deepcopy(snapshot)
     worker_args = deepcopy(record["result"]["proposal"]["zone_update_args"])
     calls = []

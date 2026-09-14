@@ -33,7 +33,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .num import coerce_float
 from .occ import parse_occ
@@ -60,9 +60,9 @@ CARD_REGIME_SOURCE = "card"
 
 def derive_card_regime(agent: Optional[dict], *, bucket: str, today: str) -> str:
     """按语义规格派生/维护 card 源 current_regime。返回动作标签供播报:
-    kept_machine / derived_normal / derived_repair / derived_no_add / cleared / noop。
+    kept_machine / derived_wait_gate / derived_repair / derived_no_add / cleared / noop。
 
-    bucket: "watchlist" (候选: 干净→常规参与 NOTIONAL_CAP 满额,
+    bucket: "watchlist" (候选: 干净→候选·等 gate 0 (旧「常规参与 NOTIONAL_CAP」已退役),
             带 reclaim_gates→修复观察 0) / "positions" (无机器 regime 的持仓
             = 入场已行使, 加仓待 gate → 持仓·无加仓授权 0)。
     cap 二值 {0, NOTIONAL_CAP} (分类轴退役)。
@@ -91,14 +91,17 @@ def derive_card_regime(agent: Optional[dict], *, bucket: str, today: str) -> str
         agent["current_regime"] = {
             "name": "修复观察", "cap_pct_nav": 0, "participation": "gate_only",
             "since": since, "source": CARD_REGIME_SOURCE,
-            "reason": "修复路径 — gate 达标前不授权 (gate 授权域=修复路径 only,)"}
+            "reason": "修复路径 — gate 达标前不授权 (gate 授权域=修复路径 only)"}
         return "derived_repair"
+    # 两种模式: 新开仓只走 gate 转移 (趋势确认) 或 抄底 (option_plans);
+    # 「结构干净 → 常规参与 cap 40%」这条无 gate 的第三路径退役 —— 干净候选卡派生 cap 0, 等 next_regime
+    # 的 gate 达标由转移机授予 (代价已量: gate_backtest2「gate 是保险不是 alpha, 保费 ≈1pp」)。
     agent["current_regime"] = {
-        "name": "常规参与", "cap_pct_nav": NOTIONAL_CAP,
-        "participation": "zone_eligible", "since": since, "source": CARD_REGIME_SOURCE,
-        "reason": "结构干净 → 满额参与资格, 实际 size 由 gate 预算主导 "
-                  "(cap 二值 {0, NOTIONAL_CAP},  分类轴退役)"}
-    return "derived_normal"
+        "name": "候选·等 gate", "cap_pct_nav": 0, "participation": "gate_only",
+        "since": since, "source": CARD_REGIME_SOURCE,
+        "reason": "两种模式: 常规参与退役, 入场 = gate 达标转移 或 抄底计划 (空仓); "
+                  "cap 由转移机授予"}
+    return "derived_wait_gate"
 
 
 # ── 结构修复 VETO 判别式 ──
@@ -198,6 +201,46 @@ def zone_position(close: float, zb: dict) -> str:
     return "below_zones"
 
 
+def option_fill_flags(bar_low: float, bar_high: float, zb: dict) -> Tuple[List[str], bool]:
+    """期权 BUY 成交的**正股**价位违规 flags (期权锚定正股回踩 z1 的价格,
+    不追高)。→ (flags, ambiguous)。
+
+    输入 = 成交时刻正股那根 bar 的 [low, high] (60m 优先, 拉不到退 1d)。判据**保守**:
+    整根 bar 在带外才判; bar 跨带 = ambiguous, 归人判 (不冤枉也不放过)。
+      above_z1        bar_low > z1 上沿 —— 期权比正股严: 正股允许到 no_chase, 期权只许 z1∪z2 回踩
+      below_z2        bar_high < z2 下沿 —— 破位区买入 (z2_breach_buy_freeze 同义)
+      above_no_chase  bar_low ≥ no_chase (与正股 flag 同名同义)
+      in_trim_zone    整根 bar 落在 trim 内
+    z1/z2 之间的缝 (gap_z1_z2) 不判 —— 那是更便宜的位置, 不是追高。
+    消费者: sync/trade_history_sync 落库即盖 → brief INFRA:fill_price_breach; 与
+    `zone_position` 同一份 zb (zone_bands)。
+    """
+    lo, hi = float(bar_low), float(bar_high)
+    z1_hi, z2_lo = zb["z1"][1], zb["z2"][0]
+    nc, trim = zb.get("no_chase"), zb.get("trim")
+    flags: List[str] = []
+    ambiguous = False
+    if lo > z1_hi:
+        flags.append("above_z1")
+    elif hi > z1_hi:
+        ambiguous = True
+    if hi < z2_lo:
+        flags.append("below_z2")
+    elif lo < z2_lo:
+        ambiguous = True
+    if nc:
+        if lo >= nc:
+            flags.append("above_no_chase")
+        elif hi >= nc:
+            ambiguous = True
+    if isinstance(trim, list) and len(trim) == 2:
+        if trim[0] <= lo and hi <= trim[1]:
+            flags.append("in_trim_zone")
+        elif lo <= trim[1] and hi >= trim[0]:
+            ambiguous = True
+    return flags, ambiguous
+
+
 def _d(s) -> Optional[date]:
     try:
         return date.fromisoformat(str(s)[:10])
@@ -274,6 +317,71 @@ def cards_missing_next_gate(*docs: Optional[dict]) -> List[str]:
                     else "cap 0 且无上行出口 = 锁死, 只能等破位")
             out.append(f"{t} [{cr.get('name') or '无 regime'} cap "
                        f"{cap * 100:g}%] — {tail}")
+    return out
+
+
+def has_stop(agent: Optional[dict]) -> bool:
+    """这张卡的 zones 上有没有一条代码读得到的 stop (`zones.stop_level` 数值)。
+
+    判据与消费者同一份: `regime_transition.derive` 下行分支 `if stop is not None:`、
+    `sizing.binding_stop`、brief / exit_guard 的 stop 告警都只读这一个字段。
+    `invalid_if` 里写的价位不算 —— 规则不进代码 = 不存在。
+    """
+    return coerce_float(((agent or {}).get("zones") or {}).get("stop_level")) is not None
+
+
+def cards_missing_stop(*docs: Optional[dict]) -> List[str]:
+    """有价位带却没有 stop 的活跃正股卡 —— **一张不会降级的卡**。
+
+    典型形状: 受控重画的提案带价位带、不带 --stop-level, writer 整块替换擦掉转移机刚写的
+    bfloor, submit 守卫只比 days 不比消失, 回执 applied; invalid_if 文字仍写着那条线, 代码读不到。
+    后果: 下行分支整段不评估 → 收盘破 stop 不降级, cap 与 Today 授权一直挂着;
+    entry_guard 的预设止损退到 2N 兜底 (不是卡的线)。
+
+    只报不拦 (与 card_missing_next_gate 同款出口): 写入端已在 writer / submit 拒绝「擦除
+    现有 stop」, 本扫描兜的是**任何路径**留下的无 stop 卡 (建卡就没给 / 手编 / 旧数据)。
+    期权卡豁免: 它的退出线归 exit_guard 期权 overlay, 转移机本来不管它。
+    """
+    from .holdings import is_managed, is_scannable_card     # noqa: PLC0415  同层
+    out: List[str] = []
+    for doc in docs:
+        for t, body in sorted(((doc or {}).get("tickers") or {}).items()):
+            if not is_scannable_card(body) or not is_managed(body):
+                continue
+            if ((body.get("instrument") or {}).get("type")) == "option":
+                continue
+            agent = body.get("agent") or {}
+            zones = agent.get("zones") if isinstance(agent.get("zones"), dict) else None
+            if not zones or has_stop(agent):
+                continue
+            if not (zones.get("accumulation_zone_1") or zones.get("accumulation_zone_2")):
+                continue        # 没有价位带的卡不在本告警范围 (stub / 只剩元数据归别的出口)
+            cr = agent.get("current_regime") or {}
+            cap = coerce_float(cr.get("cap_pct_nav")) or 0
+            tail = ("cap 挂着无人撤: 破位不降级, Today 授权照发" if cap > 0
+                    else "降级世界无地板: 再破位也不会作废重画")
+            out.append(f"{t} [{cr.get('name') or '无 regime'} cap {cap * 100:g}%] — {tail}")
+    return out
+
+
+def cards_missing_bottom_stamp(positions_doc: Optional[dict]) -> List[str]:
+    """抄底 (reversal_probe) 成交落了 lot 但持仓卡没盖章 → ["T: lot 止损 X vs 卡 stop Y", ...]。
+
+    授权住计划不住卡, 所以正股卡不会自动带 entry_class / 止跌低 stop; exit_guard 的正股
+    止损读的是**卡 stop** —— 卡不盖 = 机器按旧 stop 走, 与本类「止损放在下影线低点」的口径分叉。
+    修法一条命令: update_position_zones --entry-class reversal_probe --stop-level <止跌低> --stop-level-days 1。"""
+    out: List[str] = []
+    for t, body in ((positions_doc or {}).get("tickers") or {}).items():
+        lots = ((body.get("lots") or {}).get("position") or []) if isinstance(body.get("lots"), dict) else []
+        b_lots = [lo for lo in lots if isinstance(lo, dict) and lo.get("entry_class") == "reversal_probe"]
+        if not b_lots or coerce_float((body.get("broker") or {}).get("qty")) in (None, 0, 0.0):
+            continue
+        agent = body.get("agent") or {}
+        card_stop = coerce_float((agent.get("zones") or {}).get("stop_level"))
+        lot_stop = coerce_float(b_lots[-1].get("stop_loss"))
+        if agent.get("entry_class") != "reversal_probe" or (lot_stop is not None and card_stop != lot_stop):
+            out.append(f"{t}: lot 止损 {lot_stop if lot_stop is not None else '?'} vs 卡 stop {card_stop if card_stop is not None else '无'}"
+                       f" (卡 entry_class={agent.get('entry_class')!r})")
     return out
 
 

@@ -28,13 +28,25 @@ def _card(gate=100.0, days=2):
 # 域判据先拦下, 测试"过了"但测的不再是自己声称的那条 (拿掉①②③任何一条都不红)。
 # ⓪ 自己的测试在下面单独一节, 不垫。
 
+
+def _vol(monkeypatch, ok, note=""):
+    """量腿判定的**真实接缝** = `volume_leg_detail`；`volume_leg` 只是它的二元视图。
+     结构化收据把计算搬进 detail 后, 打桩必须打在计算那一侧 ——
+    打在视图上会静默失效 (本文件 11 处曾同时中招, 由 fastlane 那条断言抓出)。"""
+    detail = {"ok": ok, "note": note, "required": 1.2, "actual": None, "mode": "relative",
+              "benchmark": None, "benchmark_ratio": None, "own_ratio": None,
+              "aligned_date": None, "aligned_streak_day": 1 if ok else None,
+              "streak": 1, "degraded": False}
+    monkeypatch.setattr(rt, "volume_leg_detail", lambda *a, **k: dict(detail))
+    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (ok, note))
+
 def _domain_ok(monkeypatch):
     monkeypatch.setattr(rt, "_repair_domain", lambda *a: (True, "域=①修复(test)"))
 
 
 def test_fastlane_fires_on_first_day_with_enough_magnitude(monkeypatch):
     _domain_ok(monkeypatch)
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     closes = [90.0] * 40 + [99.0, 112.0]          # 昨在 gate 下, 今大幅站上
     tr = rt.detect_transition("T", _card(), _k(closes), today="2026-08-07")
     assert tr and tr["direction"] == "up" and tr["fastlane"] is True
@@ -44,7 +56,7 @@ def test_fastlane_fires_on_first_day_with_enough_magnitude(monkeypatch):
 
 def test_fastlane_needs_magnitude_not_just_clearing_the_gate(monkeypatch):
     _domain_ok(monkeypatch)
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     closes = [90.0] * 40 + [99.0, 100.4]          # 站上了, 但远不到 +0.5N
     assert rt.detect_transition("T", _card(), _k(closes), today="2026-08-07") is None
 
@@ -58,7 +70,7 @@ def test_fastlane_is_first_day_only_no_retroactive_ticket(monkeypatch):
     钉了个到不了的分支。
     """
     _domain_ok(monkeypatch)
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     card = _card(days=3)
     closes = [90.0] * 40 + [99.0, 112.0, 113.0]   # 最近 3 日不全在上 → ×3 不成立
     tr = rt.detect_transition("T", card, _k(closes), today="2026-08-07")
@@ -68,20 +80,20 @@ def test_fastlane_is_first_day_only_no_retroactive_ticket(monkeypatch):
 def test_fastlane_does_not_bypass_the_volume_leg(monkeypatch):
     """量腿是 relative_volume  独立裁决的维度, 快车道不豁免它。"""
     _domain_ok(monkeypatch)
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (False, "量比不足"))
+    _vol(monkeypatch, False, "量比不足")
     closes = [90.0] * 40 + [99.0, 112.0]
     assert rt.detect_transition("T", _card(), _k(closes), today="2026-08-07") is None
 
 
 def test_two_day_path_still_works_and_is_labelled(monkeypatch):
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     closes = [90.0] * 40 + [101.0, 102.0]
     tr = rt.detect_transition("T", _card(), _k(closes), today="2026-08-07")
     assert tr and tr["days"] == 2 and tr["fastlane"] is False
 
 
 def test_down_transition_still_takes_priority(monkeypatch):
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     card = _card()
     card["agent"]["zones"] = {"stop_level": 200.0, "stop_level_days": 2}
     closes = [90.0] * 40 + [99.0, 112.0]
@@ -252,7 +264,7 @@ def _box_shape():
 def test_domain_denies_fastlane_on_a_box_gate(monkeypatch, tmp_path):
     """非①(箱体顶) 首日幅度+量腿全达标 → **仍然 ×2**, 不发快车票。
     这正是 MRVL 223 / MU 945 的形状 —— ③有显著负 R 反证的那一类。"""
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     monkeypatch.setattr(rt, "KLINE_DEEP_DIR", tmp_path)      # 无深度缓存 → 只用常规
     closes = _box_shape() + [124.0, 145.0]                   # 昨 124 < gate 130 < 今 145
     tr = rt.detect_transition("T", _card(gate=130.0), _k(closes), today="2026-08-09")
@@ -260,7 +272,7 @@ def test_domain_denies_fastlane_on_a_box_gate(monkeypatch, tmp_path):
 
 
 def test_domain_grants_fastlane_on_a_repair_gate(monkeypatch, tmp_path):
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     monkeypatch.setattr(rt, "KLINE_DEEP_DIR", tmp_path)
     closes = _repair_shape() + [104.0, 125.0]                # 昨在 gate 110 下, 今大幅上
     tr = rt.detect_transition("T", _card(gate=110.0), _k(closes), today="2026-08-09")
@@ -274,7 +286,7 @@ def test_domain_denies_when_series_too_short(monkeypatch, tmp_path):
     ⚠️ fixture 必须是「**有**破位但序列不满 180」—— 拿 42 根的序列测, MA60 都算不出,
     「拿掉 MIN_BARS 门槛」与「窗内无破位」给出同一个 None, 变异不红 (M3 实测漏网)。
     这里 103 根: 破位算得出 (若无门槛会判①放行), 唯独窗口算不满 → 必须拒。"""
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     monkeypatch.setattr(rt, "KLINE_DEEP_DIR", tmp_path)
     closes = [200.0] * 70 + [80.0] + [85.0 + i for i in range(30)] + [104.0, 125.0]
     assert len(closes) < rt.MIN_BARS
@@ -288,7 +300,7 @@ def test_domain_uses_deep_cache_history(monkeypatch, tmp_path):
     """深度缓存补历史: 常规缓存只看到收复段(无破位), 深度里有崩塌 → 合并后判①。
     这就是 E 锁定「深度+常规按日期去重合并」在 live 的意义。"""
     import json as _json
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     monkeypatch.setattr(rt, "KLINE_DEEP_DIR", tmp_path)
     full = _repair_shape(n_recover=80) + [104.0, 125.0]
     all_bars = [{"time": f"2025-{1 + i // 28:02d}-{i % 28 + 1:02d} 00:00:00",
@@ -327,7 +339,7 @@ def _applied(monkeypatch, fastlane):
     card = _card()
     card["agent"]["next_regime"]["zones"] = {"accumulation_zone_1": [98.0, 103.0],
                                              "stop_level": 95.0}
-    monkeypatch.setattr(rt, "volume_leg", lambda *a, **k: (True, ""))
+    _vol(monkeypatch, True)
     if fastlane:
         monkeypatch.setattr(rt, "_repair_domain", lambda *a: (True, "域=①修复(test)"))
     tr = rt.detect_transition("T", card, _k(closes), today="2026-08-07")

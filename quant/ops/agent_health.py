@@ -26,6 +26,21 @@ from quant.core.io_json import atomic_write_json, state_lock
 from quant.core.paths import AGENT_RUNS_DIR
 
 MAX_WINDOW_S = 86400
+# Business-lease budgets shared by the job runner and its dependents
+# (: ladder/chart barriers used a private 1800 s guess that stopped
+# covering postclose once the repaint bound went 2 -> 5 cards).
+DOMAIN_JOB_LEASE_S = 10800
+CARD_LEASE_S = 7200
+# The prompt_oversized warning is retired. It compared a
+# desktop packet's file bytes / 1.9 against a CLI-transport token ceiling, but
+# tasks/desktop-research.md has the session read packet fields on demand, so the
+# number was an "if fully read" upper bound, never a consumed-token count
+# (input_metrics still carries token_count_measured: false). It also had no
+# usable recovery path: the issue derives from a run record that is never
+# rewritten, so a daily job re-opened it every day and it could only clear once
+# session_cleanup rotated that run out at 90 days. Packet bytes stay measured in
+# input_metrics and reported by quant/report/agent_metrics.py; view slimming in
+# agent_inputs stays a sizing project, not a health event.
 MAX_METADATA_BYTES = 8 * 1024 * 1024
 _RUN_ID = re.compile(r"[a-f0-9]{32}")
 _SAFE_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,96}")
@@ -98,9 +113,9 @@ def validate_policy(policy: dict) -> dict:
     return deepcopy(policy)
 
 
-def _read(path: Path) -> dict:
+def _read(path: Path, *, max_bytes=MAX_METADATA_BYTES) -> dict:
     try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_METADATA_BYTES:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > max_bytes:
             raise HealthError("metadata_unreadable")
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
@@ -169,7 +184,7 @@ def _reap(state: dict, now: float) -> None:
 
 def acquire_call(control_dir: Path, policy: dict, *, provider: str, role: str,
                  run_id: str, timeout_s: int | float, pid: int | None = None,
-                 now=None) -> dict:
+                 now=None, execution_transport="cli") -> dict:
     """Atomically charge and acquire; denial and duplicate returns never authorize a call."""
     limits = validate_policy(policy)
     owner = os.getpid() if pid is None else pid
@@ -178,7 +193,8 @@ def acquire_call(control_dir: Path, policy: dict, *, provider: str, role: str,
             or not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id)
             or type(owner) is not int or owner <= 0
             or type(timeout_s) not in (int, float) or not math.isfinite(timeout_s)
-            or not 0 < timeout_s <= 1800):
+            or execution_transport not in ("cli", "desktop")
+            or not 0 < timeout_s <= (MAX_WINDOW_S if execution_transport == "desktop" else 1800)):
         raise HealthError("invalid_call_metadata")
     root = Path(control_dir)
     path = root / "global-calls.json"
@@ -372,11 +388,124 @@ def _issue(meta: dict, code: str, *, severity="error", age_s=None) -> dict:
     return out
 
 
+def _card_recoveries(records: dict, instant: float, root: Path) -> dict:
+    """Link obsolete card attempts to a later confirmed write, without rewriting history.
+
+    Research success alone cannot resolve a card failure. Keep uncertain writes,
+    overlapping attempts and failures after the successful write actionable.
+    """
+    def stamp(doc, field):
+        return _timestamp(doc.get(field + "_ts", doc.get(field)))
+
+    def target(doc):
+        ticker, bucket = _label(doc.get("ticker")), doc.get("bucket")
+        return (bucket, ticker) if ticker and bucket in ("positions", "watchlist") else None
+
+    def certain(doc):
+        receipt = doc.get("submission")
+        return not (isinstance(receipt, dict) and (
+            receipt.get("outcome_uncertain") is True or
+            receipt.get("status") in ("applying", "uncertain", "needs_review")))
+
+    def aborted(doc):
+        """提交被拒 = 定义上未写盘: writer 在 RMW 锁内先比 revision 再落盘。
+
+        研究成功 (status succeeded) 但 submission rejected 的 run 不在 _FAILURES 里,
+        原本永远拿不到恢复链接 —— 典型: 提案与重跑逐字相同、重跑已
+        applied, 而这条 warning 每轮 heartbeat 继续报。needs_review / uncertain 不
+        走这条路: 那两个是"写没写不确定", 必须留人判。
+        """
+        receipt = doc.get("submission")
+        return (isinstance(receipt, dict) and receipt.get("status") == "rejected"
+                and receipt.get("outcome_uncertain") is not True)
+
+    def confirmed(doc):
+        receipt = doc.get("submission")
+        return (doc.get("status") == "applied" and certain(doc)
+                and isinstance(receipt, dict) and receipt.get("status") == "applied"
+                and receipt.get("applied") is True
+                and isinstance(receipt.get("after_revision"), str)
+                and re.fullmatch(r"[a-f0-9]{64}", receipt["after_revision"])
+                and isinstance(doc.get("run_id"), str) and _RUN_ID.fullmatch(doc["run_id"])
+                and receipt.get("run_id") == doc["run_id"])
+
+    applied = []
+    for source_id, doc in records.items():
+        start, finish = stamp(doc, "started_at"), stamp(doc, "finished_at")
+        if (source_id.startswith("task_job:") and doc.get("job_kind") == "card"
+                and target(doc) and confirmed(doc)
+                and start is not None and finish is not None and start <= finish <= instant):
+            applied.append((start, source_id, doc))
+    applied.sort(key=lambda item: (item[0], item[1]))
+    recovered = {}
+    for source_id, doc in records.items():
+        finish = stamp(doc, "finished_at")
+        if (not source_id.startswith("task_job:") or doc.get("job_kind") != "card"
+                or _label(doc.get("status")) not in _FAILURES | {"needs_review", "expired", "superseded"}
+                or not certain(doc) or finish is None):
+            continue
+        replacement = next((identity for start, identity, new in applied
+                            if start > finish and target(doc) == target(new)), None)
+        if replacement is None:
+            continue
+        recovered[source_id] = replacement
+        run_id = doc.get("run_id")
+        run_source = "run:" + run_id if isinstance(run_id, str) else ""
+        run = records.get(run_source, {})
+        run_finish = stamp(run, "finished_at")
+        # Only the explicitly linked technical attempt, never all runs of a role.
+        if (run.get("role") == "technical" and certain(run)
+                and (_label(run.get("status")) in _FAILURES | {"needs_review"} or aborted(run))
+                and run_finish is not None and run_finish <= finish):
+            recovered[run_source] = replacement
+    # A finished parent can remain partial solely because its card queue failed.
+    # Require successful research evidence and resolution of every queued card.
+    for source_id, doc in records.items():
+        if (not source_id.startswith("task_job:") or doc.get("status") != "partial"
+                or doc.get("job_kind") not in ("briefing", "postclose")
+                or doc.get("stage") != "finished" or not certain(doc)):
+            continue
+        finish = stamp(doc, "finished_at")
+        reports = doc.get("reports")
+        roles = {"technical", "risk"} | ({"macro"} if doc["job_kind"] == "briefing" else set())
+        if (finish is None or not isinstance(reports, dict) or set(reports) != roles
+                or any(not isinstance(r, dict) or r.get("status") != "succeeded"
+                       for r in reports.values())):
+            continue
+        if doc["job_kind"] == "briefing":
+            try:
+                workflow = _read(root / "workflows" / (source_id.split(":", 1)[1] + ".json"),
+                                 max_bytes=32 * 1024 * 1024)
+            except HealthError:
+                continue
+            if workflow.get("status") != "completed":
+                continue
+        cards, pending = doc.get("cards"), doc.get("pending_cards")
+        if not isinstance(cards, list) or not isinstance(pending, list):
+            continue
+        unresolved = [c for c in cards if not isinstance(c, dict) or not confirmed(c)] + pending
+        if not unresolved:
+            continue
+        replacements = []
+        for card in unresolved:
+            replacement = next((identity for start, identity, new in applied
+                                if isinstance(card, dict) and target(card)
+                                and target(card) == target(new) and start > finish
+                                and certain(card)), None)
+            if replacement is None:
+                break
+            replacements.append(replacement)
+        if len(replacements) == len(unresolved):
+            recovered[source_id] = sorted(set(replacements))
+    return recovered
+
+
 def scan_health(run_dir: Path, *, now=None, stale_after_s=1800,
                 expected_roles=(), expected_jobs: dict | None = None) -> dict:
     """Read metadata only; absent roles are quiet unless the host declares cadence.
 
-    Reads runtime runs/jobs plus task-jobs written by the background controller.
+    Reads runtime runs/jobs plus task-jobs written by the background controller,
+    and workflow completion status when resolving a partial card queue.
     Never returns prompts, results, snapshots, submission reasons or CLI errors.
     """
     instant = _time(now)
@@ -393,6 +522,7 @@ def scan_health(run_dir: Path, *, now=None, stale_after_s=1800,
         if _label(kind) is None or type(age) not in (int, float) or not 0 < age <= MAX_WINDOW_S * 31:
             raise HealthError("invalid_expected_jobs")
     root, issues, observed, success_times = Path(run_dir), [], {}, {}
+    records = {}
     counts = {"runs": 0, "jobs": 0, "task_jobs": 0, "active": 0, "succeeded": 0,
               "failed": 0, "needs_review": 0, "uncertain_submission": 0}
     for directory, source in (("runs", "run"), ("jobs", "job"), ("task-jobs", "task_job")):
@@ -410,6 +540,7 @@ def scan_health(run_dir: Path, *, now=None, stale_after_s=1800,
                 observed[meta["source_id"]] = "invalid"
                 continue
             meta = _metadata(doc, source, identity)
+            records[meta["source_id"]] = doc
             status = doc.get("status") if isinstance(doc.get("status"), str) else "invalid"
             observed[meta["source_id"]] = status if isinstance(status, str) else "invalid"
             started = _timestamp(doc.get("started_at_ts", doc.get("started_at")))
@@ -456,6 +587,13 @@ def scan_health(run_dir: Path, *, now=None, stale_after_s=1800,
                 issues.append(_issue(meta, "job_unfinished", age_s=age))
             else:
                 issues.append(_issue(meta, "metadata_status_invalid"))
+    recoveries = _card_recoveries(records, instant, root)
+    # submission_rejected 可恢复 (未写盘, 见 _card_recoveries.aborted);
+    # submission_uncertain / submission_needs_review 不在集合里 = 永远留人判。
+    issues = [item for item in issues if item["source_id"] not in recoveries
+              or item["code"] not in {"run_failed", "run_timeout", "needs_review",
+                                      "job_unfinished", "job_superseded", "job_partial",
+                                      "submission_rejected"}]
     expectations = {role: stale_after_s for role in expected_roles}
     expectations.update({kind: options.get("max_age_s") if isinstance(options, dict) else options
                          for kind, options in expected_jobs.items()})
@@ -469,7 +607,7 @@ def scan_health(run_dir: Path, *, now=None, stale_after_s=1800,
             observed[meta["source_id"]] = "succeeded"
     return {"version": 1, "checked_at": _stamp(instant), "counts": counts,
             "healthy": not issues, "issues": sorted(issues, key=lambda item: item["issue_id"]),
-            "observed": observed}
+            "observed": observed, "recoveries": recoveries}
 
 
 def _health_state(path: Path) -> dict:
@@ -527,7 +665,10 @@ def update_health(run_dir: Path, *, state_dir: Path | None = None, now=None,
                 continue
             item = previous["issue"]
             # Deleted/missing records and a still-running retry are not recovery.
-            if summary["observed"].get(item["source_id"]) in _TERMINAL:
+            replacement = summary["recoveries"].get(item["source_id"])
+            if replacement or summary["observed"].get(item["source_id"]) in _TERMINAL:
+                if replacement:
+                    item = {**item, "recovered_by": replacement}
                 transition(item, "recovered")
                 previous.update(active=False, recovered_at=_stamp(instant))
         atomic_write_json(path, state)

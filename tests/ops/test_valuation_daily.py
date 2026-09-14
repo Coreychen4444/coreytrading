@@ -48,10 +48,12 @@ def test_independent_daily_sequence_and_archived_receipt(setup):
     out = daily.run_daily(**kwargs)
     assert events == ["refresh", "capture", "macro", "valuation"]
     assert out["status"] == "completed"
-    assert out["coverage"] == {"total": 1, "computed": 1}
+    assert out["coverage"] == {"total": 1, "computed": 1, "publishable": 0, "company_research": 0}
+    assert out["publication"]["status"] == "withheld"
     assert read_json(out["receipt"])["receipt_hash"] == out["receipt_hash"]
     assert read_json(out["workflow"])["risk_snapshot"] is None
-    assert "基准DCF" in Path(out["report"]).read_text()
+    assert "暂不发布" in Path(out["report"]).read_text()
+    assert "基准DCF $" not in Path(out["report"]).read_text()
     assert read_json(kwargs["root"] / "latest.json")["run_id"] == out["run_id"]
 
 
@@ -105,6 +107,20 @@ def test_preview_has_no_writes_refresh_or_models(setup):
     assert out["status"] == "preview" and out["macro_research"] == "not_run"
     assert events == ["capture"]
     assert not kwargs["root"].exists() and not kwargs["control_dir"].exists()
+
+
+def test_company_pilot_reaches_daily_archive_without_legacy_price(setup):
+    from tests.valuation.test_company_model import packet, STAMP as COMPANY_STAMP
+    kwargs, events = setup
+    now = datetime.fromisoformat(COMPANY_STAMP)
+    frozen = make_snapshot({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': packet()}}}, now=now)
+    kwargs['now'] = now
+    kwargs['capture_fn'] = lambda **kw: {'snapshot': frozen, 'snapshots': {r: frozen for r in ('macro', 'technical', 'risk', 'valuation')}, 'summary': {}}
+    out = daily.run_daily(**kwargs)
+    assert out['status'] == 'completed', out
+    assert out['coverage'] == {'total': 1, 'computed': 0, 'publishable': 0, 'company_research': 1}
+    assert read_json(out['receipt'])['tickers']['SYN']['company_research']['observed']['status'] == 'reconciled'
+    assert 'company-v5.2-research' in Path(out['report']).read_text()
 
 
 def test_day_is_singapore_and_no_market_holiday_gate(setup):

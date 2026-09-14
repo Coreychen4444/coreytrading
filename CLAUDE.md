@@ -21,7 +21,7 @@
 |---|---|
 | 美股业务资料布局 | `trade/README.md`；`trade/` 下平铺 portfolio / market / intelligence / valuation / strategy / knowledge，公开仓每个目录只有 README 与合成 `*.example.*`，数据路径真源为 `quant/core/paths.py` |
 | 代码分层（新脚本放哪、能 import 谁） | `quant/README.md`，由 `tests/test_layering.py` 强制；测试镜像同一分层，总数现查 `--collect-only` |
-| 领域 Agent 与模型路由 | `agents/README.md`；`agents/routing.json` 的模型 profile 固定主用／次选模型与 effort，角色与运行器解耦；升级授权见 `agents/MODEL_POLICY.md`。缺卡与待重画入口启用跨运行器复核后的受控自动写卡；本合同对所有模型同样有效 |
+| 领域 Agent 与模型路由 | `agents/README.md`；`agents/routing.json` 的模型 profile 固定主用／次选模型与 effort，角色与运行器解耦；升级授权见 `agents/MODEL_POLICY.md`。缺卡与待重画入口启用受控自动写卡（是否要求跨运行器复核由 `autopaint.review` 决定）；当前 `execution_transport = desktop`：模型执行交给各运行器的 Desktop 会话（交接规范 `tasks/desktop-research.md`），编排、冻结证据、受控提交与 applied 回执仍归宿主；本合同对所有模型同样有效 |
 | 持仓单一真源 | `trade/portfolio/state/positions.json`（broker 报价 + agent zones / current_regime / lots / pending_orders；「谁算持仓」判据只有 `broker.qty`，见 `quant/core/holdings.py`） |
 | 候选 | `trade/portfolio/state/watchlist.json`；membership 真源 = 券商侧的入场候选分组（持仓自动移出、平仓自动加回，卡原样搬回）；候选判据 = `holdings.is_candidate`，不要各自抄两半 |
 | 成交事件流 / 评分 / 决策 worksheet | `trade/portfolio/events/<YYYY-MM>/trades.jsonl`（带市场 offset 的 ISO 时间，落库即盖 tier/auth 章）· `trade/portfolio/journals/scores.jsonl` · `trade/portfolio/events/decisions.jsonl` |
@@ -42,24 +42,25 @@
 3. **情报层收拢**：本仓只做技术分析 + 风控，不采集任何新闻 / 宏观 / 社媒。归因 = tape 定时点 → kline 大盘 / 板块 → 情报归档（`trade/intelligence/reports/`，若配置）→ 「触发源未知」（合法输出，不编造）。
 4. **宏观相位**：持仓 / 入场 / 组合风险讨论先读宏观快照（`trade/intelligence/macro/current.json`，若配置）作方向先验与风险环境；它不翻译成 GO / VETO / cap / 股数，宏观 schema 的写权限与 hard veto 恒为 false；缺失或校验失败 → 写「宏观先验无有效输入」，不自行抓新闻。
 5. **授权与 sizing**：cap 二值 {0, 40% NAV}（`current_regime.cap_pct_nav`；结构未修复 = `structure_repair_veto` = VETO）。实际能下多少 = `quant/core/sizing.py` `entry_cap()` 六臂取小（regime cap − 敞口 / gate 预算 2.5→4→5% NAV risk 累计 ÷ 真 stop 距离 / at-risk 5% / 冲击预算 15% / gross 110% / 购买力）。档位 = `gate_count(card)`（卡上给了 cap 的 up 转移条数）。整股约束最小 1 股。细则 `.claude/rules/position-tiers.md`。
-6. **期权**：gate1 起可期权，须过 IV 硬门槛（`sizing.long_call_iv_gate`）；保费上限 gate1 12.5% / gate2 7.5% / gate3 5% NAV；正股退出线 = 授予 cap 的 gate ×1 日收盘。合约选择与保费映射归 `quant/options/option_plan.py`。
+6. **期权**：gate1 起可期权，须过 IV 硬门槛（`sizing.long_call_iv_gate`）；保费上限 gate1 12.5% / gate2 7.5% / gate3 5% NAV；正股退出线 = 授予 cap 的 gate ×1 日收盘；**限价锚 = 正股 z1 回踩**，追高 = 规则外 `above_z1`（期权 BUY 落库盖正股价位）。合约选择与保费映射归 `quant/options/option_plan.py`。**抄底 `reversal_probe`（试行）**：第二入场类，前提空仓；信号 = `quant/core/setups.py` ✓止跌（次日未新低 / 长下影），止损 = 止跌低收盘 ×1、无 S1，正股 + call（IVP 门），授权住 `option_plans.json`。
 7. **退出无 override**：卡片 stop / 棘轮地板 / 趋势死亡线 / G-01 任一成立 → 当日执行，不给「看一天」选项，不起草 override；未执行 = 规则外评 C 起步，brief `exit_overdue` 逐日点名。
 8. **破 z2 下沿 = 当日 BUY 冻结**（盘中告警 `z2_breach_buy_freeze`，不动 cap；收盘裁定，postclose 重画）。
 9. **注解只给规则外成交**（判据见 trading-discipline）；`tier` / `auth` 落库即机械盖章；增量 BUY 自动落 lots（`lot_reconcile`），部分卖出归人工，漂移走 `INFRA:lot_drift`。
 10. **决策层哲学**：Bayesian 概率优先（先验、信息价值、验证后再更新、机会成本、预先承诺触发与失效条件、process 与 outcome 分开评分），高于任何单点 thesis；process > outcome。
+11. **两种模式（试行）**：入场只有 🔁 抄底（空仓 + ✓止跌 + 止损 = 止跌低）与 🚀 趋势确认（站稳 gate 转移）两条路；card 源「常规参与 cap 40%」与卖 put / sell premium 退役；宏观·情绪不进仓位，确认度只决定工具档位；持仓票不走抄底；试行满 10 笔或 60 交易日先到即按预先锁定的判据复核（止损率 >50% 或 mean R <0 → 回原确认口径重议）。判读层 chart-read 只列两种形态已形成 / 即将形成。
 
 ## 定时任务（示例 cadence，operator 时区；实际注册与启用以运行时清单为准）
 | 任务 | 示例 cron（SGT） | 一句话 |
 |---|---|---|
 | heartbeat | `17 0,6,12,18 * * 1-6` | 持仓巡逻 `pipeline --mode heartbeat`，退出栈 / 异动告警原文推送 |
-| overnight-briefing | `30 18 * * 1-5` | 盘前简报 + 开盘操作手册 + 当日挂单清单（`--mode briefing`），宏观 / 技术 / 风控研究回执 |
-| postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画→提醒线 / 白名单→转移简报 |
-| gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled 后推 gate 阶梯表原文 |
-| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：技术角色判读 + 机械结构 digest（零授权） |
-| weekly-portfolio-review | `3 10 * * 6` | 周复盘（宏观 / 技术 / 风控；估值归独立任务） |
+| overnight-briefing | `30 18 * * 1-5` | 盘前简报 + 开盘操作手册 + 当日挂单清单（`--mode briefing`），技术研究回执 + 代码渲染风控收据，宏观先验读发布快照 |
+| postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画（每轮 `repaint_bound`）→提醒线 / 白名单→转移达标收据与简报 |
+| gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled（等待预算 = 上游 lease，不私设秒数）后推 gate 阶梯表原文 |
+| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：两种模式清单（🔁 抄底 / 🚀 趋势确认 已形成·即将形成）原文推送，未形成不列（判别式 `quant/core/setups.py`；零授权、零模型调用） |
+| weekly-portfolio-review | `3 10 * * 6` | 周复盘（宏观 / 技术 / 风控三角色唯一时点 + Agent 层周基线；估值归独立任务） |
 | valuation-daily | 每日 08:00（示例，Codex 运行器） | 独立估值：刷新→冻结→宏观情景→计算→估值报告；规范 `tasks/codex/valuation-daily.md`，零授权效力 |
 
-六份交易任务第一条命令都是 `quant/ops/agent_jobs.py due --kind <kind>`：实际窗口由 `quant/core/market_sessions.py` 的 XNYS 日历唯一裁定（休市、半日、DST），盘后三任务截止收盘后 60 分钟（不含），休市或未到点直接跳过，日历不可用即报错不猜。领域研究和自动写卡归控制器，任务外层不再次重画；只有 `applied` 回执代表落卡。prompt 文件存在不等于注册，注册不等于某轮成功——判据是同 session 的 task-job 回执与健康告警。细则 `tasks/README.md`。
+六份交易任务第一条命令都是 `quant/ops/agent_jobs.py due --kind <kind>`：实际窗口由 `quant/core/market_sessions.py` 的 XNYS 日历唯一裁定（休市、半日、DST），盘后三任务截止收盘后 60 分钟（不含），休市或未到点直接跳过，日历不可用即报错不猜。领域编排和自动写卡归控制器，Desktop 会话只按交接协议执行分配的研究，禁止绕过 `agent_submit` 直调 writer；任务外层不再次重画；只有 `applied` 回执代表落卡。prompt 文件存在不等于注册，注册不等于某轮成功——判据是同 session 的 task-job 回执与健康告警。细则 `tasks/README.md`。
 
 ## Telegram
 - `python3 quant/ops/tg_notify.py "message"` 或 `--stdin`（走管道，正文的反引号 / `$` 不进 shell 参数）；凭据在 `~/.config/coreytrading/telegram.env` 或环境变量，绝不入库。

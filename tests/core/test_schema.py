@@ -210,3 +210,50 @@ def test_non_watching_and_option_cards_are_exempt():
         {"thesis": {"summary": "x"}, "zones": {"accumulation_zone_1": [1.0, 2.0]}},
         status="closed"))
     assert not any("current_regime" in e for e in errs)
+
+
+# ── 期权 BUY 的正股价位盖章字段 ─────────────────────────
+
+def _opt_fill(**over):
+    e = {"event_type": "fill", "timestamp": "2026-08-26T13:37:46-04:00",
+         "ticker": "SYN270115C100000", "side": "BUY", "qty": 1.0, "price": 12.0,
+         "order_id": "X1", "tier": "position"}
+    e.update(over)
+    return e
+
+
+def test_option_price_flags_above_z1_and_below_z2_validate():
+    assert validate_event(_opt_fill(price_flags=["above_z1", "above_no_chase"])) == []
+    assert validate_event(_opt_fill(price_flags=["below_z2"])) == []
+    assert validate_event(_opt_fill(price_flags=["chase"]))              # 词表外仍拒
+
+
+def test_underlying_at_fill_shape_is_enforced():
+    ok = {"price": 101.1, "low": 100.5, "high": 102.2, "bar_time": "2026-08-26 14:30:00",
+          "basis": "60m", "ambiguous": False}
+    assert validate_event(_opt_fill(underlying_at_fill=ok)) == []
+    assert validate_event(_opt_fill(underlying_at_fill={"price": None, "basis": "unknown"})) == []
+    assert validate_event(_opt_fill(underlying_at_fill={"price": 101.1, "basis": "tick"}))
+    assert validate_event(_opt_fill(underlying_at_fill={"price": "101", "basis": "60m"}))
+    assert validate_event(_opt_fill(underlying_at_fill="101"))
+
+
+def test_entry_class_enum_on_cards_and_auth():
+    """入场类: 卡与 auth 上的 entry_class 只认 gate | reversal_probe。"""
+    from quant.core.schema import ENTRY_CLASSES, PRICE_FLAGS, validate_watchlist_doc
+    assert ENTRY_CLASSES == {"gate", "reversal_probe"} and "above_signal_close" in PRICE_FLAGS
+    t = _minimal_ticker()
+    t["agent"]["entry_class"] = "reversal_probe"
+    assert not any("entry_class" in e for e in validate_positions_doc(_doc(t))[0])
+    t["agent"]["entry_class"] = "yolo"
+    assert any("entry_class" in e for e in validate_positions_doc(_doc(t))[0])
+    wl = {"tickers": {"X": {"status": "watching", "agent": {"thesis": {"summary": "s"},
+                                                            "entry_class": "nope"}}}}
+    assert any("entry_class" in e for e in validate_watchlist_doc(wl)[0])
+    ev = {"event_type": "fill", "timestamp": "2026-09-11T10:00:00-04:00", "ticker": "X270115C10000",
+          "side": "BUY", "qty": 1.0, "price": 5.0, "order_id": "O1",
+          "auth": {"cap_pct_nav": 0.09, "gate_no": 1, "entry_class": "reversal_probe"},
+          "price_flags": ["above_signal_close"]}
+    assert validate_event(ev) == []
+    ev["auth"]["entry_class"] = "x"
+    assert any("auth.entry_class" in e for e in validate_event(ev))

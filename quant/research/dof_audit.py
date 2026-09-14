@@ -55,6 +55,8 @@ JUDGMENT_ONLY = {"report/chart_read", "core/patterns"}
 # 其余（告警/播报/数据/管道）调错了改变的是注意力，不是钱。
 # 这个划分决定预算该管谁：假发现的代价在这里，不在播报层。
 MONEY_LAYERS = {
+    "core/reversal",       # 抄底入场类判别式: 直接驱动正股/期权入场授权
+    "core/setups",         # 抄底 ✓止跌 判别式 : reversal.detect 经它出信号 → 授权层
     "core/sizing", "core/structure", "core/episodes", "core/earnings", "core/book",
     "decision/entry_guard", "decision/exit_guard", "decision/regime_transition",
     "options/option_plan", "options/implied_move", "options/strike_compare",
@@ -113,9 +115,17 @@ CLASSIFY: dict[str, str] = {
     "core/sizing:GATE_RISK_CAPS": "fiat",          # 累计 gate 风险预算
     "core/sizing:OPTION_ATRISK_LOSS_FRAC": "ruled",  # 0.25 锚 |S1|, pins 钉相等
     "decision/regime_transition:REL_FLOOR": "ruled",   # 0.4 relative_volume R
-    "decision/regime_transition:RECLAIM_VOL_RATIO_MIN": "convention",  # RelVR 证据标准 canonical
+    "decision/regime_transition:RECLAIM_VOL_RATIO_MIN": "ruled",  # 1.1 — adaptive_volume_leg round-3 预注册回测; 此前的 1.2 是 convention, 本轮首次被测
     "decision/regime_transition:fastlane_k": "ruled",  # 0.5 ladder_entry 采纳
-    "decision/regime_transition:stop_days_default": "ruled",  # close-confirmed stop uses one completed bar
+    # 量腿对齐日 = streak 内任一日 (volume_clock round-2 预注册回测;
+    # +12 月复测为撤回条件)。
+    # 缺省 1 = 旧口径 (快车道首日 / ×1 gate); 调用方按 streak_above 传真实 streak, 不是可调阈值。
+    # 实现下沉到 volume_leg_detail (结构化转移收据), volume_leg 成为二元视图。
+    # 同一个旋钮、同一份裁决 —— 登记两个符号是因为审计按符号扫, 不是因为多了一个自由度
+    # (守卫 test_volume_leg_view_never_disagrees_with_its_structured_receipt 钉住两者不分叉)。
+    "decision/regime_transition:volume_leg(streak=)": "ruled",
+    "decision/regime_transition:volume_leg_detail(streak=)": "ruled",
+    "decision/regime_transition:stop_days_default": "ruled",  # ×1「stop 破位收盘立即执行」+ round-2b bfloor ×1
     "decision/exit_guard:atr_multiple": "convention",  # 3×ATR trend-exit canonical
     "decision/exit_guard:parabolic_trail_pct": "convention",
     "decision/exit_guard:opt_s1_stop": "ruled",        # −25% options_exit_overlay
@@ -194,8 +204,32 @@ CLASSIFY: dict[str, str] = {
     # gate 语义：累计上限由 production contract 固定。
     # ROUND_RISK_FRACS(增量) → GATE_RISK_CAPS(累计) 是**同一个旋钮换表达**,
     # 不是新自由度 —— 三个数的出处仍是已锁定的 T × 50/30/20 (测试钉 provenance)。
-    "core/sizing:GATE_RISK_CAPS": "ruled",
-    "core/sizing:OPTION_MIN_GATE": "fiat",                 # production contract
+    "core/sizing:GATE_RISK_CAPS": "ruled",                 # risk_allocation 三点锁定
+    "core/sizing:OPTION_MIN_GATE": "fiat",                 # gate1 起
+    # ── reversal_probe 入场类 (IVP 门 / 保费按 gate1 取、止损放在 gate 倒推 cap;
+    # 判别式参数 = 探索定价锁定, 记录在私有研究记录; 改任一项须重跑 reversal_probe_backtest) ──
+    # 现行信号 (试行, 试行期满按预先锁定判据复核):
+    # 信号 = setups.bottom_setup ✓止跌 (次日未新低 / 长下影), 域 R0 (drawdown_max None), 止损 = 止跌低
+    "core/reversal:newlow_lookback": "fiat",               # 20 日低 = 止跌低窗 (setups.LOW_LOOKBACK 同源)
+    "core/reversal:high_lookback": "fiat",                 # 60 日高 (setups.HIGH_LOOKBACK 同源)
+    "core/reversal:drawdown_min": "fiat",                  # ≥10% 才「跌到足够便宜」
+    "core/reversal:valid_days": "fiat",                    # 「不能等待过多」的操作化: 3 个交易日
+    "core/reversal:LADDER_FRACS": "convention",            # 2/3 / 1/3 止跌低之上的二三档 (阶梯形状, 与 50/30/20 切法同源)
+    "core/setups:RECENT_SIGNAL_BARS": "convention",        # ✓止跌 10 根内算刚形成 (判读列表窗, 与 valid_days 3 分开)
+    "core/setups:DEEP_RETEST_FRAC": "definition",          # 2/3 = Rhea 次级折返带 (dow.RETRACE_BANDS 同源)
+    "core/setups:NEAR_GATE_ATR": "convention",             # gate 之下 1N = 「即将形成」(判读)
+    "core/setups:LH_LOOKBACK": "convention",               # 前高回看 = 60 日框架同窗
+    "core/setups:SWING_WING": "convention",                # 5 根分形 (technical.swing_points 缺省)
+    "core/setups:MIN_BARS": "convention",                  # 65 = 60 日框架 + 余量
+    "core/sizing:REVERSAL_PROBE_RISK_GATE": "fiat",        # 保费风险预算 = gate1 本档 2.5%
+    "decision/entry_guard:RP_TARGET_DTE": "ruled",         # = LEAPS DTE 下限 270 (synthetic_longcall B1)
+    # IV 分位代理 (HV20 的 252 日分位, 「要看 IVP」): 窗与可信线 = 口径约定
+    # (iv_logger.percentile 同款 252; 120 = research 回测同口径), 阈值本身仍是 LONG_CALL_IV_PCT_MAX
+    "core/technical:hv(period=)": "convention",
+    "core/technical:hv_percentile(lookback=)": "convention",
+    "core/technical:hv_percentile(min_samples=)": "convention",
+    "core/book:HV_PCT_LOOKBACK": "convention",
+    "core/book:HV_PCT_MIN_SAMPLES": "convention",
     # gate_no 由 `sizing.gate_count` 数出来 (判据 = 卡上给 cap 的 up 转移数),
     # 不是可调参数 —— 但它是入场侧的新入参, 记在册避免"看起来像凭空多出一个旋钮"。
     "decision/entry_guard:size_caps(gate_no=)": "convention",

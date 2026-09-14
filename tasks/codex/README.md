@@ -6,4 +6,4 @@ This directory holds task specifications written for a Codex-style scheduled run
 |---|---|---|
 | [valuation-daily.md](valuation-daily.md) | Daily 08:00 in the operator's timezone, including non-session days | Independent valuation: refresh, freeze, macro scenarios, calculation and report under `var/valuation-daily/` |
 
-The trading tasks live in `tasks/claude/`; `tasks/README.md` describes the calendar gates shared by every runner.
+The trading tasks live in `tasks/claude/`; `tasks/README.md` describes the calendar gates shared by every runner. When `agents/routing.json` uses the desktop transport, a Codex session serves `codex` research requests under `tasks/desktop-research.md`; an optional standalone intake registration may wait for macro requests during the weekly review window and exits normally when none arrive, without starting a business job or a model CLI.

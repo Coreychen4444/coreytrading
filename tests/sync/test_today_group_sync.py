@@ -542,3 +542,51 @@ def test_stale_eviction_also_covers_position_cards():
                                          bars_of=lambda t: _bars([230.0, 220.0]))
     assert "MRVL" not in members
     assert any("MRVL" in n and "zone stale" in n for n in notes)
+
+
+# ── 反转探针合约进组 : 授权住计划, 正股 cap 0 也进; 过期不进 ──
+
+def _rp_plan(valid_until="2026-09-16", expiry="2027-06-18"):
+    return {"NBIS": {"code": "NBIS270618C90000", "strike": 90.0, "expiry": expiry,
+                     "entry_class": "reversal_probe", "support": 78.4, "signal_date": "2026-09-11",
+                     "signal_close": 84.2, "valid_until": valid_until,
+                     "tiers": [{"premium": 12.5, "contracts": 1}]}}
+
+
+def test_reversal_probe_contract_joins_without_a_stock_grant():
+    from quant.sync.today_group_sync import desired_members, annotate_actual_caps
+    members, notes = desired_members({"tickers": {}}, {"tickers": {}}, "2026-09-14",
+                                     option_plans=_rp_plan())
+    assert list(members) == ["NBIS270618C90000"]                   # 只有合约, 正股不进
+    assert "抄底" in members["NBIS270618C90000"] and "78.4" in members["NBIS270618C90000"]
+    # 合约成员不注正股 cap (无卡可注), 不抛不加噪
+    assert annotate_actual_caps(members, {"tickers": {}}, {"tickers": {}}, 16000.0,
+                                calendar={}, veto_of=lambda t, c: (False, "")) == []
+
+
+def test_reversal_probe_contract_expires_with_the_signal():
+    from quant.sync.today_group_sync import desired_members
+    members, notes = desired_members({"tickers": {}}, {"tickers": {}}, "2026-09-17",
+                                     option_plans=_rp_plan(valid_until="2026-09-16"))
+    assert members == {} and any("信号已过期" in n for n in notes)
+    members, notes = desired_members({"tickers": {}}, {"tickers": {}}, "2026-09-14",
+                                     option_plans=_rp_plan(expiry="2026-09-01"))
+    assert members == {} and any("到期" in n for n in notes)
+
+
+def test_bottom_stock_leg_joins_the_today_group_and_a_held_name_does_not():
+    """抄底正股腿 : 计划带 stock 段 → 正股进组 (标签带止跌低 / 首档 / 止损);
+    已持仓的正股不进 (空仓前提, entry_guard 之外再守一道); 无 stock 段只进合约。"""
+    from quant.sync.today_group_sync import desired_members
+    plan = _rp_plan()
+    plan["NBIS"]["stock"] = {"tiers": [{"price": 84.0, "shares": 5}], "cap_frac": 0.05}
+    members, notes = desired_members({"tickers": {}}, {"tickers": {}}, "2026-09-14", option_plans=plan)
+    assert set(members) == {"NBIS", "NBIS270618C90000"}
+    assert "抄底 reversal_probe 正股" in members["NBIS"] and "止跌低 78.4" in members["NBIS"] and "5 股" in members["NBIS"]
+    held = {"tickers": {"NBIS": {"status": "active", "broker": {"qty": 10}, "agent": {}}}}
+    members, notes = desired_members(held, {"tickers": {}}, "2026-09-14", option_plans=plan)
+    assert "NBIS270618C90000" not in members and any("空仓" in n for n in notes)
+    del plan["NBIS"]["code"]
+    plan["NBIS"].pop("expiry", None)
+    members, _ = desired_members({"tickers": {}}, {"tickers": {}}, "2026-09-14", option_plans=plan)
+    assert list(members) == ["NBIS"]

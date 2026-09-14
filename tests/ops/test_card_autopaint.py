@@ -7,16 +7,20 @@
 """
 import subprocess
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from quant.core.holdings import cardless_tickers
 from quant.ops import card_autopaint as ca
 
+REAL_BARS_GAP = ca.bars_gap
+
 
 @pytest.fixture(autouse=True)
 def isolated_controller_state(monkeypatch, tmp_path):
     monkeypatch.setattr(ca, "STATE_PATH", tmp_path / "autopaint.json")
+    monkeypatch.setattr(ca, "bars_gap", lambda ticker, now=None: None)  # 默认日线已就绪; 新鲜度门单独测
 
 
 def _wl(**tickers):
@@ -165,6 +169,7 @@ def test_run_caps_the_number_of_agents_per_round(monkeypatch):
         _wl(A=_stub(), B=_stub(), C=_stub()) if "watchlist" in str(p)
         else {"tickers": {}}))
     monkeypatch.setattr(ca, "load_state", lambda: {})
+    monkeypatch.setattr(ca, "load_routes", lambda: {"autopaint": {"enabled": True, "apply": True, "review": True}})
     r = ca.run(dry_run=True, max_spawn=2)
     assert [d["ticker"] for d in r["dry_run"]] == ["A", "B"]
     assert [s["ticker"] for s in r["skipped"]] == ["C"]
@@ -311,3 +316,30 @@ def test_prompt_is_self_contained_and_scoped():
 def test_prompt_bucket_maps_to_the_cli_flag(bucket, flag):
     """positions 桶在 update_position_zones 里叫 `current` —— 传错桶 = 写错文件。"""
     assert f"--bucket {flag}" in ca.build_prompt("X", bucket, "2026-08-14")
+
+
+# ── ④ 日线新鲜度门 ────────────────────────────────────────────────
+
+def test_run_defers_tickers_whose_daily_bars_are_not_current(monkeypatch, launch_environment):
+    """典型: heartbeat 派发时新票无日线 → run_card 必然 needs_review。
+    不起、不占名额、不记冷却; briefing 拉完 K 线后 repaint 队列接手。"""
+    ca.WATCHLIST_PATH.write_text(json.dumps(_wl(NEW=_stub(), OLD=_stub())))
+    monkeypatch.setattr(ca, "bars_gap", lambda t, now=None: "本地日线停在 无" if t == "NEW" else None)
+    monkeypatch.setattr(ca, "spawn", lambda ticker, bucket, *a: {
+        "ticker": ticker, "bucket": bucket, "pid": 999, "log": "fake.log"})
+    output = ca.run(max_spawn=1)
+    assert [s["ticker"] for s in output["spawned"]] == ["OLD"]
+    assert output["skipped"] == [{"ticker": "NEW", "reason": "本地日线停在 无"}]
+    assert "NEW" not in ca.read_json(ca.STATE_PATH)["jobs"]
+
+
+def test_bars_gap_uses_the_capture_discriminant(monkeypatch, tmp_path):
+    monkeypatch.setattr(ca, "KLINE_CACHE_DIR", tmp_path)
+    now = datetime(2026, 9, 11, 10, 26, tzinfo=timezone.utc)   # ET 06:26: 最新完整会话 = 09-10
+    assert "停在 无" in REAL_BARS_GAP("CRWD", now)
+    bar = {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1}
+    (tmp_path / "CRWD.jsonl").write_text(json.dumps({"time": "2026-09-09", **bar}) + "\n")
+    assert "停在 2026-09-09" in REAL_BARS_GAP("CRWD", now)
+    with (tmp_path / "CRWD.jsonl").open("a") as fh:
+        fh.write(json.dumps({"time": "2026-09-10", **bar}) + "\n")
+    assert REAL_BARS_GAP("CRWD", now) is None

@@ -26,7 +26,7 @@ def test_rate_selection_uses_observation_time_and_rejects_stale_future():
     assert assessment.market_rate(documents, as_of="2026-10-03T12:00:00Z")["rf"] is None
 
 
-def test_complete_daily_receipt_records_unknown_short_term_and_independent_targets():
+def test_complete_daily_receipt_keeps_diagnostics_but_withholds_publication():
     before = data()
     result = assessment.build(before, as_of=STAMP)
     row = result["tickers"]["SYN"]
@@ -34,6 +34,9 @@ def test_complete_daily_receipt_records_unknown_short_term_and_independent_targe
     assert row["baseline"]["fair_value_basis"] == "base_case_intrinsic_dcf"
     assert row["sensitivities"][0]["fair_value"] > row["baseline"]["fair_value"]
     assert row["short_term"]["status"] == "unknown"
+    assert result["publication"]["status"] == "withheld"
+    assert result["publication"]["fair_value_publishable"] is False
+    assert result["publication"]["target_12m_publishable"] is False
     assert before == data()
 
 

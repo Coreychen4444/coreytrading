@@ -16,6 +16,22 @@ import statistics
 from typing import Callable
 
 MODEL_VERSION = "v4.2"
+
+
+def publication_policy() -> dict:
+    """Current engine is diagnostic only; no input/model prose can approve it.
+
+    Re-enabling publication requires an implemented and reviewed replacement
+    methodology, not a flag in a company input or a successful calculation.
+    """
+    return {"status": "withheld", "reason": "valuation_methodology_not_accepted",
+            "fair_value_publishable": False, "target_12m_publishable": False,
+            "calculation_use": "diagnostic_only",
+            "blockers": ["company_operating_and_financing_model_not_accepted",
+                         "earnings_multiple_is_same_path_not_independent_market_target",
+                         "point_in_time_validation_not_established"]}
+
+
 DEFAULT_ERP = 0.0423
 TTM_QUARTERS = 4
 MIN_CYCLE_QUARTERS = 12          # through_cycle 至少 3 年利润率历史, 否则退回 current 并打旗

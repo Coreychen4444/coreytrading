@@ -24,6 +24,26 @@ def keys(mode):
     return [s.key for s in pipeline.plan(mode)]
 
 
+def test_health_recoveries_are_compact_and_not_presented_as_new_failures():
+    health = {"issues": [], "pending_events": [
+        {"event_id": str(i), "kind": "recovered", "issue": {"ticker": "SYN", "code": "run_failed"}}
+        for i in range(40)]}
+    message = pipeline.format_agent_health(health)
+    assert message.startswith("✅")
+    assert "40 条记录（非新增故障）" in message
+    assert "run_failed" not in message and "event_id" not in message
+    assert len(message) < 300
+
+
+def test_health_recovery_does_not_hide_current_failure():
+    message = pipeline.format_agent_health({"issues": [
+        {"ticker": "NEW", "code": "run_failed"}], "pending_events": [
+        {"kind": "recovered", "issue": {"ticker": "OLD"}}]})
+    assert message.startswith("⚠️")
+    assert "NEW：run_failed" in message
+    assert "历史恢复：1" in message
+
+
 def test_daily_pipeline_does_not_attach_valuation(monkeypatch, capsys):
     brief = {"alerts": ["synthetic exit"], "exit_guards": {"SYN": {"stop": 80}}}
     stages = {"brief": brief, "agents": {"status": "completed"}}
@@ -693,7 +713,7 @@ def _agents_receipt_runner(receipt):
 
 
 def test_agents_partial_receipt_is_todo_not_a_failed_stage(monkeypatch, capsys):
-    """agent_jobs 对 partial 退出码 1 (领域任务已结束, 但有缺失角色 / 未落卡 / 超出每轮 2 张
+    """agent_jobs 对 partial 退出码 1 (领域任务已结束, 但有缺失角色 / 未落卡 / 超出本轮 repaint_bound
     的待办)。这不是"这一步挂了": 简报按 reports / cards / pending_cards 列待办。所以 partial
     进顶层 `partial` 不进 `failed`, 待办数据原样保留; 真 failed 仍进 `failed`。"""
     receipt = {"status": "partial", "job_kind": "briefing",

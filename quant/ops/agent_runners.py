@@ -421,13 +421,30 @@ def _usage(value) -> dict:
     } and type(v) in (int, float) and math.isfinite(v) and v >= 0}
 
 
+def _claude_failure_code(stdout: str) -> str | None:
+    """Classify the CLI error envelope without persisting provider text."""
+    try:
+        result = _strict_json(stdout)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if (not isinstance(result, dict) or result.get("type") != "result"
+            or result.get("is_error") is not True
+            or type(result.get("api_error_status")) is not int
+            or result["api_error_status"] != 429):
+        return None
+    message = result.get("result")
+    if isinstance(message, str) and message.startswith("You've hit your session limit"):
+        return "provider_session_limit"
+    return "provider_rate_limit"
+
+
 def _parse_claude(stdout: str) -> tuple[dict, dict]:
     try:
         result = _strict_json(stdout)
         if not isinstance(result, dict) or result.get("type") != "result":
             raise ValueError("missing result wrapper")
         if result.get("is_error") is not False or result.get("subtype") != "success":
-            raise RunnerError("provider_reported_failure")
+            raise RunnerError(_claude_failure_code(stdout) or "provider_reported_failure")
         if result.get("permission_denials"):
             raise RunnerError("tool_permission_denied")
         payload = result.get("structured_output")
@@ -577,7 +594,7 @@ def _claude_schema(schema: dict) -> dict:
     See platform.claude.com/docs/en/build-with-claude/structured-outputs.
     """
     passthrough = {"type", "required", "additionalProperties", "enum", "const",
-                   "title", "description", "format", "pattern", "default"}
+                   "title", "description", "format", "pattern", "default", "$ref"}
     deferred = {"minLength", "maxLength", "maxItems", "minimum", "maximum",
                 "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "uniqueItems"}
     out, bounds = {}, {}
@@ -586,7 +603,7 @@ def _claude_schema(schema: dict) -> dict:
             continue
         if key in deferred or (key == "minItems" and value not in (0, 1)):
             bounds[key] = value
-        elif key == "properties":
+        elif key in {"properties", "$defs"}:
             out[key] = {name: _claude_schema(child) for name, child in value.items()}
         elif key == "items":
             out[key] = _claude_schema(value)
@@ -695,6 +712,10 @@ def run(provider: str, prompt: str, output_schema: dict, *, model: str | None = 
                 code, stdout, _ = capture(argv, prompt, isolated, env, timeout_s)
                 parse = _parse_claude
             if code:
+                if provider == "claude":
+                    failure = _claude_failure_code(stdout)
+                    if failure:
+                        raise RunnerError(failure)
                 raise RunnerError(f"provider_exit_{code}")
             payload, usage = parse(stdout)
             out.update(_model_audit(provider, stdout, model))

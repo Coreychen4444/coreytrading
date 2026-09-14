@@ -3,7 +3,7 @@
 Run the repository's periodic monitoring loop.
 
 0. Run `python3 quant/ops/agent_jobs.py due --kind heartbeat`. When it returns `due: false`, stop with `HEARTBEAT_SKIP`: the exchange calendar decides session days, so never guess from the weekday. A calendar error is reported as an error, not worked around.
-1. Execute `python3 quant/ops/pipeline.py --mode heartbeat --json` using the configured broker environment. Never pass `--read-only` from a scheduled task; that flag is the interactive cache preview and skips monitoring.
+1. Execute `python3 quant/ops/pipeline.py --mode heartbeat --json` using the configured broker environment. Never pass `--read-only` from a scheduled task; that flag is the interactive cache preview and skips monitoring. When `agents/routing.json` sets `execution_transport` to `desktop`, read `tasks/desktop-research.md` first and run `python3 quant/ops/agent_desktop.py launch --kind heartbeat` instead; serve this runtime's research requests until the round's completion file appears, then read the controller output file as the pipeline JSON. The launch receipt itself is only a handle.
 2. Preserve mechanical warnings and binding constraints exactly as emitted.
    The pipeline may already have sent `fired_cards` and `alerts` before external effectors. Honor the returned `tg_pushed` receipt: do not send duplicate cards when it is true, and use the normal notification path only as a fallback when delivery failed.
 3. The heartbeat only records controller health and lets the missing-card detector dispatch background research. It does not start macro, technical, valuation or risk research itself, and unfinished research is never reported as a written card.

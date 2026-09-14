@@ -86,13 +86,20 @@ def test_apply_stops_before_writer_when_business_lease_or_backup_fails(tmp_path,
 
 @pytest.mark.parametrize("crash_at,expected", [("before_state_write", "no_effect"),
                                               ("after_state_write", "applied")])
+@pytest.mark.parametrize("with_review", [True, False])
 def test_prepared_crash_reconciles_without_retrying_or_rewriting_state(
-        record, writer, monkeypatch, tmp_path, crash_at, expected):
+        record, writer, monkeypatch, tmp_path, crash_at, expected, with_review):
     """Actual old merger/state lock and tmp card; crash bypasses Exception handlers."""
     policy = {"synthetic": "existing deterministic policy"}
     monkeypatch.setattr(runtime, "policy_context", lambda role: policy)
     record.update(run_id="a" * 32, job_key="b" * 64, status="succeeded", policy_hash=canonical_hash(policy))
-    bind_review(record)
+    record["submission_review_required"] = with_review
+    if with_review:
+        bind_review(record)
+    else:
+        record["review"] = None
+    monkeypatch.setattr(runtime, "load_routes", lambda: {
+        "autopaint": {"enabled": True, "apply": True, "review": with_review}})
     root = tmp_path / "runs-artifacts"
     run_path = runtime._run_path(root, record["run_id"])
     atomic_write_json(run_path, record)
@@ -159,7 +166,7 @@ def test_reconcile_rejects_receipt_not_bound_to_original_run_before_state_read(
     monkeypatch.setattr(paths, "STATE_LOCK_PATH", tmp_path / "must-not-touch-state.lock")
     monkeypatch.setattr(paths, "POSITIONS_PATH", tmp_path / "no-positions.json")
     monkeypatch.setattr(paths, "WATCHLIST_PATH", tmp_path / "no-watchlist.json")
-    with pytest.raises(ValueError, match="not bound to the original reviewed run"):
+    with pytest.raises(ValueError, match="not bound to the original proposal run"):
         runtime.reconcile_run(record["run_id"], run_dir=tmp_path)
     assert not paths.STATE_LOCK_PATH.exists(), "invalid receipt reached the state-read boundary"
     assert run_path.read_bytes() == original

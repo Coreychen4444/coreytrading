@@ -23,11 +23,14 @@ from quant.ops.agent_runtime import load_routes, run_role
 from quant.ops.agent_workflow import run_workflow
 from quant.report.valuation_report import fyi_map
 from quant.valuation.assessment import build
+from quant.valuation.model import publication_policy
 from quant.valuation.universe import coverage_tickers
 
 TASK = ("完成独立每日估值研究。宏观先从冻结的宏观资料、公司业务及融资资料提出有来源、"
         "单位、期限的情景；宿主计算后，估值角色核查并解释公允价值、12个月EPS与PE目标、"
         "1/5/20交易日短期研究估计及缺口。政策降息25bp不等于长端利率下降25bp。"
+        "当前估值方法未通过验收，DCF和同路径EPS/PE仅供诊断，不得称为可用公允价或市场目标。"
+        "以publication边界为准，重点检查经营/融资假设、独立预测依据与数据缺口。"
         "只引用宿主收据中的价格；缺数据明确未知。不得提出写卡、交易或发送消息。")
 
 
@@ -116,13 +119,17 @@ def run_daily(*, preview=False, retry=False, root=None, control_dir=None,
             raise ValueError("valuation_lease_lost")
         atomic_write_json(directory / "valuation.json", receipt)
         report = (f"每日估值 · {day} SGT\n估值时点：{receipt['as_of']}\n"
+                  "发布状态：withheld；模型待重建，公允价值及12个月目标暂不发布。\n"
                   "研究判断，零授权效力。条件情景与短期研究估计不代表已验证预测。\n\n"
                   + "\n\n".join(t + "\n" + line for t, line in lines.items()))
         (directory / "report.md").write_text(report + "\n")
         job.update(status=workflow["status"], stage="finished", total_calls=workflow["total_calls"],
                    report=str(directory / "report.md"), receipt=str(directory / "valuation.json"),
                    workflow=str(directory / "workflow.json"), receipt_hash=receipt["receipt_hash"],
-                   coverage={"total": len(receipt.get("tickers", {})),
+                   publication=publication_policy(),
+                   coverage={"total": len(receipt.get("tickers", {})), "publishable": 0,
+                             "company_research": sum(r["status"] == "company_research"
+                                                     for r in receipt.get("tickers", {}).values()),
                              "computed": sum(r["status"] == "computed"
                                              for r in receipt.get("tickers", {}).values())})
         if job["status"] == "completed" and job["refresh"].get("errors"):

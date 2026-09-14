@@ -200,6 +200,15 @@ def _build_lot(fills: List[dict], agent: dict, order_id: str) -> dict:
     stop = coerce_float(zones.get("stop_level"))
     if stop is not None:
         lot["stop_loss"] = stop
+    # 抄底 (reversal_probe,): 授权住计划不住卡, stop = 止跌低 (auth.support), 与卡 stop 无关;
+    # lot 带 entry_class 让 brief 能核「持仓卡有没有盖 entry_class + 止损 = 止跌低」(INFRA:bottom_card_unstamped)
+    auth = next((f.get("auth") for f in fills if isinstance(f.get("auth"), dict)), None) or {}
+    if auth.get("entry_class") == "reversal_probe":
+        lot["entry_class"] = "reversal_probe"
+        sup = coerce_float(auth.get("support"))
+        if sup is not None:
+            lot["stop_loss"] = sup
+            lot["notes"] += f"; 抄底 止损 = 止跌低 {sup:g} ×1 (信号 {auth.get('signal_date')})"
     trim = zones.get("trim_zone")
     if isinstance(trim, list) and len(trim) == 2:
         lot["target_exit"] = f"trim {trim[0]:g}-{trim[1]:g}"

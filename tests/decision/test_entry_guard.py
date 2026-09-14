@@ -306,6 +306,34 @@ def test_next_regime_fired_line_declares_auto_switch_in_flight():
     assert any("补画前不授权" in x for x in lines)
 
 
+@pytest.mark.parametrize("ratio,fires", [(0.74, False), (1.35, True)])
+def test_next_regime_fired_line_reports_the_volume_leg_too(monkeypatch, ratio, fires):
+    """例: 收盘 2/2 ✓ 但 RelVR 0.74 < 1.1 → 转移机整晚不切, 而 gate 行
+    照旧播「切换在途, 勿手动改卡」。转移是两条腿, 渲染口径必须 = 判定口径
+    (gate_ladder_report 早就报 ⚠️量能闸未过, entry_guard 是最后一个分叉的消费者)。"""
+    from quant.decision import entry_guard
+    gated = {**NR, "entry_gate": {**NR["entry_gate"], "volume_ratio_min": 1.1}}
+    monkeypatch.setattr(entry_guard, "volume_leg",
+                        lambda bars, vmin, tk, streak=None: (ratio >= vmin,
+                                                             f"量比(rel SMH 1.19) {ratio}"))
+    lines, fired = entry_guard.next_regime_lines({"next_regime": gated},
+                                                 _bars(105.0, 106.0), "TST")
+    assert fired is fires
+    if fires:
+        assert any("已成立" in x and "量腿 ✓" in x for x in lines)
+        assert any("切换在途" in x for x in lines)
+    else:
+        assert any("量能闸未过" in x and "价格腿 ✅ 2/2" in x for x in lines)
+        assert not any("切换在途" in x for x in lines)
+
+
+def test_next_regime_without_volume_gate_keeps_the_price_leg_verdict():
+    """卡上没写 volume_ratio_min = 整条量腿跳过 (转移机对 None 同样放行)。"""
+    from quant.decision.entry_guard import next_regime_lines
+    lines, fired = next_regime_lines({"next_regime": NR}, _bars(105.0, 106.0), "X")
+    assert fired and any("✅ 2/2 已成立" in x and "量腿" not in x for x in lines)
+
+
 def test_next_regime_marks_provisional_zones():
     from quant.decision.entry_guard import next_regime_lines
     lines, _ = next_regime_lines({"next_regime": NR}, _bars(95.0))
@@ -822,3 +850,247 @@ def test_render_overview_emits_header_row_before_ticker_rows():
     i = out.index("── 一览 ──────────────")
     assert out[i + 1:i + 3] == list(entry_guard.SUMMARY_HEADER)
     assert out[i + 3].startswith("| ⛔ A 1 | VETO | x |")
+
+
+# ── 期权限价锚 z1 + 覆盖 ──────────────────────
+
+def _iv_ok(monkeypatch):
+    monkeypatch.setattr(entry_guard, "_rows", lambda tk: _vehicle_rows())
+    monkeypatch.setattr(entry_guard, "iv_gate_line", lambda tk: None)
+    monkeypatch.setattr(entry_guard, "option_iv_gate", lambda tk: {
+        "allowed": True, "basis": "abs", "reason": "ATM IV 39% < 50%", "samples": 8})
+
+
+def _capture_build(monkeypatch):
+    from quant.options import option_plan as op
+    seen = {}
+
+    def fake_build(tk, ladder, cap, **kw):
+        seen.update({"tk": tk, "ladder": list(ladder), "cap": cap, **kw})
+        return {"ticker": tk, "error": "链数据不可得 (测试)", "iv": {},
+                "gate": {"verdict": "?", "note": ""}}
+    monkeypatch.setattr(op, "build", fake_build)
+    return seen
+
+
+def test_untagged_card_gets_an_option_projection_labelled_stock_first(monkeypatch):
+    """覆盖: 没标 vehicle 的 PLAN 卡也出期权投影 (此前没标 → 没计划没 oz1 线)。
+    文案标「正股优先」, DTE 走单腿 long call 口径 270, 锚注写 z1 回踩。"""
+    _iv_ok(monkeypatch)
+    seen = _capture_build(monkeypatch)
+    card = _vehicle_card(0.40)
+    card["agent"]["action"]["constraints"] = {}
+    r = entry_guard.evaluate_ticker("TST", card, "2026-08-05", nav=22000.0)
+    assert r["verdict"] == "PLAN" and "option_plan" in r
+    assert seen["tk"] == "TST" and seen["target_dte"] == 270 and seen["min_dte"] == 270
+    assert "z1 回踩" in seen["anchor_note"]
+    assert seen["ladder"] == r["ladder"] == r["option_ladder"]     # normal 卡: 期权阶梯 = zone 阶梯
+    assert any("期权若用 (正股优先) gate1 可用" in x for x in r["reasons"])
+
+
+def test_vehicle_stock_card_skips_the_option_projection(monkeypatch):
+    _iv_ok(monkeypatch)
+    seen = _capture_build(monkeypatch)
+    card = _vehicle_card(0.40)
+    card["agent"]["action"]["constraints"] = {"vehicle": "stock"}
+    r = entry_guard.evaluate_ticker("TST", card, "2026-08-05", nav=22000.0)
+    assert r["verdict"] == "PLAN" and "option_plan" not in r and seen == {}
+    assert "option_iv_gate" not in r
+
+
+def test_repair_reclaim_card_anchors_the_option_ladder_on_z1_not_the_confirmation_close(monkeypatch):
+    """典型形状: 正股修复阶梯首档 = 确认日收盘 (可高于 z1 上沿), 期权不跟它 ——
+    期权阶梯一律 zone 档, 正股阶梯照旧 (ladder_entry 裁决不动)。"""
+    _iv_ok(monkeypatch)
+    seen = _capture_build(monkeypatch)
+    rows = _vehicle_rows()
+    rows[-1]["close"] = 99.0                                   # 今日 close 在 z1 上沿 93 之上
+    rows[-2]["close"] = 98.5                                   # since 日 close (锚)
+    monkeypatch.setattr(entry_guard, "_rows", lambda tk: rows)
+    card = _vehicle_card(0.40)
+    since = rows[-2]["time"][:10]
+    card["agent"]["current_regime"]["since"] = since
+    card["agent"]["current_regime"]["source"] = "auto"
+    card["agent"]["last_regime"] = {"repair_gate": {"level": 85.0, "fastlane": True}}
+    card["agent"]["zones"]["anchored_on"] = {"date": since, "basis": "test"}
+    card["agent"]["regime_history"] = [{"date": since, "direction": "up",
+                                        "level": 85.0, "cap_pct_nav": 0.40}]
+    today = rows[-1]["time"][:10]
+    r = entry_guard.evaluate_ticker("TST", card, today, nav=22000.0)
+    assert r["verdict"] == "PLAN", r["reasons"]
+    assert r["ladder"][0] == pytest.approx(98.5), "正股修复阶梯首档 = close@since (不动)"
+    assert r["option_ladder"][0] == pytest.approx(93.0), "期权首档 = z1 上沿"
+    assert seen["ladder"] == r["option_ladder"] and seen["ladder"] != r["ladder"]
+    assert "不用于期权" in seen["anchor_note"]
+
+
+@pytest.mark.parametrize("membership", [{"moomoo_listed": False}, {"status": "closed"}])
+def test_removed_candidate_never_has_executable_plan(monkeypatch, membership):
+    card = _plan_card()
+    card.update(membership)
+    result = _eval_at(monkeypatch, 92, card)
+    assert result["verdict"] == "VETO"
+    assert result["ladder"] is None and result["caps"] is None
+    card.update(moomoo_listed=True, status="watching")
+    assert _eval_at(monkeypatch, 92, card)["verdict"] == "PLAN"
+
+
+# ── 反转探针 reversal_probe: gate 类没给计划时的第二入场类 ──
+
+def _rp_bar(t, o, h, l, c):
+    return {"time": t, "open": o, "high": h, "low": l, "close": c}
+
+
+def _rp_rows(bottom=102.0, rev_close=107.0) -> list:
+    """升到 120.5 → 单边跌到 bottom (每日新低) → 反转阳线吃掉前 5 日最高 (同 tests/core/test_reversal)。"""
+    rows = []
+    for i in range(41):
+        c = 100 + i * 0.5
+        rows.append(_rp_bar(f"2026-06-{i:03d}", c - 0.2, c + 0.5, c - 0.5, c))
+    for k in range(1, 21):
+        c = 120 - (120 - bottom) * k / 20
+        rows.append(_rp_bar(f"2026-08-{k:03d}", c + 0.3, c + 0.5, c - 0.5, c))
+    rows.append(_rp_bar("2026-09-10", bottom + 0.5, rev_close + 0.5, bottom + 0.2, rev_close))
+    return rows
+
+
+def _rp_card() -> dict:
+    """cap 0 观察卡 (gate 类 VETO), 有 zones 与 thesis → 探针有资格评估。"""
+    return {"moomoo_listed": True, "status": "watching", "agent": {
+        "thesis": {"summary": "x", "status": "intact"},
+        "action": {"intent": "wait_for_zone", "reason": "观察"},
+        "current_regime": {"name": "修复观察", "cap_pct_nav": 0.0, "participation": "gate_only",
+                           "since": "2026-08-20", "source": "auto", "reason": "破位"},
+        "zones": {"accumulation_zone_1": [96.0, 100.0], "accumulation_zone_2": [90.0, 96.0],
+                  "stop_level": 85.0, "valid_until": "2099-01-01",
+                  "anchored_on": {"date": "2026-08-20", "basis": "t"}},
+    }}
+
+
+def _fake_plan(*a, **k):
+    return {"ticker": "TST", "spot": 107.0, "expiry": "2027-06-18", "dte": 280, "type": "call",
+            "iv": {}, "gate": {"verdict": "买 premium 友好", "note": ""},
+            "hard_gate": {"allowed": True, "basis": "hv_pct", "reason": "HV20 分位 25 < 40"},
+            "delta_band": [0.6, 0.8], "chosen": {"code": "US.TST270618C100000", "strike": 100.0,
+                                                 "delta": 0.7, "bid": 9.9, "ask": 10.1, "mid": 10.0,
+                                                 "spread_pct": 2.0, "oi": 500, "iv": 40.0},
+            "eligible_count": 3, "rejected_sample": [], "ladder": a[1], "stop_underlying": k.get("stop"),
+            "anchor_note": k.get("anchor_note"),
+            "rungs": [{"underlying": 107.0, "premium_flat_iv": 10.0, "premium_iv_bump": 11.0},
+                      {"underlying": 106.1, "premium_flat_iv": 9.4, "premium_iv_bump": 10.4},
+                      {"underlying": 103.8, "premium_flat_iv": 8.0, "premium_iv_bump": 9.0}],
+            "premium_at_stop": 7.2, "cap_used": 3000.0, "cap_note": "组合层名义上限 binding"}
+
+
+def _rp_setup(monkeypatch, rows, iv_gate=None, build=_fake_plan):
+    from datetime import date as _D
+    from quant.options import option_plan as op
+    eg = entry_guard
+    monkeypatch.setattr(eg, "_rows", lambda tk: rows)
+    monkeypatch.setattr(eg, "iv_gate_line", lambda tk: None)
+    monkeypatch.setattr(eg, "option_iv_gate", lambda tk: iv_gate or {
+        "allowed": True, "basis": "hv_pct", "reason": "HV20 分位 25 < 40", "hv_pct": 25.0})
+    monkeypatch.setattr(eg.market_sessions, "add_sessions", lambda d, n: _D(2026, 9, 15))
+    monkeypatch.setattr(op, "build", build)
+    monkeypatch.setattr(eg, "_held_tickers", lambda: set())          # 空仓 (前提); 不读真 positions
+    return eg
+
+
+def test_reversal_probe_plans_on_a_cap0_card_with_back_computed_cap(monkeypatch, tmp_path):
+    eg = _rp_setup(monkeypatch, _rp_rows())
+    r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
+    assert r["verdict"] == "VETO"                                   # gate 类照旧: cap 0 不授权
+    rp = r["reversal_probe"]
+    assert rp["verdict"] == "PLAN"
+    assert rp["signal"]["domain"] == "R0" and rp["stop"] == 101.5 and rp["ladder"][0] == 107.0
+    assert rp["signal"]["signal"] == "次日未新低"
+    # 正股腿 : cap = min(组合层, gate1 2.5% ÷ 止损距 5.14%) → 整股三档, 止损 = 止跌低
+    sp = rp["stock_plan"]
+    assert rp["stock_ok"] and sp["tiers"][0]["price"] == 107.0 and sp["n_shares"] >= 1
+    assert sp["cap"] <= 22000.0 * 0.025 / ((107.0 - 101.5) / 107.0) + 1e-6
+    assert abs(rp["loss_frac"] - 0.28) < 1e-9
+    expect = 22000.0 * 0.025 / 0.28                                 # gate1 风险 ÷ gate 处投影亏损
+    assert rp["option_plan_data"]["cap_used"] == pytest.approx(expect)
+    assert rp["cap"] == pytest.approx(expect) and expect < 3000.0   # 比组合层折算更紧 → 倒推 binding
+    assert "倒推 cap" in rp["option_plan_data"]["cap_note"]
+    assert [t["shares"] for t in rp["option_plan_data"]["size"]["tiers"]] == [1]
+    assert rp["valid_until"] == "2026-09-15"
+    txt = eg.render([r], 22000.0, "2026-09-10")
+    assert "🔁 抄底 reversal_probe — PLAN" in txt and "止跌低 (止损) 101.5" in txt and "正股 cap $" in txt
+    who, verdict, tail = eg._summary_cells(r)                      # 一览表 (≥2 票才印) 也看得见
+    assert verdict == "VETO+🔁抄底" and tail.startswith("🔁 止跌低 101.5") and "股" in tail
+    # 落库: option_plans.json 带 entry_class (授权住这里), decisions 落 reversal_probe_plan
+    from quant.core import paths
+    monkeypatch.setattr(paths, "OPTION_PLANS_PATH", tmp_path / "option_plans.json")
+    assert eg.write_option_plans([r], "2026-09-10") == 1
+    doc = io_json.read_json(tmp_path / "option_plans.json")
+    p = doc["plans"]["TST"]
+    assert p["entry_class"] == "reversal_probe" and p["code"] == "TST270618C100000"
+    assert p["support"] == 101.5 and p["valid_until"] == "2026-09-15" and p["signal_close"] == 107.0
+    assert p["cap_frac"] == pytest.approx(expect / 22000.0)
+    assert p["stock"]["tiers"][0]["price"] == 107.0 and p["stock"]["cap_frac"] > 0   # 正股腿一起落
+    monkeypatch.setattr(eg, "DECISIONS_PATH", tmp_path / "decisions.jsonl")
+    assert eg.log_decisions([r]) == 1
+    row = list(io_json.iter_jsonl(tmp_path / "decisions.jsonl"))[0]
+    assert row["action"] == "reversal_probe_plan" and row["ticker"] == "TST"
+    assert eg.log_decisions([r]) == 0                               # 指纹没变不再落
+
+
+def test_reversal_probe_deep_drawdown_is_in_domain_and_shallow_never_signals(monkeypatch):
+    """域 = R0: −31% 也开 (定价 R2 更好); 回撤不足 10% 在 setups 人群门就没有信号 (不是域外, 是没底)。"""
+    eg = _rp_setup(monkeypatch, _rp_rows(bottom=84.0, rev_close=92.5))
+    r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
+    rp = r["reversal_probe"]
+    assert rp["verdict"] == "PLAN" and rp["signal"]["domain"] == "R0" and rp["signal"]["drawdown"] < -0.25
+    eg = _rp_setup(monkeypatch, _rp_rows(bottom=112.8, rev_close=116.0))
+    r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
+    assert "reversal_probe" not in r
+
+
+def test_reversal_probe_needs_a_flat_book_d5(monkeypatch):
+    """抄底的前提是空仓: 持仓票 (含在持期权的正股) 不出计划; 持仓表读不到 = 不授权。"""
+    eg = _rp_setup(monkeypatch, _rp_rows())
+    monkeypatch.setattr(eg, "_held_tickers", lambda: {"TST"})
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)["reversal_probe"]
+    assert rp["verdict"] == "VETO" and "空仓" in rp["reasons"][0] and rp["stock_plan"] is None
+    monkeypatch.setattr(eg, "_held_tickers", lambda: None)
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)["reversal_probe"]
+    assert rp["verdict"] == "VETO" and "fail-closed" in rp["reasons"][0]
+
+
+def test_reversal_probe_requires_a_percentile_basis(monkeypatch):
+    called = []
+    eg = _rp_setup(monkeypatch, _rp_rows(),
+                   iv_gate={"allowed": True, "basis": "abs", "reason": "ATM IV 39% < 50%", "hv_pct": None},
+                   build=lambda *a, **k: called.append(1) or _fake_plan(*a, **k))
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)["reversal_probe"]
+    # IVP 门不过 = call 腿关, **正股照走** : 计划仍是 PLAN, 只是没有合约段
+    assert rp["verdict"] == "PLAN" and not rp["option_ok"] and rp["stock_ok"] and called == []
+    assert any("分位口径" in x for x in rp["reasons"]) and rp["option_plan_data"] is None
+    eg = _rp_setup(monkeypatch, _rp_rows(),
+                   iv_gate={"allowed": False, "basis": "hv_pct", "reason": "HV20 分位 85 ≥ 40", "hv_pct": 85.0})
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)["reversal_probe"]
+    assert rp["verdict"] == "PLAN" and not rp["option_ok"] and any("IVP 门" in x for x in rp["reasons"])
+    who, verdict, tail = eg._summary_cells({**eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)})
+    assert "张" not in tail and "股" in tail
+
+
+def test_reversal_probe_zero_contracts_is_a_veto_not_a_plan(monkeypatch):
+    def tiny(*a, **k):
+        p = _fake_plan(*a, **k)
+        p["rungs"] = [{"underlying": 107.0, "premium_flat_iv": 60.0, "premium_iv_bump": 66.0}]
+        p["premium_at_stop"] = 43.2
+        return p
+    eg = _rp_setup(monkeypatch, _rp_rows(), build=tiny)
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=16000.0)["reversal_probe"]
+    # 0 张 = call 腿关 (禁降 delta 装 cap), 正股腿照走 → 仍 PLAN; 两腿都 0 才 VETO
+    assert rp["verdict"] == "PLAN" and not rp["option_ok"] and any("0 张" in x for x in rp["reasons"])
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=50.0)["reversal_probe"]
+    assert rp["verdict"] == "VETO" and any("正股 0 股且 call 0 张" in x for x in rp["reasons"])
+
+
+def test_reversal_probe_is_silent_when_there_is_no_signal(monkeypatch):
+    rows = _rp_rows()[:-1]                                          # 没有反转阳线
+    eg = _rp_setup(monkeypatch, rows)
+    r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
+    assert r["verdict"] == "VETO" and "reversal_probe" not in r

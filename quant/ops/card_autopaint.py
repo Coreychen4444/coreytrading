@@ -21,13 +21,16 @@ import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import time  # noqa: E402
 import uuid  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 from typing import Dict, List, Optional  # noqa: E402
 
 from quant.core.holdings import cardless_tickers, live_tickers  # noqa: E402
-from quant.core.io_json import atomic_write_json, read_json, state_lock  # noqa: E402
-from quant.core.paths import POSITIONS_PATH, ROOT, TMP_DIR, WATCHLIST_PATH  # noqa: E402
+from quant.core.io_json import atomic_write_json, iter_jsonl, read_json, state_lock  # noqa: E402
+from quant.core.market_sessions import MarketSessionError, latest_completed_session  # noqa: E402
+from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, ROOT, TMP_DIR, WATCHLIST_PATH  # noqa: E402
 from quant.core.timeutil import et_today
 from quant.ops.agent_runtime import load_routes  # noqa: E402
+from quant.ops.agent_snapshots import completed_bars  # noqa: E402
 
 STATE_PATH = TMP_DIR / "card_autopaint.json"
 LOG_DIR = TMP_DIR / "card_autopaint"
@@ -63,6 +66,28 @@ def _alive(pid) -> bool:
     except (OSError, TypeError, ValueError):
         return False
     return True
+
+
+def bars_gap(ticker: str, now: Optional[datetime] = None) -> Optional[str]:
+    """None = 本地日线已到最新完整会话; 否则 = 本轮不起建卡的原因。
+
+    典型: 新进自选的票在 heartbeat 被派发, 但 klines 阶段只在
+    briefing/postclose 跑 (且排在 autopaint 之后), run_card 的抓取又不自拉 K 线
+    → 必然 `completed_bars_not_current` → needs_review 告警; 随后 briefing
+    拉完 K 线, repaint 队列 (missing_card) 一次画成。判别式与 agent_inputs 抓取
+    同一份 (completed_bars + latest_completed_session), 不另写一套。
+    """
+    now = now or datetime.now(timezone.utc)
+    try:
+        want = latest_completed_session(now).isoformat()
+        bars = completed_bars(list(iter_jsonl(KLINE_CACHE_DIR / f"{ticker}.jsonl")), now)
+    except (MarketSessionError, ValueError, TypeError, AttributeError, OSError) as exc:
+        return f"日线新鲜度无法核验 ({type(exc).__name__}) — 交给盘前/盘后 repaint 队列"
+    last = bars[-1]["time"] if bars else None
+    if last == want:
+        return None
+    return (f"本地日线停在 {last or '无'} ≠ 最新完整会话 {want} — 起了也是 "
+            f"completed_bars_not_current; 等 klines 阶段后由 repaint 队列 (missing_card) 接手")
 
 
 def load_state() -> Dict:
@@ -142,7 +167,7 @@ def spawn(ticker: str, bucket: str, today: str, route: dict) -> Dict:
         raise  # A child exists; keep the starting fence if later bookkeeping fails.
     return {"ticker": ticker, "bucket": bucket, "pid": proc.pid,
             "log": _display_path(log), "timeout_enforced": True,
-            "timeout_owner": "agent_runtime", "mode": "reviewed_apply" if route["apply"] else "shadow",
+            "timeout_owner": "agent_runtime", "mode": ("reviewed_apply" if route.get("review", True) else "controlled_apply") if route["apply"] else "shadow",
             "spawned_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "spawned_at_ts": time.time()}
 
@@ -159,13 +184,17 @@ def run(dry_run: bool = False, max_spawn: int = MAX_SPAWN_PER_RUN,
     out: Dict = {"cardless": targets, "spawned": [], "skipped": [], "errors": []}
     try:
         policy = load_routes()["autopaint"]
-        out["mode"] = "reviewed_apply" if policy["apply"] else "shadow"
+        out["mode"] = ("reviewed_apply" if policy.get("review", True) else "controlled_apply") if policy["apply"] else "shadow"
         if not policy["enabled"]:
             out["skipped"] = [{"ticker": t, "reason": "autopaint_disabled"} for t in targets]
             return out
         def dispatch():
             state = load_state()
             go, skipped = due(targets, state, time.time(), force=force)
+            # 日线没到最新完整会话 = 起了必然 needs_review; 不占本轮名额, 不记冷却。
+            gaps = {t: bars_gap(t) for t in go}
+            skipped += [(t, why) for t, why in gaps.items() if why]
+            go = [t for t in go if not gaps[t]]
             skipped += [(t, f"本轮上限 {max_spawn} 个 — 下一轮起") for t in go[max_spawn:]]
             go = go[:max_spawn]
             out["skipped"] = [{"ticker": t, "reason": why} for t, why in skipped]
@@ -180,7 +209,7 @@ def run(dry_run: bool = False, max_spawn: int = MAX_SPAWN_PER_RUN,
                 stamp = time.time()
                 starting = {**target, "status": "starting", "launch_id": uuid.uuid4().hex,
                             "spawned_at_ts": stamp, "lease_until_ts": stamp + STARTING_LEASE_S,
-                            "mode": "reviewed_apply" if policy["apply"] else "shadow"}
+                            "mode": ("reviewed_apply" if policy.get("review", True) else "controlled_apply") if policy["apply"] else "shadow"}
                 old_job = jobs.get(ticker)
                 jobs[ticker] = starting
                 try:

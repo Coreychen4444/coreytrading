@@ -17,6 +17,7 @@ from typing import Callable
 
 from quant.core.agent_contracts import ROLES, canonical_hash, validate_snapshot
 from quant.valuation.assessment import build as build_valuation
+from quant.report.macro_report import build_digest
 
 PRIMARY_ROLES = ("macro", "technical", "valuation")
 _REQUEST_FIELDS = {"role", "question", "evidence_refs"}
@@ -58,6 +59,9 @@ def _derived_snapshot(source: dict, records: list[dict], *, requests: list[dict]
         "targeted_requests": deepcopy(requests or []),
         "trust_boundary": _PEER_WARNING,
     }}
+    for record in records:
+        if record["role"] == "macro":
+            data["workflow_context"]["macro_digest"] = build_digest(record, compact=True)
     refs = list(source["evidence_refs"])
     # These references identify model claims, not new market observations.
     peer_refs = []
@@ -180,6 +184,9 @@ def run_workflow(task: str, snapshot: dict, *, routes: dict, run_dir: Path | Non
         routes = validate_routes(routes)
     max_parallel = _limit(routes, "max_parallel", 3, 4)
     max_calls = _limit(routes, "max_calls", 8, 64)
+    max_followup_rounds = routes.get("limits", {}).get("max_followup_rounds", 1)
+    if type(max_followup_rounds) is not int or max_followup_rounds not in (0, 1):
+        raise ValueError("max_followup_rounds must be 0 or 1")
     if run_role_fn is None:
         from quant.ops.agent_runtime import run_role
         run_role_fn = run_role
@@ -294,6 +301,10 @@ def run_workflow(task: str, snapshot: dict, *, routes: dict, run_dir: Path | Non
     unhandled.extend({"source_role": r["source_role"], "reason": "role_outside_workflow_scope",
                       "request": r} for r in accepted if r["role"] not in active_roles)
     accepted = [r for r in accepted if r["role"] in active_roles]
+    if not max_followup_rounds:
+        unhandled.extend({"source_role": r["source_role"], "reason": "followup_disabled",
+                          "request": r} for r in accepted)
+        accepted = []
     grouped = {role: [request for request in accepted if request["role"] == role] for role in ROLES}
     followup_plan = plan([role for role in ROLES if grouped[role]], max_calls - calls)
     followup_inputs = {}
@@ -336,6 +347,9 @@ def run_workflow(task: str, snapshot: dict, *, routes: dict, run_dir: Path | Non
     if not any(record["status"] == "succeeded" for record in reports.values()):
         status = "failed"
     return {"workflow_id": workflow_id, "purpose": purpose, "status": status, "reports": reports,
+            "macro_research": {"initial": build_digest(macro_record),
+                               "followup": build_digest(followups["macro"]) if "macro" in followups else None,
+                               "downstream_basis": "initial; follow-up does not rewrite completed downstream research"},
             "followups": followups, "failures": failures, "unhandled_requests": unhandled,
             "total_calls": calls, "role_calls": role_calls,
             "call_budget_kind": "host_provider_attempts_conservative",

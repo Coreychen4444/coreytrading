@@ -96,6 +96,20 @@ def _date(bar: dict) -> str:
     return str(bar.get("time") or bar.get("date") or "")[:10]
 
 
+# ── 转折 K 线的**单一定义**（定义：阴线 = close < 前一根 low；阳线 = close > 前一根 high）──
+# 从 `_Machine` 提成模块级：`core/setups`（两种模式的判读）要用**同一条**判别式，
+# 抄第二遍的那天「阳线止跌」在两个模块里就会开始各说各话（同概念双判别式的风险）。
+
+def bull_bar(bars: List[dict], t: int) -> bool:
+    """第 t 根是不是**阳线**（收盘收上前一根的高点）。t=0 恒 False（没有前一根）。"""
+    return t >= 1 and _f(bars[t].get("close")) > _f(bars[t - 1].get("high"))
+
+
+def bear_bar(bars: List[dict], t: int) -> bool:
+    """第 t 根是不是**阴线**（收盘收破前一根的低点）。t=0 恒 False。"""
+    return t >= 1 and _f(bars[t].get("close")) < _f(bars[t - 1].get("low"))
+
+
 class _Machine:
     """一次回放 = 一台机。状态 = 「最近一个 XX」，道氏的全部记忆就这么多。
 
@@ -146,10 +160,10 @@ class _Machine:
         return self.lows[t] if self.trend == "up" else self.highs[t]
 
     def _bear(self, t: int) -> bool:
-        return t >= 1 and self.closes[t] < self.lows[t - 1]
+        return bear_bar(self.bars, t)
 
     def _bull(self, t: int) -> bool:
-        return t >= 1 and self.closes[t] > self.highs[t - 1]
+        return bull_bar(self.bars, t)
 
     def _against_bar(self, t: int) -> bool:
         """逆趋势的转折 K 线（上涨 = 阴线收破前一根低点）。"""

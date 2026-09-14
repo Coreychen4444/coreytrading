@@ -19,8 +19,10 @@ import json
 import math
 import re
 
-from quant.core.agent_contracts import ContractError, canonical_hash, validate_result, validate_snapshot
+from quant.core.agent_contracts import (ContractError, canonical_hash, card_revision,
+                                         validate_result, validate_snapshot)
 from quant.core.market_sessions import MarketSessionError, latest_completed_session
+from quant.core.num import coerce_float
 from quant.core.paths import ZONE_WRITER_PATH
 from quant.core.sizing import NOTIONAL_CAP
 from quant.core.structure import gate_coherence
@@ -207,10 +209,15 @@ def _parse_worker_args(argv):
             _gates(value, flag)
         elif flag == "--next-regime":
             value = _json(value, flag)
-            _keys(value, NEXT_KEYS, flag, ("name", "entry_gate", "cap_pct_nav", "zones"))
-            _cap(value["cap_pct_nav"], flag)
+            _keys(value, NEXT_KEYS, flag, ("name", "entry_gate"))
+            # The transition engine emits future-gate skeletons with unknown
+            # cap/zones. Match the existing writer schema without inventing
+            # future authorization or forcing a speculative zone map.
+            if value.get("cap_pct_nav") is not None:
+                _cap(value["cap_pct_nav"], flag)
             _gate(value["entry_gate"], flag + ".entry_gate")
-            _zones(value["zones"], flag + ".zones")
+            if value.get("zones") is not None:
+                _zones(value["zones"], flag + ".zones")
             if "next_gate_preview" in value:
                 _gate(value["next_gate_preview"], flag + ".next_gate_preview", preview=True)
             if not isinstance(value["name"], str) or not value["name"].strip():
@@ -266,7 +273,7 @@ def _validate_card_inputs(data, parsed, now, *, apply):
         raise SubmitError("snapshot must identify an existing card and bucket")
     if not isinstance(card.get("instrument"), dict) or card["instrument"].get("type") != "stock":
         raise SubmitError("technical card submission supports stock structures only")
-    if data.get("card_revision") != canonical_hash(card):
+    if data.get("card_revision") != card_revision(card):
         raise SubmitError("snapshot card revision mismatch")
     bars, latest = data.get("completed_bars"), data.get("latest_completed_session")
     if not isinstance(bars, list) or not bars:
@@ -331,6 +338,14 @@ def _check_candidate(writer, argv, data):
     from quant.decision import regime_transition as rt
     args = writer.parse_args(argv)
     old = data["card"]
+    # stop「消失」比「变松」更严重: 带价位带、不带 --stop-level 的重画会让 writer
+    # 整块替换擦掉现有 stop; regime_transition 下行
+    # 分支 `if stop is not None` 整段不评估 = 破位不降级。此处在 merge 之前按提案本身判:
+    # 老卡有 stop、提案重画却没给 stop → 拒。保持 = 传原值 (writer 同值时自动带过 days/来历)。
+    proposed = writer.build_zones_block(args, ticker=data["ticker"])
+    old_stop = coerce_float(((old.get("agent") or {}).get("zones") or {}).get("stop_level"))
+    if (set(proposed) & writer.REPAINT_KEYS) and old_stop is not None and proposed.get("stop_level") is None:
+        raise SubmitError("proposal would remove existing stop")
     if data["bucket"] == "positions":
         candidate = writer.merge_position(deepcopy(old), args, ticker=data["ticker"])
         errors, _ = writer._schema.validate_positions_doc({"tickers": {data["ticker"]: candidate}})
@@ -342,6 +357,8 @@ def _check_candidate(writer, argv, data):
     if errors:
         raise SubmitError("candidate fails existing card schema: " + "; ".join(errors))
     agent, previous = candidate.get("agent") or {}, old.get("agent") or {}
+    if old_stop is not None and coerce_float((agent.get("zones") or {}).get("stop_level")) is None:
+        raise SubmitError("proposal would remove existing stop")   # merge-level backstop, live zones only
     coherence = gate_coherence(agent)
     if coherence:
         raise SubmitError("candidate fails existing gate coherence: " + "; ".join(coherence))
@@ -372,10 +389,10 @@ def _check_candidate(writer, argv, data):
 
 
 def apply_proposal(record, *, apply=False, require_review=True, on_precommit=None) -> dict:
-    """Preview a bounded command, or apply an independently reviewed card proposal.
+    """Preview or apply a bounded card proposal under the host review policy.
 
-    ``require_review=False`` may relax preview requirements only. An actual write
-    always requires an independent approval; it cannot be enabled by model data.
+    ``require_review=False`` is a trusted-host opt-out from model review only.
+    Every evidence, revision, writer and trading-policy check still runs.
     ``on_precommit(receipt)`` is a trusted-host audit callback, never model input.
     It may persist the exact prepared hashes before the writer commits. It must
     not acquire the state lock, write cards, or perform external actions.
@@ -400,7 +417,7 @@ def apply_proposal(record, *, apply=False, require_review=True, on_precommit=Non
         parsed = _parse_worker_args(proposal["zone_update_args"])
         ticker, bucket = _validate_card_inputs(snapshot["data"], parsed, now, apply=apply)
         reviewer_id = _validate_review(record, payload, snapshot, now)
-        if apply and reviewer_id is None:
+        if apply and require_review and reviewer_id is None:
             raise SubmitError("apply requires independent review")
         argv = ["--ticker", ticker, "--bucket", bucket, "--expected-revision",
                 snapshot["data"]["card_revision"], *proposal["zone_update_args"]]
@@ -408,11 +425,12 @@ def apply_proposal(record, *, apply=False, require_review=True, on_precommit=Non
                    "writer_args": argv, "card_revision": snapshot["data"]["card_revision"],
                    "before_revision": snapshot["data"]["card_revision"], "after_revision": None,
                    "proposal_hash": canonical_hash(payload), "review_run_id": reviewer_id,
+                   "review_policy": "independent_required" if require_review else "not_required_by_host",
                    "review_required": bool(require_review and reviewer_id is None),
                    "policy_hash": record["policy_hash"]}
         if not apply:
             blockers = []
-            if reviewer_id is None:
+            if require_review and reviewer_id is None:
                 blockers.append("independent_review_required")
             try:
                 _validate_card_inputs(snapshot["data"], parsed, now, apply=True)
@@ -450,7 +468,7 @@ def apply_proposal(record, *, apply=False, require_review=True, on_precommit=Non
                         "before_revision": writer_receipt["before_revision"],
                         "after_revision": writer_receipt["after_revision"],
                         "proposal_hash": receipt["proposal_hash"], "policy_hash": receipt["policy_hash"],
-                        "review_run_id": reviewer_id}
+                        "review_run_id": reviewer_id, "review_policy": receipt["review_policy"]}
             if on_precommit is not None:
                 try:
                     on_precommit(deepcopy(prepared))
@@ -485,6 +503,34 @@ def apply_proposal(record, *, apply=False, require_review=True, on_precommit=Non
     except Exception as exc:
         raise SubmitError(f"{type(exc).__name__}: {exc}",
                           side_effect_possible=writer_invoked) from exc
+
+
+def preview_candidate(record, *, require_review=True) -> dict:
+    """Host-side dry run that also exercises the existing writer merge/schema.
+
+    : six of the first scheduled card failures were SubmitErrors
+    raised only at apply time (next_regime skeleton fields, binary cap), after
+    the research had already succeeded. This preview runs every static check
+    and ``_check_candidate`` (writer merge + card schema + gate coherence +
+    stop/gate no-relax + protected fields) without writing, so a Desktop
+    session can correct its result before the run is accepted. Live revision
+    is still verified only inside the writer lock at apply time.
+    """
+    receipt = apply_proposal(record, apply=False, require_review=require_review)
+    blockers = list(receipt.get("blocked_reasons") or [])
+    try:
+        snapshot = record["snapshot"]
+        argv = receipt["writer_args"]
+        _check_candidate(_load_writer(), argv, snapshot["data"])
+    except SubmitError as exc:
+        blockers.append("candidate: " + str(exc))
+    except Exception as exc:  # writer import/merge failure is a pre-write rejection
+        blockers.append(f"candidate: {type(exc).__name__}: {exc}")
+    receipt["blocked_reasons"] = blockers
+    receipt["can_apply"] = not blockers
+    receipt["checks_pending"] = ["live_revision"]
+    receipt["candidate_checked"] = True
+    return receipt
 
 
 def reconcile_submission(prepared: dict, actual_revision: str) -> dict:

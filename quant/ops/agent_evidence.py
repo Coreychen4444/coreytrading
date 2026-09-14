@@ -17,7 +17,7 @@ from datetime import datetime
 import math
 
 from quant.core import book, sizing
-from quant.core.agent_contracts import canonical_hash
+from quant.core.agent_contracts import canonical_hash, card_revision
 from quant.core.holdings import is_managed
 from quant.core.occ import parse_occ
 
@@ -215,7 +215,7 @@ def build_portfolio_evidence(bundle: dict) -> dict:
                 inputs = {"nav": nav, "power_room": power, "price": price, "atr20": atr,
                           "binding_stop": stop, "stop_basis": entry["stop_basis"],
                           "event_shrink": shrink, "gate_no": gate_no, "exposure": exposure,
-                          "card_revision": canonical_hash(card)}
+                          "card_revision": card_revision(card)}
                 values = sizing.entry_cap(nav, card["agent"], atr=atr, price=price, stop=stop,
                                           usage=usage, event_shrink=shrink, gate_no=gate_no,
                                           power_room=power, exposure=exposure)

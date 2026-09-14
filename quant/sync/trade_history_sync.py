@@ -32,7 +32,7 @@ from quant.core import env  # noqa: F401  (.env → os.environ)
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 add_openapi_path()  # openapi skill scripts (`common`) 上 sys.path
@@ -48,11 +48,11 @@ ET_TZ = ZoneInfo('America/New_York')
 import re as _re  # noqa: E402
 from quant.sync import state_io  # noqa: E402
 from quant.core.holdings import derive_tier, stamping_cards  # noqa: E402  tier/卡片合并判别式单一真源
-from quant.core.io_json import read_json  # noqa: E402
+from quant.core.io_json import iter_jsonl, read_json  # noqa: E402
 from quant.core.occ import parse_occ, strip_us_prefix as _strip_us_prefix  # noqa: E402
-from quant.core.paths import POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
+from quant.core.paths import KLINE_CACHE_DIR, OPTION_PLANS_PATH, POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core.sizing import derive_auth  # noqa: E402  授权快照判别式单一真源
-from quant.core.structure import zone_bands, zone_position  # noqa: E402
+from quant.core.structure import option_fill_flags, zone_bands, zone_position  # noqa: E402  价位盖章真源
 from quant.core.timeutil import et_naive_to_iso, et_today  # noqa: E402
 
 _PARENT_RE = _re.compile(r'combo leg, parent order_id (\S+)')
@@ -112,6 +112,17 @@ SIDE_TO_EVENT = {
 }
 
 
+def _option_plans() -> dict:
+    """entry_guard 落的选约 (state/option_plans.json) 的 plans 段 —— reversal_probe 的授权
+    住这里, 不住正股卡。读不到 = 空 dict (无本类授权, 不是崩)。"""
+    try:
+        if not OPTION_PLANS_PATH.exists():
+            return {}
+        return dict((read_json(OPTION_PLANS_PATH) or {}).get("plans") or {})
+    except Exception:                       # noqa: BLE001
+        return {}
+
+
 def _cards() -> dict:
     """Read both card stores and apply the canonical authorization-card merge."""
     try:
@@ -120,6 +131,40 @@ def _cards() -> dict:
             (read_json(WATCHLIST_PATH) or {}) if WATCHLIST_PATH.exists() else {})
     except Exception:                       # noqa: BLE001 — 读不到就不盖章, 不是崩
         return {}
+
+
+def underlying_bar_at(underlying: str, ts_iso: str) -> Optional[dict]:
+    """成交时刻正股那根 bar → {"time","low","high","close","basis"}; None = 拉不到。
+
+    期权价位盖章的数据源 (期权锚定正股回踩 z1 的价格, 不追高):
+    优先 OpenD 60m (label = bar **结束**时刻, 取第一根结束时刻 ≥ 成交时刻的 bar; 盘后
+    成交取最后一根), 拉不到 → 本地日线缓存当日 bar (basis "1d", 整日范围, 判据同样保守),
+    再没有 → None (事件标 unknown, 归人判)。sync(2) → data(1) 只在盖章那一刻才拉。
+    """
+    day, hhmm = ts_iso[:10], ts_iso[11:16]
+    bars: List[dict] = []
+    try:
+        from quant.data.market_data import get_kline
+        bars = [b for b in (get_kline(underlying, ktype="60m", start=day, end=day) or [])
+                if str(b.get("time", "")).startswith(day)]
+    except Exception as e:                       # noqa: BLE001 — OpenD 不在 = 退日线
+        print(f"[warn] 60m bar fetch failed for {underlying} {day}: {e}", file=sys.stderr)
+        bars = []
+    if bars:
+        later = [b for b in bars if str(b.get("time", ""))[11:16] >= hhmm]
+        b = later[0] if later else bars[-1]
+        try:
+            return {"time": str(b.get("time")), "low": float(b["low"]), "high": float(b["high"]),
+                    "close": float(b["close"]), "basis": "60m"}
+        except (KeyError, TypeError, ValueError):
+            pass
+    p = KLINE_CACHE_DIR / f"{underlying}.jsonl"
+    if p.exists():
+        for r in iter_jsonl(p):
+            if str(r.get("time", ""))[:10] == day and r.get("low") and r.get("high"):
+                return {"time": str(r.get("time")), "low": float(r["low"]), "high": float(r["high"]),
+                        "close": float(r.get("close") or r["high"]), "basis": "1d"}
+    return None
 
 
 def append_new_fills_to_events(new_rows: List[dict]) -> int:
@@ -168,7 +213,8 @@ def append_new_fills_to_events(new_rows: List[dict]) -> int:
         if event_type == 'fill' and side == 'BUY':
             stamp_day = et_today()
             cross_day = ts[:10] < stamp_day
-            auth, _ = derive_auth(event['ticker'], cards)
+            plans = _option_plans()
+            auth, _ = derive_auth(event['ticker'], cards, today=ts[:10], option_plans=plans)
             if auth:
                 event['auth'] = {**auth, 'stamped_at': stamp_day}
             elif cross_day:
@@ -196,6 +242,53 @@ def append_new_fills_to_events(new_rows: List[dict]) -> int:
                         flags.append('in_trim_zone')
                     if flags:
                         event['price_flags'] = flags
+                if (auth or {}).get('entry_class') == 'reversal_probe':
+                    # ── 抄底正股 BUY : 锚 = 信号日收盘, 成交价在其上 = 追高 (above_signal_close)
+                    sc = float((plans.get(event['ticker'].upper()) or {}).get('signal_close') or 0.0)
+                    if sc > 0 and float(event['price']) > sc:
+                        event['price_flags'] = sorted(set(event.get('price_flags') or []) | {'above_signal_close'})
+            elif (auth or {}).get('entry_class') == 'reversal_probe':
+                # ── reversal_probe 期权 BUY : 本类不锚 z1, 锚 = 信号日收盘;
+                # 整根 60m bar 在信号收盘之上成交 = 追高 (above_signal_close), 跨越归人判。
+                und = str((parse_occ(event['ticker']) or {}).get('underlying') or '').upper()
+                sc = float((plans.get(und) or {}).get('signal_close') or 0.0)
+                bar = underlying_bar_at(und, ts) if und else None
+                if bar and sc > 0:
+                    ambiguous = bool(bar['low'] <= sc < bar['high'])
+                    event['underlying_at_fill'] = {
+                        'price': round(bar['close'], 4), 'low': bar['low'], 'high': bar['high'],
+                        'bar_time': bar['time'], 'basis': bar['basis'], 'ambiguous': ambiguous,
+                        'anchor': 'signal_close', 'anchor_price': sc}
+                    if bar['low'] > sc:
+                        event['price_flags'] = ['above_signal_close']
+                else:
+                    event['underlying_at_fill'] = {
+                        'price': None, 'basis': 'unknown',
+                        'note': '成交时刻正股 bar 不可得 — reversal_probe 价位归人判'}
+            else:
+                # ── 期权 BUY 的**正股**价位盖章 (期权锚定正股回踩 z1 的价格,
+                # 不追高) ─────────────────────────────────────────────────
+                # 此前期权一律不盖 ("保费价与正股 zones 不同轴"), 于是确认之前、no_chase 之上的
+                # 期权成交只能靠手写注解。轴换成**成交时刻正股的 bar**:
+                # 60m 优先, 拉不到退当日日线; 判据保守 = 整根 bar 在带外才判, 跨带标
+                # ambiguous 归人判。判别式 core.structure.option_fill_flags; 出口同正股
+                # (brief INFRA:fill_price_breach), 期权多两条 flag: above_z1 / below_z2。
+                und = str((parse_occ(event['ticker']) or {}).get('underlying') or '').upper()
+                zb = zone_bands(((cards.get(und) or {}).get('agent') or {}).get('zones')) if und else None
+                if zb:
+                    bar = underlying_bar_at(und, ts)
+                    if bar:
+                        flags, ambiguous = option_fill_flags(bar['low'], bar['high'], zb)
+                        event['underlying_at_fill'] = {
+                            'price': round(bar['close'], 4), 'low': bar['low'], 'high': bar['high'],
+                            'bar_time': bar['time'], 'basis': bar['basis'], 'ambiguous': ambiguous}
+                        event['zone_at_fill'] = zone_position(bar['close'], zb)
+                        if flags:
+                            event['price_flags'] = flags
+                    else:
+                        event['underlying_at_fill'] = {
+                            'price': None, 'basis': 'unknown',
+                            'note': '成交时刻正股 bar 不可得 (60m/1d 都没有) — 期权价位归人判'}
         if r.get('parent_order_id'):
             event['parent_order_id'] = r['parent_order_id']
         if r.get('remark'):

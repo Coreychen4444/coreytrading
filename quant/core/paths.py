@@ -47,6 +47,9 @@ VALUATIONS_PATH = VALUATION_DIR / "valuations.jsonl"                # 每次估�
 VALUATION_CALIBRATION_PATH = VALUATION_DIR / "calibration.jsonl"    # 对账/回测校准结果 (每条预测 vs 实际一行)
 VALUATION_RESPONSE_EVENTS_PATH = VALUATION_DIR / "response_events.jsonl"
 VALUATION_RESPONSE_QUERIES_PATH = VALUATION_DIR / "response_queries.json"
+VALUATION_COMPANY_MODELS_PATH = VALUATION_DIR / "company_models.json"  # explicit company research inputs; no publishing authority
+VALUATION_RELEASES_PATH = VALUATION_DIR / "releases.json"  # persistent release journal and immutable artifacts
+VALUATION_RELEASE_LOCK_PATH = ROOT / "var" / "valuation-daily" / ".release.lock"
 NAV_HISTORY_PATH = EVENTS_DIR / "nav_history.jsonl"
 # 外部现金流账本: 只收银证转账 (出入金),
 # 由 data/cash_flow_sync 从券商流水同步; NAV 区间变动必须剔它 (core/nav, report/nav_report)。

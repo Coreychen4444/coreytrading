@@ -8,10 +8,11 @@ import time
 
 import pytest
 
-from quant.core.agent_contracts import CONTRACT_VERSION, RESULT_SCHEMA_VERSION, ROLES
+from quant.core.agent_contracts import CONTRACT_VERSION, ROLES
 from quant.core.io_json import atomic_write_json, read_json
 from quant.ops import agent_runtime as runtime
 from quant.ops.agent_snapshots import make_snapshot
+from tests.core.test_macro_analysis import macro_fields
 
 
 @pytest.fixture
@@ -47,8 +48,8 @@ def result_for(prompt):
     request = json.loads(prompt.split("\n", 1)[1])
     s, role = request["snapshot"], request["role"]
     target = request["review_target"]
-    return {"schema_version": RESULT_SCHEMA_VERSION, "contract_version": CONTRACT_VERSION,
-            **({"valuation_scenarios": []} if role == "macro" else {}),
+    return {"schema_version": runtime.result_schema(role)["properties"]["schema_version"]["const"], "contract_version": CONTRACT_VERSION,
+            **({"valuation_scenarios": [], **macro_fields()} if role == "macro" else {}),
             "role": role, "snapshot_id": s["snapshot_id"], "input_hash": s["input_hash"],
             "generated_at": s["as_of"], "expires_at": s["expires_at"], "summary": "合成证据分析",
             "observations": [{"id": "f1", "kind": "fact", "text": "来自冻结证据",
@@ -64,6 +65,58 @@ def fake_runner(provider, prompt, schema, **kwargs):
             "model": "synthetic-model", "elapsed_s": 0, "usage": {}}
 
 
+@pytest.mark.parametrize("role", ROLES)
+def test_native_schema_is_stable_and_prompt_has_policy_prefix(role):
+    first = make_snapshot({"value": 1}, evidence_refs=["source-a"])
+    second = make_snapshot({"value": 2}, evidence_refs=["source-b"])
+    assert runtime.execution_schema(role, first, bind_inputs=False) == runtime.execution_schema(role, second, bind_inputs=False)
+    a = runtime.build_prompt(role, "First task", first, {"rules": "stable policy"})
+    b = runtime.build_prompt(role, "Second task", second, {"rules": "stable policy"})
+    assert a.split('"task":')[0] == b.split('"task":')[0]
+    parsed = json.loads(a.split("\n", 1)[1])
+    assert "output_schema" not in parsed and parsed["snapshot"] == first
+
+
+@pytest.mark.parametrize("field", ["snapshot_id", "input_hash", "evidence_refs", "expires_at"])
+def test_stable_wire_schema_keeps_host_binding_enforcement(routes, packet, tmp_path, field):
+    routes["roles"]["technical"]["fallback"] = []
+    def bad(provider, prompt, schema, **kwargs):
+        response = fake_runner(provider, prompt, schema, **kwargs)
+        if field == "evidence_refs":
+            response["payload"]["observations"][0][field] = ["invented-ref"]
+        elif field == "expires_at":
+            from datetime import timedelta
+            response["payload"][field] = (datetime.fromisoformat(packet["expires_at"]) - timedelta(minutes=1)).isoformat()
+        else:
+            response["payload"][field] = "f" * 64
+        return response
+    out = runtime.run_role("technical", "Synthetic", packet, routes=routes,
+                           runner=bad, run_dir=tmp_path)
+    assert out["status"] == "failed"
+    assert out["attempts"][0]["status"] == "invalid_result"
+
+
+def test_review_disabled_fails_before_model_dispatch(routes, packet, tmp_path):
+    routes["autopaint"]["review"] = False
+    def forbidden(*args, **kwargs):
+        pytest.fail("review was dispatched")
+    with pytest.raises(ValueError, match="review is disabled"):
+        runtime.run_role("technical", "Synthetic", packet, routes=routes,
+                         review=True, runner=forbidden, run_dir=tmp_path)
+
+
+def test_fixed_profile_failure_does_not_switch_model(profile_routes, packet, tmp_path):
+    for p in profile_routes["model_profiles"].values():
+        p["fallback"] = []
+    seen = []
+    def failed(provider, prompt, schema, **kwargs):
+        seen.append(provider)
+        return {"status": "failed", "error": "provider_session_limit"}
+    out = runtime.run_role("technical", "Synthetic", packet, routes=profile_routes,
+                           runner=failed, run_dir=tmp_path)
+    assert out["status"] == "failed" and seen == ["claude"]
+
+
 def test_generation_schema_binds_source_ids_and_excludes_self_requests(packet):
     schema = runtime.execution_schema("technical", packet)
     props = schema["properties"]
@@ -77,6 +130,55 @@ def test_generation_schema_binds_source_ids_and_excludes_self_requests(packet):
     reviewed = runtime.execution_schema("technical", packet, {"run_id": "a" * 32})
     assert reviewed["properties"]["proposal"] == {"type": "null"}
     assert reviewed["properties"]["review"]["properties"]["run_id"]["const"] == "a" * 32
+
+
+@pytest.mark.parametrize("refs", [[], ["frozen-source"]])
+def test_macro_nested_generation_refs_and_method_contract(refs):
+    packet = make_snapshot({"synthetic": True}, evidence_refs=refs)
+    props = runtime.execution_schema("macro", packet)["properties"]
+    assert props["macro_diagnosis"]["properties"]["rate_drivers"]["properties"]["term_premium"]["properties"]["status"]["enum"] == ["inferred", "unknown"]
+    nested = [props["macro_diagnosis"]["properties"]["curve"]["properties"]["ust_30y"],
+              props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"],
+              props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]["feedback"],
+              props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]["upstream"]["properties"]["baseline"],
+              props["market_structure"]["properties"]["dimensions"]["properties"]["flows"]]
+    for item in nested:
+        schema = item["properties"]["evidence_refs"]
+        if refs:
+            assert schema["items"] == {"$ref": "#/$defs/evidence_ref"}
+            assert runtime.execution_schema("macro", packet)["$defs"]["evidence_ref"]["enum"] == refs
+        else:
+            assert schema["maxItems"] == 0
+    policy = runtime.policy_context("macro")
+    for method in ("agents/methods/market-structure-analysis.md", "agents/methods/macro-inference-contract.md"):
+        if (runtime.ROOT / method).exists():
+            assert method in policy
+        else:   # optional intelligence workspace absent: named, not fabricated
+            assert method in policy["optional_methods_missing"] and method not in policy
+
+
+def test_macro_generation_cannot_cite_catalogued_missing_source():
+    packet = make_snapshot({"source_data": {"evidence_catalog": {"missing": {"status": "missing"}, "good": {"status": "read"}}}},
+                           evidence_refs=["missing", "good"])
+    schema = runtime.execution_schema("macro", packet)
+    props = schema["properties"]
+    assert schema["$defs"]["evidence_ref"]["enum"] == ["good"]
+    assert props["observations"]["items"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
+    chain = props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]
+    assert chain["upstream"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
+
+
+def test_large_macro_reference_catalog_is_factored_once_and_schema_not_repeated_in_prompt():
+    refs = ["macro_observation:" + f"{index:064x}" for index in range(200)]
+    packet = make_snapshot({"synthetic": True}, evidence_refs=refs)
+    schema = runtime.execution_schema("macro", packet)
+    encoded = json.dumps(schema)
+    assert encoded.count(refs[0]) == 1 and encoded.count(refs[-1]) == 1
+    assert len(encoded) < 45000  # Prevent O(field count × catalog size) expansion.
+    prompt = json.loads(runtime.build_prompt("macro", "Synthetic", packet, {}).split("\n", 1)[1])
+    assert "output_schema" not in prompt
+    assert prompt["output_contract"]["schema_delivery"].startswith("native structured output")
+    assert prompt["snapshot"]["evidence_refs"] == refs
 
 
 def test_global_concurrency_queues_without_spending_extra_calls(routes, packet, tmp_path, monkeypatch):
@@ -104,7 +206,7 @@ def test_automatic_switch_is_rechecked_after_waiting_for_writer(routes, packet, 
                               run_dir=tmp_path, runner=fake_runner, review=True)
     monkeypatch.setattr(runtime, "load_routes", lambda: routes)
     writes = []
-    def apply(_record, *, apply=False, on_precommit=None):
+    def apply(_record, *, apply=False, on_precommit=None, require_review=True):
         if not apply:
             return {"can_apply": True}
         routes["autopaint"]["apply"] = False
@@ -183,7 +285,9 @@ def test_fallback_does_not_turn_same_provider_into_independent_reviewer(routes, 
         return {"status": "failed"} if provider == "claude" else fake_runner(provider, *args, **kwargs)
     record = runtime.run_role("technical", "分析", packet, routes=routes, run_dir=tmp_path,
                               runner=run, review=True)
-    assert record["status"] == "needs_review" and record["review"] is None
+    assert record["status"] == "needs_review"
+    assert record["review"]["status"] == "failed"
+    assert all(a["provider"] == "claude" for a in record["review"]["attempts"])
 
 
 def test_wrong_snapshot_or_authority_fails_even_if_runner_succeeded(routes, packet, tmp_path):
@@ -245,7 +349,7 @@ def test_submission_failure_preserves_retry_barrier_when_outcome_uncertain(
     record = runtime.run_role("technical", "分析", packet, routes=routes,
                               run_dir=tmp_path, runner=fake_runner, review=True)
     calls = []
-    def submit(_record, *, apply=False, on_precommit=None):
+    def submit(_record, *, apply=False, on_precommit=None, require_review=True):
         if not apply:
             return {"can_apply": True}
         calls.append("writer")
@@ -266,7 +370,7 @@ def test_successful_submission_is_not_replayed(routes, packet, tmp_path, monkeyp
     record = runtime.run_role("technical", "分析", packet, routes=routes,
                               run_dir=tmp_path, runner=fake_runner, review=True)
     calls = []
-    def submit(_record, *, apply=False, on_precommit=None):
+    def submit(_record, *, apply=False, on_precommit=None, require_review=True):
         if not apply:
             return {"can_apply": True}
         calls.append("writer")
@@ -284,10 +388,36 @@ def test_expired_snapshot_rejected_before_job_or_model(routes, packet, tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 
-def test_route_cannot_disable_review_for_live_autopaint(routes):
+def test_route_allows_explicit_no_review_autopaint(routes):
     routes["autopaint"].update(apply=True, review=False)
-    with pytest.raises(ValueError, match="requires"):
-        runtime.validate_routes(routes)
+    assert runtime.validate_routes(routes)["autopaint"] == routes["autopaint"]
+
+
+@pytest.mark.parametrize("restore_review", [False, True])
+def test_no_review_submission_and_commit_time_policy_recheck(routes, packet, tmp_path, monkeypatch, restore_review):
+    from quant.ops import agent_submit
+    routes["autopaint"].update(enabled=True, apply=True, review=False)
+    record = runtime.run_role("technical", "Synthetic", packet, routes=routes,
+                              run_dir=tmp_path, runner=fake_runner)
+    assert record["submission_review_required"] is False and record["review"] is None
+    monkeypatch.setattr(runtime, "load_routes", lambda: routes)
+    writes = []
+    def submit(_record, *, apply=False, on_precommit=None, require_review=True):
+        assert require_review is False
+        if not apply:
+            return {"can_apply": True}
+        routes["autopaint"]["review"] = restore_review
+        on_precommit({"review_run_id": None, "review_policy": "not_required_by_host"})
+        writes.append(True)
+        return {"status": "applied", "run_id": record["run_id"]}
+    monkeypatch.setattr(agent_submit, "apply_proposal", submit)
+    if restore_review:
+        with pytest.raises(agent_submit.SubmitError, match="restored"):
+            runtime.submit_run(record["run_id"], apply=True, automatic=True, run_dir=tmp_path)
+        assert writes == []
+    else:
+        assert runtime.submit_run(record["run_id"], apply=True, automatic=True, run_dir=tmp_path)["status"] == "applied"
+        assert writes == [True]
 
 
 def test_profile_routes_resolve_without_mutating_source_and_remain_valid(profile_routes):
@@ -307,6 +437,16 @@ def test_profile_routes_resolve_without_mutating_source_and_remain_valid(profile
         assert route["reviewer_fallback"][0]["provider"] == route["reviewer"]["provider"]
     profile_routes["model_profiles"]["openai"]["primary"]["model"] = "future-model"
     assert config["roles"]["macro"]["model"] == "gpt-6-astra"
+
+
+def test_followup_budget_survives_profile_resolution(profile_routes):
+    profile_routes["limits"]["max_followup_rounds"] = 0
+    resolved = runtime.validate_routes(profile_routes)
+    assert resolved["limits"]["max_followup_rounds"] == 0
+    for invalid in (True, -1, 2, "0"):
+        profile_routes["limits"]["max_followup_rounds"] = invalid
+        with pytest.raises(ValueError):
+            runtime.validate_routes(profile_routes)
 
 
 @pytest.mark.parametrize("change", [
@@ -420,10 +560,10 @@ def test_status_does_not_accept_arbitrary_file_path(tmp_path):
 
 def test_isolated_workers_receive_referenced_policy_and_actual_writer_contract():
     from quant.ops.agent_submit import FLAG_ARITY
+    for role in ("technical", "risk"):   # the decision-stack index is host context, not worker policy
+        assert "trade/strategy/trading-rules.md" not in runtime.policy_context(role)
     for role, method in (("macro", "agents/methods/macro-inference-contract.md"),
-                         ("valuation", "agents/methods/news-valuation-overlay.md"),
-                         ("technical", "trade/strategy/trading-rules.md"),
-                         ("risk", "trade/strategy/trading-rules.md")):
+                         ("valuation", "agents/methods/news-valuation-overlay.md")):
         policy = runtime.policy_context(role)
         if (runtime.ROOT / method).exists():
             assert method in policy
@@ -445,3 +585,75 @@ def test_freeze_uses_only_explicit_json_evidence(tmp_path, capsys):
     assert snapshot["data"] == read_json(data)
     assert snapshot["input_hash"] == runtime.canonical_hash(snapshot["data"])
     assert json.loads(capsys.readouterr().out)["snapshot_id"] == snapshot["snapshot_id"]
+
+
+@pytest.mark.parametrize('role', ROLES)
+def test_cross_profile_failure_chain_and_actual_provider_review(profile_routes, packet, tmp_path, role):
+    route = profile_routes['roles'][role]
+    route['fallback_profile'] = route['reviewer_profile']
+    resolved = runtime.validate_routes(profile_routes)['roles'][role]
+    original = resolved['provider']
+    calls = []
+    def runner(provider, prompt, schema, **kwargs):
+        target = json.loads(prompt.split('\n', 1)[1])['review_target']
+        calls.append((provider, bool(target)))
+        if provider == original and not target:
+            return {'status': 'failed', 'error': 'provider_exit_1'}
+        return fake_runner(provider, prompt, schema)
+    record = runtime.run_role(role, '合成故障切换', packet, routes=profile_routes,
+                              run_dir=tmp_path, runner=runner, review=True)
+    assert record['status'] == 'succeeded'
+    assert calls == [(original, False), (resolved['fallback'][0]['provider'], False), (original, True)]
+    assert record['provider'] != record['review']['provider']
+    assert record['review']['reviewed_result_hash'] == runtime.canonical_hash(record['result'])
+    assert len(read_json(tmp_path / 'control' / 'global-calls.json')['calls']) == 3
+
+
+def test_session_limit_skips_same_provider_but_retains_research(profile_routes, packet, tmp_path):
+    profile_routes['roles']['technical']['fallback_profile'] = 'openai'
+    calls = []
+    def runner(provider, prompt, schema, **kwargs):
+        calls.append(kwargs['model'])
+        if provider == 'claude':
+            return {'status': 'failed', 'error': 'provider_session_limit'}
+        if kwargs['model'] == 'gpt-6-astra':
+            return {'status': 'timeout', 'error': 'timeout'}
+        return fake_runner(provider, prompt, schema)
+    record = runtime.run_role('technical', '合成额度耗尽', packet, routes=profile_routes,
+                              run_dir=tmp_path, runner=runner, review=True)
+    assert calls == ['claude-fable-5-1', 'gpt-6-astra', 'gpt-5.6-sol']
+    assert record['status'] == 'needs_review' and record['result'] is not None
+    assert record['provider'] == 'codex' and record['review'] is None
+    assert record['skipped_endpoints'][0]['model'] == 'claude-opus-5'
+    assert len(read_json(tmp_path / 'control' / 'global-calls.json')['calls']) == 3
+
+
+def test_cross_profile_chain_is_bounded_and_every_attempt_charged(profile_routes, packet, tmp_path):
+    profile_routes['roles']['risk']['fallback_profile'] = 'openai'
+    calls = []
+    def runner(provider, prompt, schema, **kwargs):
+        calls.append(kwargs['model'])
+        return {'status': 'failed', 'error': 'synthetic_failure'}
+    record = runtime.run_role('risk', '合成故障', packet, routes=profile_routes,
+                              run_dir=tmp_path, runner=runner)
+    assert calls == ['claude-fable-5-1', 'gpt-6-astra', 'claude-opus-5', 'gpt-5.6-sol']
+    assert record['status'] == 'failed'
+    assert len({a['call_id'] for a in record['attempts']}) == 4
+    assert len(read_json(tmp_path / 'control' / 'global-calls.json')['calls']) == 4
+
+
+@pytest.mark.parametrize('name', ['missing', 'anthropic', None, []])
+def test_invalid_failover_profile_is_rejected(profile_routes, name):
+    profile_routes['roles']['technical']['fallback_profile'] = name
+    with pytest.raises(ValueError):
+        runtime.validate_routes(profile_routes)
+
+
+def test_cross_profile_resolves_idempotently_and_valid_abstention_does_not_failover(profile_routes, packet, tmp_path):
+    profile_routes['roles']['technical']['fallback_profile'] = 'openai'
+    original = deepcopy(profile_routes)
+    resolved = runtime.validate_routes(profile_routes)
+    assert runtime.validate_routes(resolved) == resolved and profile_routes == original
+    record = runtime.run_role('technical', '有效弃权', packet, routes=profile_routes,
+                              run_dir=tmp_path, runner=fake_runner)
+    assert record['status'] == 'succeeded' and len(record['attempts']) == 1

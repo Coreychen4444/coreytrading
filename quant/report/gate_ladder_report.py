@@ -5,8 +5,9 @@
 定位: 每个美股交易日收盘后 (05:10 SGT 定时任务) 推送 Telegram 的**代码渲染表**。
 规矩同 fired_cards: 原文推送, 不许叙述层改写/压缩 —— prose 会自己补字段, 补出来的都是错的。
 
-每票渲染: 收盘价/涨跌/量比 (technical.volume_ratio 口径, 含完成日; ⚡ = 个股自身放量
-≥1.2, 仅 tape 读数 — **gate 量能闸自  起为相对口径**volume_leg, 见各 gate 行)
+每票渲染: 收盘价/涨跌/量比 (technical.volume_ratio 口径, 含完成日; ⚡ = 个股自身**绝对**放量
+≥1.2, 仅 tape 读数 — **gate 量能闸是另一回事**: 为相对口径 volume_leg,
+阈值 = **RelVR ≥1.1**, 见各 gate 行)
 + 阶梯逐级状态 (✅ 站稳 n/n 成立 | ⏳ 计数中 m/n | ▫️ 未触及, streak 口径 =
 entry_guard._gate_streak, 只数已完成收盘; 卡片 gate 写了 volume_ratio_min 且最后
 完成 bar 量腿未达 → ✅ 行追加 ⚠️量能闸未过, 同 regime_transition.volume_leg 口径)
@@ -51,10 +52,14 @@ from quant.core.structure import (  # noqa: E402
     trading_days_after, unresolved_demotions)
 from quant.decision.entry_guard import _gate_streak  # noqa: E402  同一 streak 口径, 不另造
 from quant.decision.regime_transition import PARAMS as RT_PARAMS  # noqa: E402
-from quant.decision.regime_transition import volume_leg  # noqa: E402  量腿 canonical (rel 口径), 不另造
+from quant.decision.regime_transition import (  # noqa: E402  量腿 canonical (rel 口径) + 阈值, 不另造
+    RECLAIM_VOL_RATIO_MIN, volume_leg)
 
-VOL_GATE = 1.2
-# ⚡ 幅度快车道 (ladder_entry  裁决 k=0.5 采纳, 用户 批「都做」):
+VOL_GATE = 1.2   # ⚡ tape 标记的门槛 = 个股**绝对**量比, 纯读数**不参与授权**。
+# 🚫 它与量腿阈值是**两个身份**, 数字也不同: 授权用 RelVR ≥
+# `rt.RECLAIM_VOL_RATIO_MIN` (1.1, 相对口径), 这里是绝对 ≥1.2。 ⚡ **不等于**量腿过了 ——
+# 裁的是量腿, 没有任何证据说这个显示门槛该跟着动, 故不动 (跟着动 = 无证据调参)。
+# ⚡ 幅度快车道 (ladder_entry 回测采纳 k=0.5):
 # 首日收盘 > gate + 0.5×ATR20 且量腿过 → **当日转移, 免 ×2**, 随后 entry_guard
 # 给 repair_reclaim 三档。**数值不在本文件存第二份**—— 读 regime_transition。
 #
@@ -461,9 +466,12 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
             # 事实, 只报 ✅ 会把"差量能"的 gate 播成全过。
             vm = g.get("vol_min")
             if vm:
-                vok, vnote = volume_leg(bars, vm, tk)
+                # 对齐日 = streak 内任一日: 与 detect_transition 同传 streak
+                vok, vnote = volume_leg(bars, vm, tk, streak=n)
                 if not vok:
                     note += f" · ⚠️ {vnote} < {vm:g} 量能闸未过"
+                elif vnote and "streak第" in vnote:
+                    note += f" · 量腿 ✓ {vnote}"
             rows.append(_row(f"✅ {g['level']:g}", g["tag"], confirm, note))
         else:
             # ⏳ 的两行展开 进同一格: 卡在哪一条 + 还剩什么路
@@ -547,7 +555,8 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
     wl_blocks = _blocks({tk: c for tk, c in active.items() if tk not in held})
     asof = max(dates) if dates else "?"
     head = (f"📐 Gate 阶梯收盘报 — 截至 {asof} 收盘 (完成 bar)\n"
-            f"✅=站稳成立 ⏳=计数中 ▫️=未触及 | 量比⚡=≥{VOL_GATE} (完成日口径)\n"
+            f"✅=站稳成立 ⏳=计数中 ▫️=未触及 | 量比⚡=绝对≥{VOL_GATE} 今日 tape 读数 (**不是**量腿); "
+            f"量腿 = streak 内任一日 RelVR ≥{RECLAIM_VOL_RATIO_MIN}\n"
             f"距离双单位 %(N): 同一个 % 在不同票上差好几倍, N 才可比\n"
             f"⚡快车道 = 首日收盘 > gate+{FASTLANE_K}N 且量腿过 → **当日转移免确认**\n"
             f"  (ladder_entry  采纳; 只对 next_regime 那道线, 止跌/修复线无此路)\n"

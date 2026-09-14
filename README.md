@@ -38,12 +38,12 @@ The model handles interpretation and collaboration. Python owns data ingestion, 
 
 ## Default agent assignments
 
-| Agent | Default runtime | Independent reviewer runtime | Responsibility |
+| Agent | Runtime (when it runs) | Independent reviewer runtime | Responsibility |
 |---|---|---|---|
-| **Macro** | **Codex CLI** | Claude Code | Interpret existing macro evidence, regimes and uncertainty; provide context |
-| **Technical analysis** | **Claude Code** | Codex CLI | Read price structure, gates and zones; propose individual card updates |
-| **Risk and position management** | **Claude Code** | Codex CLI | Review whole-book exposure, buying power, stops and sizing receipts |
-| **Valuation** | **Codex CLI** | Claude Code | Interpret financial statements, valuation ledgers, scenarios and implied expectations |
+| **Macro** | **Codex** (weekly review / daily valuation) | Claude Code | Interpret existing macro evidence, regimes and uncertainty; provide context |
+| **Technical analysis** | **Claude** (the only daily model role; reused for the same close and card revisions) | Codex CLI | Read price structure, gates and zones; propose individual card updates |
+| **Risk and position management** | Daily: code-rendered receipt (`quant/report/risk_receipt.py`); weekly: **Claude** | Codex CLI | Review whole-book exposure, buying power, stops and sizing receipts |
+| **Valuation** | **Codex** (independent daily job) | Claude Code | Interpret financial statements, valuation ledgers, scenarios and implied expectations |
 
 [agents/routing.json](agents/routing.json) is the configuration source of truth. A role, runtime, model provider and model ID are separate concepts: macro is a role, Codex CLI is a runtime, OpenAI is a provider, and a particular GPT version is a model. Routing v2 defines explicit `model_profiles`; each role selects a primary profile and an independent reviewer profile.
 
@@ -52,9 +52,9 @@ The model handles interpretation and collaboration. Python owns data ingestion, 
 | Anthropic / Claude Code | `claude-fable-5-1` | `claude-opus-5` | `xhigh` (extra high) |
 | OpenAI / Codex CLI | `gpt-6-astra` | `gpt-5.6-sol` | `high` |
 
-Primary, fallback and reviewer calls all carry explicit model and effort parameters. These settings do not inherit the desktop conversation's model. Receipts distinguish requested settings from model IDs actually reported by CLI metadata; absent or multiple reported models remain explicit rather than being replaced with the requested ID. A reviewer is invoked when review is requested; card submissions require independent approval.
+Primary, fallback and reviewer calls all carry explicit model and effort parameters. These settings do not inherit the desktop conversation's model. Receipts distinguish requested settings from model IDs actually reported by CLI metadata; absent or multiple reported models remain explicit rather than being replaced with the requested ID. A reviewer is invoked when review is requested; whether card submissions require independent approval is set by `autopaint.review`.
 
-A valid abstention is retained. Failures, timeouts or invalid output may use the same profile's secondary model. The reviewer uses the other runtime and may fall back to its own secondary model; refusal to approve does not trigger another model. Model upgrades follow the documented [model maintenance policy](agents/MODEL_POLICY.md), with explicit versions and validation before activation.
+A valid abstention is retained. The current production configuration disables model fallbacks and independent review; failures remain failures with the assigned provider. The controller retains configurable failover and review support for an explicit re-enable. An explicit session quota error skips remaining models on that runtime for the current run. Review selects the runtime opposite the actual research provider; if it is unavailable, research is retained as needs_review and cannot be submitted. Refusal to approve does not trigger another model. Model upgrades follow the documented [model maintenance policy](agents/MODEL_POLICY.md), with explicit versions and validation before activation.
 
 ## How agents collaborate
 
@@ -63,11 +63,13 @@ A valid abstention is retained. Failures, timeouts or invalid output may use the
 3. **Review the portfolio.** The risk agent receives its original inputs and the current macro and technical reports. Its view includes all managed holdings, including option-specific exit rules and available Greeks. Amounts come from the existing mechanical calculations.
 4. **Resolve focused questions.** Cross-domain requests are grouped by recipient for at most one follow-up round. Unresolved questions remain in the record. Repeating a claim through another model does not create independent evidence.
 
-The default configuration allows three parallel calls and eight calls per workflow. A shared host limit also caps concurrent native calls at three and calls within a rolling hour at 24. Fallbacks consume the same budget; concurrency waits are bounded. These limits control this system's workload, not either provider's account quota or billing.
+The current configuration allows two parallel calls and eight calls per workflow, with no automatic follow-up round. A shared host limit also caps concurrent native calls at two and calls within a rolling hour at 12. Fallbacks consume the same budget; concurrency waits are bounded. These limits control this system's workload, not either provider's account quota or billing.
+
+With `execution_transport = desktop` the host does not start model CLIs: packets are written under `var/agent-runs/desktop/`, and each runtime's desktop session claims, answers and completes them under [tasks/desktop-research.md](tasks/desktop-research.md). Orchestration, frozen evidence, controlled submission and applied receipts stay with the host. The daily loop runs only the technical role; risk receipts are code-rendered and the three-role workflow runs only in the weekly review.
 
 ## Reviewed automatic card updates
 
-The default configuration enables `autopaint.enabled`, `autopaint.apply` and `autopaint.review`. Eligible missing or stale cards can enter the automatic update flow. Portfolio reports themselves do not write cards; each target gets a separate technical proposal and independent review.
+The current configuration enables `autopaint.enabled` and `autopaint.apply` with `autopaint.review=false`. Technical proposals pass the host evidence, revision and mechanical-policy checks before writing, without a second model review. New run records bind that review policy; older records still require review by default. Receipts mark model review as not required, rather than approved. Eligible missing or stale cards can enter the automatic update flow. Portfolio reports themselves do not write cards; each target gets a separate technical proposal, and independent model review is controlled by the host policy.
 
 The host checks the original evidence, result and policy bindings, expiry, permitted arguments and the target's current revision. It saves a before-image backup and a prepared submission receipt before invoking the existing [card writer](.claude/skills/trading-analysis/scripts/update_position_zones.py). Broker-owned fields, lots, pending orders and binding constraints remain protected.
 
@@ -89,10 +91,10 @@ Any scheduler that can run a prompt with a coding agent (a desktop task runner, 
 | Task | Domain work |
 |---|---|
 | `heartbeat` | Broker/state reconciliation, mechanical risk and exit alerts, health checks and nonblocking missing-card dispatch |
-| `overnight-briefing` | Refresh daily inputs, run macro, technical and risk roles, process the reviewed repaint queue and prepare entry plans |
-| `postclose-transition` | Evaluate exits, apply completed-session transitions, run technical/risk research and process reviewed repaints |
+| `overnight-briefing` | Refresh daily inputs, run the technical role (reused when the close and cards are unchanged) with the code-rendered risk receipt, process the repaint queue and prepare entry plans |
+| `postclose-transition` | Evaluate exits, apply completed-session transitions, render transition receipts, run technical research with the code-rendered risk receipt and process repaints |
 | `gate-ladder-report` | Wait for the same session's postclose job to settle, then render the mechanical gate ladder |
-| `chart-read` | Use completed bars and settled postclose state for technical interpretation and the mechanical structure digest |
+| `chart-read` | Code-rendered list of the two tradable setups (bottom, trend confirmation) that have formed or are forming; no model call |
 | `weekly-portfolio-review` | Portfolio risk review using existing performance, macro and technical evidence, with the NAV change net of external cash flows |
 
 The independent `valuation-daily` task ([tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)) refreshes inputs and runs the macro-scenario and valuation chain for its own report under `var/valuation-daily/`. Briefing and weekly review do not run the valuation role.
@@ -108,7 +110,7 @@ Refresh broker and market inputs
 → produce entry plans
 ```
 
-The synchronous repaint stage handles at most two targets per run and records the remainder. Missing-card detection can also dispatch background work through the same single-card controller and shared limits.
+The synchronous repaint stage handles at least five targets per run, or ⌈N/2⌉ of a longer queue so any queue drains in two runs, and records the remainder. Missing-card detection can also dispatch background work through the same single-card controller and shared limits.
 
 [market_sessions.py](quant/core/market_sessions.py) uses the XNYS calendar for holidays, early closes and daylight saving. Every prompt starts with `quant/ops/agent_jobs.py due --kind <kind>`; postclose, ladder and chart windows open 10, 20 and 35 minutes after the actual close and all close 60 minutes after it. Calendar gating and upstream completion are separate checks. The pinned calendar currently covers 2000–2028; unavailable or unsupported calendar data stops the decision instead of falling back to a weekday guess.
 

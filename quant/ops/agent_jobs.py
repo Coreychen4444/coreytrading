@@ -18,21 +18,114 @@ import uuid
 
 from quant.core.io_json import atomic_write_json, read_json
 from quant.core.paths import AGENT_CONTROL_DIR, AGENT_RUNS_DIR
-from quant.ops.agent_health import acquire_job, owns_job, release_job, update_health
+from quant.ops.agent_health import (CARD_LEASE_S, DOMAIN_JOB_LEASE_S, acquire_job, owns_job,
+                                    release_job, update_health)
 from quant.ops.agent_inputs import capture_inputs, repaint_targets
 from quant.ops.agent_runtime import load_routes, run_role, submit_run
 from quant.ops.agent_workflow import run_workflow
+from quant.report import risk_receipt
+
+# Repaint bound per scheduled round: at least MIN cards, and
+# a queue longer than that splits so it drains within MAX_ROUNDS_TO_DRAIN
+# rounds (briefing + postclose). The Desktop transport removed the 600s
+# per-call ceiling that made the old fixed bound of 2 necessary. The remainder
+# still stays visible in pending_cards. Failed cards are not part of this
+# guarantee: they leave pending_cards and re-enter the queue on the next scan.
+MIN_CARDS_PER_ROUND = 5
+MAX_ROUNDS_TO_DRAIN = 2
+
+
+def repaint_bound(queue_len: int) -> int:
+    """max(MIN_CARDS_PER_ROUND, ceil(queue_len / MAX_ROUNDS_TO_DRAIN))."""
+    if type(queue_len) is not int or queue_len < 0:
+        raise ValueError("queue length must be a nonnegative integer")
+    return max(MIN_CARDS_PER_ROUND, -(-queue_len // MAX_ROUNDS_TO_DRAIN))
+
+# Daily loop: only the technical role runs a model each
+# trading day; risk is rendered from the frozen mechanical receipts by
+# quant/report/risk_receipt (no model), and the macro prior is read by the
+# briefing straight from macro/current.json. The full three-role workflow
+# (macro + technical + risk models) remains the weekly job.
+# Chart is not a model job. Its deliverable
+# is quant/report/chart_read.py, which is itself the implementation of the
+# chart-read core purpose (structure / pattern hypotheses / opportunities, all
+# code). The model only produced an optional [FYI] prose supplement that was
+# already forbidden from adding any number the mechanical read had not printed.
+# chart remains a scheduled kind for `due` (market_sessions offset 35m).
+WORKFLOW_KINDS = ("weekly",)
 
 TASKS = {
-    "briefing": "生成盘前领域复核：宏观只提供先验，技术检查价格结构，风控引用机械收据检查组合约束与未知项。不要提出跨多票写卡参数；待重画由独立单卡任务处理。",
+    "briefing": "盘前技术复核：以最新完整收盘检查各卡价格结构、失效条件与待重画证据缺口；宏观先验与机械风控收据由宿主另行提供。不要提出跨多票写卡参数；待重画由独立单卡任务处理。",
     "postclose": "复核最新完整收盘后的价格结构与失效条件，指出需要重画的卡及证据缺口。保留退出与授权约束；此组合报告不直接提出写卡参数。",
     "weekly": "完成每周组合研究：汇总宏观先验、价格结构与机械风控收据，列出分歧、风险和下周观察条件。业绩只引用已扣除外部现金流的指标；没有指标则明确未知。",
-    "chart": "提供技术结构判读：形态作为假设并附失效条件，引用冻结日线与技术指标；不提出写卡、交易金额、股数或入场授权。",
 }
 
 
 def _stamp():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _card_revisions(view_data):
+    cards = view_data.get("cards") if isinstance(view_data, dict) else None
+    if not isinstance(cards, dict):
+        return None
+    return {t: c.get("card_revision") for t, c in cards.items()
+            if isinstance(c, dict) and c.get("status") == "captured"}
+
+
+def reusable_technical(root: Path, session, view_snapshot, *, exclude_scope="card") -> dict | None:
+    """Find a completed portfolio-level technical run for the same session and cards.
+
+    Postclose, chart and the next briefing would otherwise send
+    the same completed-session view to the model. If a succeeded run
+    already exists whose snapshot has the same latest_completed_session and the
+    same card revisions, its report is reused verbatim (reused_from_run_id).
+    Any changed card, new fill or new close produces a fresh run.
+    """
+    wanted = _card_revisions(view_snapshot.get("data") or {})
+    if not session or not wanted:
+        return None
+    jobs_dir = Path(root) / "task-jobs"
+    if not jobs_dir.exists():
+        return None
+    candidates = []
+    for path in jobs_dir.glob("*.json"):
+        try:
+            job = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if job.get("job_kind") == "card" or job.get("session") != session:
+            continue
+        report = (job.get("reports") or {}).get("technical") or {}
+        if report.get("status") != "succeeded" or not report.get("run_id"):
+            continue
+        candidates.append((job.get("finished_at") or "", job.get("job_id"), report))
+    for _finished, job_id, report in sorted(candidates, reverse=True):
+        run_path = Path(root) / "runs" / (report["run_id"] + ".json")
+        try:
+            run = read_json(run_path)
+        except (OSError, ValueError):
+            continue
+        data = (run.get("snapshot") or {}).get("data") or {}
+        if run.get("status") != "succeeded" or data.get("scope") == exclude_scope:
+            continue
+        if _card_revisions(data) != wanted:
+            continue
+        result = run.get("result") or {}
+        return {"run_id": run["run_id"], "status": "succeeded", "provider": run.get("provider"),
+                "summary": result.get("summary"), "unknowns": result.get("unknowns", []),
+                "reused": True, "reused_from_job_id": job_id, "reused_from_run_id": run["run_id"],
+                "reuse_basis": "same latest_completed_session and identical card revisions"}
+    return None
+
+
+def mechanical_risk_report(capture: dict) -> dict:
+    """Code-rendered risk receipt in the same report slot the risk model used."""
+    data = (capture.get("snapshots") or {}).get("risk", {}).get("data") or {}
+    view = risk_receipt.build(data)
+    return {"run_id": None, "status": "succeeded", "provider": "host",
+            "kind": "mechanical_risk_receipt", "summary": risk_receipt.render(view),
+            "receipt": view, "unknowns": view["unknowns"], "model_call": False}
 
 
 def run_card(ticker: str, bucket: str, *, apply=False, routes=None, run_dir=None,
@@ -44,7 +137,7 @@ def run_card(ticker: str, bucket: str, *, apply=False, routes=None, run_dir=None
     root, control = Path(run_dir or AGENT_RUNS_DIR), Path(control_dir or AGENT_CONTROL_DIR)
     if apply and not routes["autopaint"]["apply"]:
         raise ValueError("autopaint apply is disabled in routing policy")
-    lease = acquire_job(control, f"technical:{bucket}:{ticker}", timeout_s=7200)
+    lease = acquire_job(control, f"technical:{bucket}:{ticker}", timeout_s=CARD_LEASE_S)
     if lease["status"] != "acquired":
         return {"status": "busy", "ticker": ticker, "bucket": bucket,
                 "reason": "same_card_already_running"}
@@ -55,7 +148,12 @@ def run_card(ticker: str, bucket: str, *, apply=False, routes=None, run_dir=None
     try:
         atomic_write_json(path, job)
         capture = (capture_fn or capture_inputs)(tickers=[ticker], scope="card", bucket=bucket)
-        snapshot = capture["snapshot"]
+        # Archive complete evidence, but send only the domain's frozen view.
+        # Shared financial/macro archives can exceed native CLI input limits.
+        source = root / "captures" / (path.stem + ".json")
+        atomic_write_json(source, capture["snapshot"])
+        job["capture_artifact"] = str(source)
+        snapshot = capture["snapshots"]["technical"]
         if snapshot["data"]["bucket"] != bucket:
             raise ValueError("card membership changed before capture")
         market = capture["freshness"].get("market", {}).get(ticker, {})
@@ -66,7 +164,8 @@ def run_card(ticker: str, bucket: str, *, apply=False, routes=None, run_dir=None
                 "财报后须同时更新thesis（只读情报归档、标FYI）。证据不足则明确弃权，"
                 "不要仅为写入而重述旧卡。proposal只能包含受控writer白名单参数。")
         record = (run_role_fn or run_role)("technical", task, snapshot, routes=routes,
-                                           run_dir=root, control_dir=control, review=True)
+                                           run_dir=root, control_dir=control,
+                                           review=routes["autopaint"]["review"])
         job.update(status=record["status"], run_id=record["run_id"],
                    provider=record.get("provider"), snapshot_id=snapshot["snapshot_id"])
         proposal = (record.get("result") or {}).get("proposal")
@@ -118,16 +217,11 @@ def run_job(kind: str, *, apply=False, routes=None, run_dir=None, control_dir=No
         if not due["due"]:
             return {"status": "failed" if due["reason"].startswith("calendar_unavailable") else "skipped",
                     "job_kind": kind, "calendar": due}
-        if kind == "chart":
-            from quant.ops.agent_dependency import wait_for_job
-            dependency = wait_for_job(Path(run_dir or AGENT_RUNS_DIR), "postclose", due["session"], timeout_s=1800)
-            if dependency["status"] != "settled":
-                return {"status": "failed", "job_kind": kind, "dependency": dependency}
     routes = routes or load_routes()
     root, control = Path(run_dir or AGENT_RUNS_DIR), Path(control_dir or AGENT_CONTROL_DIR)
     if kind == "heartbeat":
         return {"status": "completed", "job_kind": kind, "health": update_health(root)}
-    lease = acquire_job(control, "domain-job:" + kind, timeout_s=10800)
+    lease = acquire_job(control, "domain-job:" + kind, timeout_s=DOMAIN_JOB_LEASE_S)
     if lease["status"] != "acquired":
         return {"status": "busy", "job_kind": kind, "reason": "same_job_already_running"}
     job_id = uuid.uuid4().hex
@@ -137,14 +231,14 @@ def run_job(kind: str, *, apply=False, routes=None, run_dir=None, control_dir=No
            "lease_until": lease.get("lease_until_ts")}
     try:
         atomic_write_json(path, job)
-        capture = (capture_fn or capture_inputs)(scope=kind if kind != "chart" else "portfolio")
+        capture = (capture_fn or capture_inputs)(scope=kind)
         job["inputs"] = capture["summary"]
         job["session"] = capture["summary"].get("latest_completed_session")
         source = root / "captures" / (job_id + ".json")
         atomic_write_json(source, capture["snapshot"])
         job.update(stage="research", snapshot_id=capture["snapshot"]["snapshot_id"])
         atomic_write_json(path, job)
-        if kind in ("briefing", "weekly"):
+        if kind in WORKFLOW_KINDS:
             def dispatch(*args, **kwargs):
                 return (run_role_fn or run_role)(*args, **kwargs, control_dir=control)
             workflow = (workflow_fn or run_workflow)(TASKS[kind], capture["snapshot"],
@@ -152,37 +246,59 @@ def run_job(kind: str, *, apply=False, routes=None, run_dir=None, control_dir=No
                                                      role_snapshots=capture["snapshots"], purpose="trading")
             artifact = root / "workflows" / (job_id + ".json")
             atomic_write_json(artifact, workflow)
-            job.update(status=workflow["status"], workflow_artifact=str(artifact),
+            job.update(research_status=workflow["status"], workflow_artifact=str(artifact),
                        reports={role: {"run_id": r.get("run_id"), "status": r["status"],
                                        "provider": r.get("provider"), "summary": (r.get("result") or {}).get("summary"),
                                        "unknowns": (r.get("result") or {}).get("unknowns", [])}
                                 for role, r in workflow["reports"].items()},
                        total_calls=workflow["total_calls"])
+            if "macro_research" in workflow:
+                job["macro_research"] = workflow["macro_research"]
         else:
             reports = {}
-            for role in (("technical", "risk") if kind == "postclose" else ("technical",)):
-                record = (run_role_fn or run_role)(role, TASKS[kind], capture["snapshots"][role],
+            view = capture["snapshots"]["technical"]
+            reused = reusable_technical(root, job["session"], view)
+            if reused is not None:
+                reports["technical"] = reused
+            else:
+                record = (run_role_fn or run_role)("technical", TASKS[kind], view,
                                                   routes=routes, run_dir=root, control_dir=control)
-                reports[role] = {"run_id": record["run_id"], "status": record["status"],
-                                 "provider": record.get("provider"), "summary": (record.get("result") or {}).get("summary"),
-                                 "unknowns": (record.get("result") or {}).get("unknowns", [])}
-            job.update(reports=reports, status="completed" if all(r["status"] == "succeeded" for r in reports.values()) else "partial")
-        if apply and kind in ("postclose", "briefing"):
-            job["stage"] = "reviewed_repaint"
+                reports["technical"] = {"run_id": record["run_id"], "status": record["status"],
+                                        "provider": record.get("provider"), "summary": (record.get("result") or {}).get("summary"),
+                                        "unknowns": (record.get("result") or {}).get("unknowns", []), "reused": False}
+            if kind in ("briefing", "postclose"):
+                reports["risk"] = mechanical_risk_report(capture)
+            job.update(reports=reports, research_status="completed" if all(
+                r["status"] == "succeeded" for r in reports.values()) else "partial")
+        # The on-disk receipt keeps status=running until every card-writing stage
+        # is over (: a "completed" receipt without finished_at read as an
+        # anomaly to the ladder task). research_status carries the verdict meanwhile.
+        job["status"] = "running"
+        repaint_partial = False
+        if apply and kind in ("postclose", "briefing") and not routes["autopaint"]["apply"]:
+            job["cards"] = []
+            job["pending_cards"] = repaint_targets(capture)
+            job["repaint_disabled_reason"] = "autopaint_apply_disabled"
+            repaint_partial = bool(job["pending_cards"])
+        elif apply and kind in ("postclose", "briefing"):
+            job["stage"] = "reviewed_repaint" if routes["autopaint"]["review"] else "controlled_repaint"
             atomic_write_json(path, job)
             targets = repaint_targets(capture)
             results = []
             # A bound per scheduled run; the full queue stays visible in the receipt.
-            for target in targets[:2]:
+            bound = repaint_bound(len(targets))
+            job["repaint_bound"] = bound
+            for target in targets[:bound]:
                 if not owns_job(control, lease["lease_id"]):
                     raise ValueError("domain job lease lost")
                 results.append((card_fn or run_card)(target["ticker"], target["bucket"], apply=True,
                                                      routes=routes, run_dir=root, control_dir=control))
             job["cards"] = results
-            job["pending_cards"] = targets[2:]
-            if job["pending_cards"] or any(r["status"] not in ("applied", "completed") for r in results):
-                job["status"] = "partial"
+            job["pending_cards"] = targets[bound:]
+            repaint_partial = bool(job["pending_cards"]) or any(
+                r["status"] not in ("applied", "completed") for r in results)
         job["stage"] = "finished"
+        job["status"] = "partial" if repaint_partial else job["research_status"]
         return job
     except Exception as exc:
         job.update(status="failed", error=type(exc).__name__ + ": " + str(exc))
@@ -196,6 +312,8 @@ def run_job(kind: str, *, apply=False, routes=None, run_dir=None, control_dir=No
 
 
 def main(argv=None):
+    from quant.core.interpreter import require_project_interpreter
+    require_project_interpreter()  # : system python killed three card jobs with a calendar error
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
     due = sub.add_parser("due")

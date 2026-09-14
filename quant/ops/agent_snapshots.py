@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 
-from quant.core.agent_contracts import canonical_hash
+from quant.core.agent_contracts import canonical_hash, card_revision
 from quant.core.io_json import read_json
 from quant.core.market_sessions import MarketSessionError, calendar_metadata, latest_completed_session, session_close
 from quant.core import technical
@@ -142,7 +142,7 @@ def capture_card(ticker: str, bucket: str, *, now: datetime | None = None,
         "valuation_as_of": valuation_as_of,
     }
     data = {"ticker": ticker, "bucket": bucket, "card": card,
-            "card_revision": canonical_hash(card), "completed_bars": bars,
+            "card_revision": card_revision(card), "completed_bars": bars,
             "latest_completed_session": bars[-1]["time"] if bars else None,
             "technical": technical.analyze(bars) if len(bars) >= 60 else None,
             "level_map": build_map(bars) if len(bars) >= 20 else None,

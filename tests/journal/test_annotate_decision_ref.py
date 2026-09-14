@@ -73,3 +73,40 @@ def test_near_ref_reports_no_gap_noise(monkeypatch):
     monkeypatch.setattr(ae, "iter_jsonl", lambda p: [near])
     ok, msg = ae.check_decision(FILL, "2026-07-24")
     assert ok and "超出" not in msg
+
+
+OPT_FILL = {"event_type": "fill", "side": "BUY", "ticker": "NBIS270115C90000", "qty": 1.0,
+            "price": 12.0, "timestamp": "2026-08-26T10:05:00-04:00", "order_id": "RP1"}
+
+
+def test_cli_auth_derivation_sees_reversal_probe_plans_at_the_fill_date(monkeypatch, tmp_path):
+    """reversal_probe : 授权住 option_plans.json 不住正股卡 —— 补盖章路径必须
+    把选约文件喂给 derive_auth, 且有效期按**成交日**判 (不是今天), 与 trade_history_sync 同口径。"""
+    from quant.core import io_json
+    import json
+    (tmp_path / "2026-08").mkdir()
+    (tmp_path / "2026-08" / "trades.jsonl").write_text(json.dumps(OPT_FILL) + "\n")
+    plans = {"NBIS": {"entry_class": "reversal_probe", "code": "NBIS270115C90000",
+                      "valid_until": "2026-08-28", "cap_frac": 0.09}}
+    (tmp_path / "option_plans.json").write_text(json.dumps({"plans": plans}))
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
+    monkeypatch.setattr(ae, "EVENTS_DIR", tmp_path)
+    monkeypatch.setattr(ae, "OPTION_PLANS_PATH", tmp_path / "option_plans.json")
+    monkeypatch.setattr(ae, "_cards", lambda: {})
+    seen = {}
+
+    def fake_derive(tkr, cards, today=None, option_plans=None):
+        seen.update(tkr=tkr, today=today, option_plans=option_plans)
+        return None, "stub"
+    monkeypatch.setattr(ae, "derive_auth", fake_derive)
+    monkeypatch.setattr("sys.argv", ["annotate_event", "--order-id", "RP1", "--notes", "t"])
+    try:
+        ae.main()
+    except SystemExit:
+        pass
+    assert seen["tkr"] == "NBIS270115C90000"
+    assert seen["today"] == "2026-08-26"                       # 成交日, 不是 et_today()
+    assert seen["option_plans"] == plans
+    assert ae._option_plans() == plans
+    monkeypatch.setattr(ae, "OPTION_PLANS_PATH", tmp_path / "absent.json")
+    assert ae._option_plans() == {}

@@ -14,6 +14,8 @@ import math
 from typing import Any
 
 from .valuation_contracts import SCENARIO_SCHEMA, validate_scenario
+from .macro_analysis import (MACRO_DIAGNOSIS_SCHEMA, MARKET_STRUCTURE_SCHEMA,
+                             MACRO_RESULT_SCHEMA_VERSION, usable_evidence_refs, validate_analysis_evidence)
 
 CONTRACT_VERSION = "1.0.0"
 RESULT_SCHEMA_VERSION = "1.1.0"
@@ -51,6 +53,36 @@ def canonical_hash(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
                          ensure_ascii=False, allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+# 宿主每轮刷新、画卡 writer 原样保留的字段 —— 不参与卡片并发判据。
+# 黑名单式 (新字段默认仍进哈希): 未知字段 = 保守方向 = 宁可空转不可覆盖写。
+#   broker           stock_fetch / state_io 每轮 heartbeat 刷报价快照
+#   moomoo_synced_at watchlist_sync 每轮盖自选分组同步时间
+#   agent.valuation  valuation_sync 每日盖估值镜像
+HOST_REFRESHED_CARD_FIELDS = ("broker", "moomoo_synced_at")
+HOST_REFRESHED_AGENT_FIELDS = ("valuation",)
+
+
+def card_revision(card: Any) -> str:
+    """卡片并发判据: writer 会读写的那部分内容的哈希。
+
+    为什么不是整张卡: expected-revision 原先哈希整张卡,
+    含 stock_fetch 每轮刷的 broker 报价块 —— 任何耗时几分钟的画卡 run 只要跟一轮
+    行情刷新撞上就 revision conflict 空转 (提案与几分钟
+    后重跑逐字相同)。报价不是并发写: writer 原样保留它, 提案新鲜度由 snapshot TTL
+    与 precommit 复检管, 不靠这个哈希。regime 转移 / 并发画卡都写在 agent 块里,
+    照样拦得住。
+    """
+    if not isinstance(card, dict):
+        return canonical_hash(card)
+    view = {key: value for key, value in card.items() if key not in HOST_REFRESHED_CARD_FIELDS}
+    agent = card.get("agent")
+    if isinstance(agent, dict):
+        view["agent"] = {key: value for key, value in agent.items()
+                         if key not in HOST_REFRESHED_AGENT_FIELDS}
+    # 存在性也不算: 首次落 broker 块 / 首次盖估值镜像同样是宿主刷新, 不是并发写。
+    return canonical_hash({"card_writer_scope": view})
 
 
 def _object(properties: dict) -> dict:
@@ -113,6 +145,10 @@ def _schema_for(role: str) -> dict:
         }),
     })}
     if role == "macro":
+        schema["properties"]["schema_version"]["const"] = MACRO_RESULT_SCHEMA_VERSION
+        schema["properties"]["macro_diagnosis"] = deepcopy(MACRO_DIAGNOSIS_SCHEMA)
+        schema["properties"]["market_structure"] = deepcopy(MARKET_STRUCTURE_SCHEMA)
+        schema["required"] += ["macro_diagnosis", "market_structure"]
         schema["properties"]["valuation_scenarios"] = _array(deepcopy(SCENARIO_SCHEMA), maximum=6)
         schema["required"].append("valuation_scenarios")
     return schema
@@ -243,19 +279,26 @@ def validate_result(role: str, payload: dict, *, snapshot: dict,
         raise ContractError("result.input_hash: expected lowercase SHA-256")
     refs = snapshot.get("evidence_refs")
     allowed_refs = set(refs)
+    macro_usable = set(usable_evidence_refs(snapshot)) if role == "macro" else allowed_refs
     if role == "macro":
+        try:
+            validate_analysis_evidence(payload["macro_diagnosis"], payload["market_structure"],
+                                       evidence_refs=allowed_refs, as_of=snapshot["as_of"], usable_refs=macro_usable)
+        except ValueError as exc:
+            raise ContractError(f"result.macro_analysis: {exc}") from exc
         scenario_ids = set()
         for scenario in payload["valuation_scenarios"]:
             try:
                 # The company-specific horizon is checked again by the host.
                 validate_scenario(scenario, horizon=max(s["end_year"] for s in scenario["shocks"]),
-                                  evidence_refs=allowed_refs)
+                                  evidence_refs=macro_usable)
             except ValueError as exc:
                 raise ContractError(str(exc)) from exc
             if scenario["id"] in scenario_ids:
                 raise ContractError("duplicate valuation scenario ID")
             scenario_ids.add(scenario["id"])
-    seen_ids: set[str] = set()
+    seen_ids: set[str] = ({h["id"] for h in payload["macro_diagnosis"]["causal_hypotheses"]}
+                          if role == "macro" else set())
     for field in ("observations", "hypotheses", "risks", "requests"):
         for index, item in enumerate(payload[field]):
             label = f"result.{field}[{index}]"
@@ -264,6 +307,10 @@ def validate_result(role: str, payload: dict, *, snapshot: dict,
                 raise ContractError(f"{label}.evidence_refs: duplicate or unknown evidence")
             if item.get("kind") == "fact" and not ids:
                 raise ContractError(f"{label}: facts require evidence")
+            if role == "macro" and field != "requests" and set(ids) - macro_usable:
+                raise ContractError(f"{label}: missing or invalid source cannot support analysis")
+            if role == "macro" and item.get("kind") == "fact" and all(ref.startswith("peer:") for ref in ids):
+                raise ContractError(f"{label}: peer interpretation alone is not an observed fact")
             if "id" in item:
                 if item["id"] in seen_ids:
                     raise ContractError(f"{label}.id: duplicate claim ID")

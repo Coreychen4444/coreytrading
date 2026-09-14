@@ -453,13 +453,31 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
     for und, plan in sorted((option_plans or {}).items()):
         code = plan.get("code")
         t0 = (plan.get("tiers") or [{}])[0]
-        if not code or not t0.get("premium"):
-            continue
-        if str(plan.get("expiry") or "") <= today:
-            notes.append(f"{und} 选约 {code} 已到期 — oz1 线不挂")
-            continue
-        if budgets is not None and und not in budgets:
-            continue                          # 无授权不画 (裸 z1 补洞同拍)
+        if plan.get("entry_class") == "reversal_probe":
+            # 抄底 (含正股腿): 授权住计划, 不看正股白名单; 信号过期不画。
+            # 正股腿 = 首档限价线 (kind z1, 备注 抄底首档:股数), 合约腿 = oz1 线。
+            vu = str(plan.get("valid_until") or "")
+            if not vu or vu < today:
+                notes.append(f"{und} 抄底 {code or '正股'} 信号已过期 (有效至 {vu or '?'}) — 线不挂")
+                continue
+            st = plan.get("stock") or {}
+            if st.get("tiers") and st["tiers"][0].get("price"):
+                d = _line(und, "z1", "PRICE_DOWN", st["tiers"][0]["price"])
+                d["note"] = f"抄底首档:{st['tiers'][0].get('shares') or '?'}股 止损{plan.get('support')}"
+                lines.append(d)
+            if not code or not t0.get("premium"):
+                continue
+            if str(plan.get("expiry") or "") <= today:
+                notes.append(f"{und} 抄底 {code} 合约已到期 — oz1 线不挂")
+                continue
+        else:
+            if not code or not t0.get("premium"):
+                continue
+            if str(plan.get("expiry") or "") <= today:
+                notes.append(f"{und} 选约 {code} 已到期 — oz1 线不挂")
+                continue
+            if budgets is not None and und not in budgets:
+                continue                          # 无授权不画 (裸 z1 补洞同拍)
         d = _line(code, "oz1", "PRICE_DOWN", t0["premium"])
         d["note"] = f"oz1:{t0.get('contracts') or '?'}"
         lines.append(d)

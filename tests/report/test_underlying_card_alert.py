@@ -215,3 +215,27 @@ def test_synced_book_is_quiet_on_anchors(monkeypatch):
     monkeypatch.setattr(pb, "underlying_cards_missing_zones", lambda *a, **k: [])
     monkeypatch.setattr(pb.structure, "cards_with_gate_anchor_desync", lambda *a, **k: [])
     assert not [a for a in _brief().get("alerts") or [] if "gate 与 zone 锚不同步" in a]
+
+
+# ── INFRA:card_missing_stop ──────────────────────────────────────────
+#
+# 卡上缺 stop 时转移机
+# 下行分支 `if stop is not None` 整段不评估 —— 破位不降级, 而没有任何出口点名。
+
+def test_missing_stop_reaches_the_brief(monkeypatch):
+    monkeypatch.setattr(pb, "underlying_cards_missing_zones", lambda *a, **k: [])
+    monkeypatch.setattr(pb.structure, "cards_missing_stop",
+                        lambda *a, **k: ["SYN [R_收复_100 cap 40%] — cap 挂着无人撤: 破位不降级, Today 授权照发"])
+
+    out = _brief()
+
+    hit = [a for a in out.get("alerts") or [] if "无 stop_level" in a]
+    assert hit, "cards_missing_stop 有输出但 brief 的 alerts 里没有它"
+    assert "SYN" in hit[0] and "--stop-level" in hit[0]
+    assert any(t.get("type") == "card_missing_stop" for t in out.get("triggers") or [])
+
+
+def test_all_cards_have_a_stop_is_quiet(monkeypatch):
+    monkeypatch.setattr(pb, "underlying_cards_missing_zones", lambda *a, **k: [])
+    monkeypatch.setattr(pb.structure, "cards_missing_stop", lambda *a, **k: [])
+    assert not [a for a in _brief().get("alerts") or [] if "无 stop_level" in a]

@@ -174,6 +174,8 @@ def _archive_prior_campaign(existing: Dict[str, Any]) -> List[Dict[str, Any]]:
     agent block carries nothing worth keeping.
     """
     agent = existing.get("agent") or {}
+    if not agent.get("zones"):
+        agent = (existing.get("exit_info") or {}).get("closed_agent") or agent
     prior: List[Dict[str, Any]] = list(agent.get("prior_campaigns") or [])
     action = agent.get("action") or {}
     thesis = agent.get("thesis") or {}

@@ -286,10 +286,15 @@ def rung_premiums(contract: Dict, ladder: List[float], dte: int) -> List[Dict]:
 def build(ticker: str, ladder: List[float], cap: Optional[float], *,
           target_dte: int, stop: Optional[float], option_type: str = "call",
           min_dte: int = 7, notional_cap: Optional[float] = None,
-          at_risk_premium_cap: Optional[float] = None) -> Dict:
+          at_risk_premium_cap: Optional[float] = None,
+          anchor_note: Optional[str] = None,
+          hv_pct: Optional[float] = None) -> Dict:
     """`cap` = **保费**预算 (分类 cap, 你花出去的钱);
     `notional_cap` = **标的名义**上限 (n_unit / 冲击预算 / gross), 由本函数用
     所选合约的 delta 折成保费后再取小;
+    `hv_pct` = HV20 的 252 日分位 (0-100, core.book.hv20_percentile_of) —— IV 序列不可信时
+    硬门槛与 delta 带用它代理 IV percentile (看分位不看绝对值); 调用方传, 本函数
+    不读 K 线 (None = 老口径: 不可信就退绝对 IV 兜底);
     `at_risk_premium_cap` = 单笔 at-risk 天花板折成的保费上限
     (AT_RISK_CAP_FRAC × NAV / OPTION_ATRISK_LOSS_FRAC ≈ $4,250 @ NAV $21.2k —
      接线: confirmed 分类 cap $8.5k > 它 ⇒ **at-risk 是期权入场的真
@@ -307,9 +312,13 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     # (见底点是 IV 峰值, sizing.long_call_iv_gate 有数据)。上面的 iv_gate 仍是情报层
     # 分档 (canonical §六), 两者并存: 一个说"该不该", 一个说"能不能"。
     hard = long_call_iv_gate(iv_pct, reliable,
-                             ivp.get("latest_iv_pct") if not ivp.get("error") else None)
+                             ivp.get("latest_iv_pct") if not ivp.get("error") else None,
+                             hv_pct=hv_pct)
+    # delta 带的分位输入与硬门槛同源: IV 可信用 IV percentile, 否则 HV 分位代理
+    eff_pct = iv_pct if (reliable and iv_pct is not None) else (
+        hv_pct if hv_pct is not None else iv_pct)
     if not hard["allowed"]:
-        return {"ticker": ticker, "iv": {**ivp, "reliable": reliable}, "gate": gate,
+        return {"ticker": ticker, "iv": {**ivp, "reliable": reliable, "hv_pct": hv_pct}, "gate": gate,
                 "hard_gate": hard,
                 "error": (f"IV 硬门槛 VETO ({hard['reason']}) → 本档正股执行, 不选约 "
                           "(用户 2026-09-02)")}
@@ -317,16 +326,19 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     chain = fetch_chain(ticker, target_dte, option_type, min_dte=min_dte)
     if not chain:
         return {"ticker": ticker, "error": "链数据不可得 (OpenD? 无期权?)",
-                "iv": ivp, "gate": gate}
+                "iv": {**ivp, "reliable": reliable, "hv_pct": hv_pct}, "gate": gate,
+                "hard_gate": hard}
 
     strikes = enrich(chain["strikes"], chain["spot"], chain["dte"])
-    sel = pick_strike(strikes, iv_pct)
+    sel = pick_strike(strikes, eff_pct)
     out = {"ticker": ticker, "spot": chain["spot"], "expiry": chain["expiry"],
            "dte": chain["dte"], "type": option_type,
-           "iv": {**ivp, "reliable": reliable}, "gate": gate, "hard_gate": hard,
+           "iv": {**ivp, "reliable": reliable, "hv_pct": hv_pct}, "gate": gate, "hard_gate": hard,
            "delta_band": sel["delta_band"], "chosen": sel["chosen"],
            "eligible_count": len(sel["eligible"]),
-           "rejected_sample": sel["rejected"][:6], "ladder": ladder, "stop_underlying": stop}
+           "rejected_sample": sel["rejected"][:6], "ladder": ladder, "stop_underlying": stop,
+           # 期权限价锚 = 正股 z1 回踩; entry_guard 传, CLI 不传 = 不显示
+           "anchor_note": anchor_note}
     if not sel["chosen"]:
         out["error"] = ("无合格 strike —— 流动性门槛或 delta 带内没有可交易档。"
                         "薄链不是 vehicle: 挂得进去挂不出来")
@@ -372,6 +384,42 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     return out
 
 
+def loss_frac_at_stop(plan: Dict) -> Optional[float]:
+    """首档保费 → 正股跌到 stop 时该合约保费的投影亏损比例 ∈ (0, 1]。None = 算不了
+    (无 rungs / 无 stop 投影 / 投影 ≥ 首档 = stop 在价上)。两端同一把尺: 都是
+    `rung_premiums` / `premium_at_stop` 的 BS(IV 不变, DTE − fill_days)。
+    消费者 = sizing.reversal_probe_premium_cap (止损放在 gate, 倒推 cap)。"""
+    rungs = plan.get("rungs") or []
+    pas = coerce_float(plan.get("premium_at_stop"))
+    if not rungs or pas is None:
+        return None
+    p0 = coerce_float(rungs[0].get("premium_flat_iv"))
+    if not p0 or p0 <= 0:
+        return None
+    lf = 1.0 - pas / p0
+    return lf if lf > 0 else None
+
+
+def apply_premium_cap(plan: Dict, cap: Optional[float], note: str) -> Dict:
+    """外部算出的保费上限与 build 内部三者取小的结果**再取小**, 重算张数 (原地改 plan)。
+    cap None / 无 rungs → 原样返回 (不编数); 外部 cap 更紧才覆盖 cap_note。"""
+    rungs = plan.get("rungs") or []
+    if cap is None or not rungs:
+        return plan
+    cur = coerce_float(plan.get("cap_used"))
+    if cur is None or cap < cur:
+        plan["cap_note"] = note
+        eff = float(cap)
+    else:
+        eff = cur
+    plan["cap_used"] = eff
+    plan["size"] = share_ladder(eff, [r["premium_flat_iv"] for r in rungs],
+                                PARAMS["ladder_weights"], multiplier=100, unit="张")
+    plan["size_iv_bump"] = share_ladder(eff, [r["premium_iv_bump"] for r in rungs],
+                                        PARAMS["ladder_weights"], multiplier=100, unit="张")
+    return plan
+
+
 def render(p: Dict) -> str:
     L: List[str] = [f"🧰 期权执行计划 {p['ticker']}"
                     + (f" (spot ${p['spot']:g})" if p.get("spot") else "")]
@@ -404,6 +452,8 @@ def render(p: Dict) -> str:
     if p.get("cap_note"):
         L.append(f"   预算: {p['cap_note']}")
     L.append("   档位 (期权限价 = 标的到位时的 **BS 估值, 不是报价**):")
+    if p.get("anchor_note"):
+        L.append(f"      锚: {p['anchor_note']}")
     for i, r in enumerate(p.get("rungs", [])):
         n = ""
         if size and i < len(size["tiers"]):

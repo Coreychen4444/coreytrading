@@ -20,13 +20,15 @@ import math
 import re
 
 from quant.core import book, earnings, paths as p, sizing, structure, technical
-from quant.core.agent_contracts import canonical_hash
+from quant.core.agent_contracts import canonical_hash, card_revision
 from quant.core.holdings import cardless_tickers, coverage_universe, is_managed, live_tickers
 from quant.core.market_sessions import MarketSessionError, latest_completed_session, session_close
+from quant.core.macro_evidence import build_market_context, capture_time, context_evidence
 from quant.core.occ import parse_occ
 from quant.core.quote_times import opend_quote_time
 from quant.core.timeutil import ET
 from quant.decision.level_map import build_map
+from quant.decision.regime_transition import rel_volume, streak_above, volume_leg
 from quant.options.premium_proj import binding_stop as holding_binding_stop
 from quant.ops.agent_evidence import build_portfolio_evidence
 from quant.ops.agent_snapshots import completed_bars, make_snapshot
@@ -36,6 +38,10 @@ from quant.ops.macro_state import validate_document as validate_macro_document
 SCOPES = frozenset({"portfolio", "heartbeat", "briefing", "postclose", "weekly", "card"})
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
 TECHNICAL_OVERVIEW_BARS = 60
+# Cards outside this round's repaint queue get a slim
+# card (numbers, no anchor prose), fewer bars and a mechanical structure receipt
+# (ATR, RelVR, gate streak) instead of 30 KB each. Targets keep the full view.
+TECHNICAL_CONTEXT_BARS = 20
 SENSITIVE_KEYS = frozenset({"account", "account_id", "acc_id", "account_number", "password",
                             "secret", "api_key", "access_token", "refresh_token", "token",
                             "credentials", "authorization"})
@@ -58,6 +64,7 @@ class InputPaths:
     valuation_overlays: Path = p.VALUATION_OVERLAYS_PATH
     response_events: Path = p.VALUATION_RESPONSE_EVENTS_PATH
     response_queries: Path = p.VALUATION_RESPONSE_QUERIES_PATH
+    company_models: Path = p.VALUATION_COMPANY_MODELS_PATH
     reports: Path = p.INTELLIGENCE_REPORTS_DIR
 
 
@@ -257,12 +264,7 @@ def repaint_targets(capture_or_snapshot):
 
 def _macro_market_view(documents):
     """Three recent captures for interpretation; full archive remains host-owned."""
-    def capture_time(document):
-        stamp = document.get("generated_at_utc") or document.get("generated_at") or document.get("captured_at")
-        if isinstance(stamp, dict):
-            stamp = stamp.get("utc")
-        return _timestamp(stamp) or datetime.min.replace(tzinfo=timezone.utc)
-    kept = sorted(documents, key=capture_time)[-3:]
+    kept = sorted(documents, key=lambda doc: capture_time(doc) or datetime.min.replace(tzinfo=timezone.utc))[-3:]
     return deepcopy(kept), {
         "total_snapshots": len(documents), "included_snapshots": len(kept),
         "full_archive_hash": canonical_hash(documents),
@@ -294,17 +296,113 @@ def _valuation_view(value):
     return view
 
 
-def _technical_overview(cards):
+def _gate_view(gate):
+    gate = _object(gate)
+    view = {k: gate[k] for k in ("level", "days", "volume_ratio_min", "label") if k in gate}
+    anchor = _object(gate.get("anchored_on"))
+    if anchor.get("date"):
+        view["anchored_on"] = anchor["date"]
+    return view
+
+
+def _slim_card(card):
+    """Numbers-only card for portfolio context: prose anchors stay in the archive."""
+    slim = {k: deepcopy(card[k]) for k in ("instrument", "broker", "status", "priority") if k in card}
+    agent = _object(card.get("agent"))
+    zones = _object(agent.get("zones"))
+    out = {k: deepcopy(zones[k]) for k in ("accumulation_zone_1", "accumulation_zone_2", "trim_zone",
+                                             "no_chase_above", "stop_level", "stop_level_days",
+                                             "valid_until", "timeframe", "methodology", "provisional") if k in zones}
+    if _object(zones.get("anchored_on")).get("date"):
+        out["anchored_on"] = zones["anchored_on"]["date"]
+    thesis = _object(agent.get("thesis"))
+    nxt, last = _object(agent.get("next_regime")), _object(agent.get("last_regime"))
+    slim["agent"] = {
+        "zones": out,
+        "thesis": {k: thesis[k] for k in ("status", "conviction", "last_reviewed") if k in thesis},
+        "current_regime": deepcopy(agent.get("current_regime")),
+        "next_regime": {**{k: nxt[k] for k in ("name", "cap_pct_nav", "participation", "provisional") if k in nxt},
+                        "entry_gate": _gate_view(nxt.get("entry_gate")),
+                        "next_gate_preview": _gate_view(nxt.get("next_gate_preview"))},
+        "last_regime": {"name": last.get("name"), "repair_gate": _gate_view(last.get("repair_gate"))},
+        "regime_history": deepcopy(agent.get("regime_history")),
+        "action": deepcopy(agent.get("action")),
+        "pending_repaint": bool(agent.get("pending_repaint")),
+        "card_slimmed": True,
+        "full_card_note": "anchor_basis / reasoning_summary / update_trigger / key_risk / invalid_if / valuation are archived; card-scope capture carries the complete card.",
+    }
+    return slim
+
+
+def _zone_position(close, zones):
+    zones = _object(zones)
+    z1, z2, trim = (_object_pair(zones.get(k)) for k in ("accumulation_zone_1", "accumulation_zone_2", "trim_zone"))
+    stop, no_chase = _number(zones.get("stop_level")), _number(zones.get("no_chase_above"))
+    if close is None:
+        return "unknown"
+    if stop is not None and close < stop:
+        return "below_stop"
+    if z2 and z2[0] <= close <= z2[1]:
+        return "in_z2"
+    if z1 and z1[0] <= close <= z1[1]:
+        return "in_z1"
+    if trim and close >= trim[0]:
+        return "at_or_above_trim"
+    if no_chase is not None and close > no_chase:
+        return "above_no_chase"
+    if z2 and close < z2[0]:
+        return "below_z2"
+    return "waiting"
+
+
+def _object_pair(value):
+    return value if (isinstance(value, list) and len(value) == 2
+                     and all(_number(v) is not None for v in value)) else None
+
+
+def structure_receipt(ticker, bars, card, atr20):
+    """Mechanical facts the technical role kept reporting as unknown."""
+    agent = _object(_object(card).get("agent"))
+    close = _number(_object(bars[-1] if bars else {}).get("close"))
+    if atr20 is None and len(bars) >= book._MIN_BARS:
+        series = technical.atr(bars, book.ATR_PERIOD)
+        atr20 = series[-1] if series else None
+    ratio, note, degraded = rel_volume(bars, ticker) if bars else (None, "no bars", True)
+    gates = []
+    for label, gate in (("next_regime.entry_gate", _object(agent.get("next_regime")).get("entry_gate")),
+                        ("last_regime.repair_gate", _object(agent.get("last_regime")).get("repair_gate"))):
+        gate = _object(gate)
+        level = _number(gate.get("level"))
+        if level is None:
+            continue
+        streak = streak_above(bars, level) if bars else 0
+        ok, vol_note = volume_leg(bars, _number(gate.get("volume_ratio_min")), ticker, streak=streak) if bars else (False, "no bars")
+        gates.append({"gate": label, "level": level, "days_required": gate.get("days"),
+                      "close_streak_above": streak, "volume_leg_ok": bool(ok), "volume_note": vol_note,
+                      "distance_pct": round((close - level) / level * 100, 2) if close is not None else None})
+    return {"close": close, "atr20": atr20, "relvr": ratio, "relvr_note": note, "relvr_degraded": degraded,
+            "zone_position": _zone_position(close, agent.get("zones")),
+            "gates": gates, "calculator": "quant.decision.regime_transition + capture-time bars",
+            "not_provided_by_design": ["60m bars (daily cache only)", "IV percentile (see iv_history in card scope)"]}
+
+
+def _technical_overview(cards, targets=()):
     """Window displayed bars only; all calculations retain the full archive."""
     view = deepcopy(cards)
+    targets = set(targets)
     for ticker, captured in view.items():
         if captured.get("status") != "captured":
             continue
         full = cards[ticker]["completed_bars"]
-        shown = full[-TECHNICAL_OVERVIEW_BARS:]
+        window = TECHNICAL_OVERVIEW_BARS if ticker in targets else TECHNICAL_CONTEXT_BARS
+        shown = full[-window:]
         captured["completed_bars"] = deepcopy(shown)
+        atr = _number(_object(_object(captured.get("technical")).get("latest")).get("atr20"))
+        captured["structure_receipt"] = structure_receipt(ticker, full, cards[ticker]["card"], atr)
+        if ticker not in targets:
+            captured["card"] = _slim_card(cards[ticker]["card"])
         captured["bars_coverage"] = {
-            "window": TECHNICAL_OVERVIEW_BARS, "included_count": len(shown),
+            "window": window, "included_count": len(shown),
             "full_count": len(full), "source_ref": "bars:" + ticker,
             "fullhash": canonical_hash(full),
             "full_archive_field": "data.cards." + ticker + ".completed_bars",
@@ -315,12 +413,48 @@ def _technical_overview(cards):
     return view
 
 
+def _macro_prior_view(macro):
+    """Direction prior only: no diagnosis prose in technical views."""
+    if not isinstance(macro, dict):
+        return None
+    view = {k: deepcopy(macro[k]) for k in ("generated_at", "phase", "risk_environment", "summary",
+                                            "data_quality", "hard_veto", "horizons") if k in macro}
+    view["macro_view_note"] = "FYI prior; full document is host-owned and unchanged."
+    return view
+
+
 def _reports(reader, directory, now):
-    reports = []
+    reports, counts = [], {"fixed": 0, "event": 0}
     names = sorted(Path(directory).glob("????-??/????-??-??-*.md"), reverse=True)
+    names += sorted(Path(directory).glob("????-??/????-??-??T*.md"), reverse=True)
+    def report_order(path):
+        try:
+            return datetime.strptime(path.name[:22], "%Y-%m-%dT%H%M%S%z")
+        except ValueError:
+            try:
+                return datetime.strptime(path.name[:10], "%Y-%m-%d").replace(tzinfo=ET)
+            except ValueError:
+                return datetime.min.replace(tzinfo=timezone.utc)
+    names = sorted(set(names), key=lambda path: (report_order(path), path.name), reverse=True)
     for path in names:
         match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})-(premarket|postclose)\.md", path.name)
-        if not match or match[1] > now.astimezone(ET).date().isoformat():
+        event = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{6}[+-]\d{4})-(.+)-(plan|result)\.md", path.name)
+        report_at = None
+        if match:
+            kind, day, session = "fixed", match[1], match[2]
+            if day > now.astimezone(ET).date().isoformat():
+                continue
+        elif event:
+            try:
+                report_at = datetime.strptime(event[1], "%Y-%m-%dT%H%M%S%z")
+            except ValueError:
+                continue
+            if report_at > now:
+                continue
+            kind, day, session = "event", report_at.astimezone(ET).date().isoformat(), event[3]
+        else:
+            continue
+        if counts[kind] >= 2:
             continue
         ref = "intelligence_report:" + path.name
         content = reader.read(path, ref, "intelligence", text=True)
@@ -328,11 +462,14 @@ def _reports(reader, directory, now):
             continue
         # Date in canonical owner filename is a report date, not a retrieval or
         # market-observation timestamp. Individual facts keep their prose times.
-        reports.append({"ref": ref, "report_date": match[1], "session": match[2],
-                        "timestamp_precision": "date", "observed_at": None,
+        reports.append({"ref": ref, "report_date": day, "session": session, "report_kind": kind,
+                        "report_at": report_at.isoformat() if report_at else None,
+                        "timestamp_precision": "timestamp" if report_at else "date", "observed_at": None,
+                        "time_limitation": "Filename dates report creation, not each fact's observation/release time; no historical availability is reconstructed.",
                         "content": content[:60000], "truncated": len(content) > 60000,
                         "authority": "FYI_only", "instruction_authority": False})
-        if len(reports) == 2:
+        counts[kind] += 1
+        if all(count == 2 for count in counts.values()):
             break
     return reports
 
@@ -375,6 +512,8 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         elif not _timestamp(_object(macro.get("generated_at")).get("utc")) or (
                 _timestamp(macro["generated_at"]["utc"]) > now):
             macro, macro_error = None, "macro_timestamp_invalid"
+    if macro_error:
+        reader.sources["macro"]["status"] = "invalid"
     positions = reader.read(paths.positions, "positions", "broker_sync")
     watchlist = reader.read(paths.watchlist, "watchlist", "watchlist_sync")
     if positions is not None and not isinstance(positions.get("tickers"), dict):
@@ -399,11 +538,23 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     valuation_overlays = reader.read(paths.valuation_overlays, "valuation_overlays", "intelligence", jsonl=True) or []
     response_events = reader.read(paths.response_events, "response_events", "valuation", jsonl=True) or []
     response_queries = reader.read(paths.response_queries, "response_queries", "valuation") or {}
-    market_snapshots = []
+    company_models = reader.read(paths.company_models, "company_models", "valuation") or {}
+    market_snapshots, macro_captures = [], []
     for path in sorted(Path(paths.macro_snapshots).rglob("*.json"))[-30:]:
         document = reader.read(path, "macro_snapshot:" + path.stem, "intelligence")
         if isinstance(document, dict):
-            market_snapshots.append(document)
+            ref = "macro_snapshot:" + path.stem
+            macro_captures.append({"ref": ref, "document": document})
+            stamp = capture_time(document)
+            if stamp is not None and stamp <= now:
+                market_snapshots.append(document)
+            else:
+                reader.sources[ref]["status"] = "invalid"
+    macro_context = build_market_context(macro_captures, as_of=now.isoformat())
+    for ref, observation in context_evidence(macro_context).items():
+        reader.sources[ref] = {"owner": "intelligence", "status": "read" if observation["status"] == "dated" else "invalid",
+                              "content_hash": canonical_hash(observation), "source_ref": observation["source_ref"],
+                              "untrusted_content": True, "independent_evidence": False}
     reports = _reports(reader, paths.reports, now)
     events = []
     event_files = sorted(Path(paths.events).glob("????-??/trades.jsonl"))
@@ -533,7 +684,7 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
             analysis = {k: v for k, v in analysis.items() if k != "series"}
             analysis["indicator_history_omitted"] = True
         cards[ticker] = {"status": "captured", "bucket": resolved_bucket, "card": card,
-                          "card_revision": canonical_hash(card), "completed_bars": bars,
+                          "card_revision": card_revision(card), "completed_bars": bars,
                           "latest_completed_session": last, "price_basis": price_basis,
                           "technical": analysis,
                           "level_map": build_map(bars) if len(bars) >= 20 else None,
@@ -566,7 +717,12 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         if _object(agent.get("zones")).get("provisional") or _object(agent.get("current_regime")).get("provisional"):
             reasons.append("provisional_structure")
         reasons += structure.zone_mech_stale(agent.get("zones"), agent.get("thesis"), captured["completed_bars"], today)
-        reasons += earnings.cards_stale_after_print({"tickers": {ticker: card}}, today=today, calendar=calendar)
+        # 派发口径 = 最新完整会话, 不是日历今天 (earnings: 「反应日当天就报, 但重画要等
+        # 那天收盘」)。例: 盘后财报 → 次日反应日, 盘前 briefing 若按
+        # 日历派发, 模型只有财报日收盘 → 弃权 → needs_review + job_partial。brief 的
+        # INFRA:card_stale_earnings 照旧按日历报「到点了」。
+        reasons += earnings.cards_stale_after_print({"tickers": {ticker: card}},
+                                                    today=expected.isoformat(), calendar=calendar)
         if reasons:
             repaint.append({"ticker": ticker, "bucket": captured["bucket"], "reasons": reasons,
                             "card_revision": captured["card_revision"],
@@ -587,7 +743,9 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     data = {"scope": scope, "selected_tickers": selected, "cards": cards,
             "macro": macro, "intelligence_reports": reports,
             "company_context": company_context, "macro_market_evidence": market_snapshots,
+            "macro_market_context": macro_context,
             "valuation": {"latest": valuations, "fundamentals": fundamentals, "quotes": valuation_quotes,
+                          "company_models": {t: company_models[t] for t in selected if t in company_models},
                           "market_snapshots": market_snapshots, "overlays": valuation_overlays,
                           "response_events": [r for r in response_events if r.get("ticker") in selected],
                           "response_queries": {t: response_queries[t] for t in selected if t in response_queries},
@@ -608,10 +766,10 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         data["ticker"] = selected[0]
     refs = sorted(reader.sources) + ["portfolio_risk_receipts"]
     shared = make_snapshot(data, evidence_refs=refs, now=now, ttl_s=ttl_s)
-    role_keys = {"macro": ("macro", "intelligence_reports", "selected_tickers", "company_context", "macro_market_evidence"),
+    role_keys = {"macro": ("macro", "intelligence_reports", "selected_tickers", "company_context", "macro_market_evidence", "macro_market_context"),
                  "technical": ("cards", "macro", "selected_tickers", "repaint_targets"),
                  "risk": ("portfolio_inputs", "portfolio_risk_receipts", "holding_risk_inputs", "power_room_receipt", "selected_tickers"),
-                 "valuation": ("valuation", "macro", "intelligence_reports", "selected_tickers", "company_context")}
+                 "valuation": ("valuation", "macro", "intelligence_reports", "selected_tickers", "company_context", "macro_market_context")}
     snapshots = {}
     for role, keys in role_keys.items():
         view = {k: data[k] for k in keys}
@@ -620,14 +778,24 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         if role == "macro":
             view["macro_market_evidence"], view["macro_market_coverage"] = _macro_market_view(data["macro_market_evidence"])
         if role == "technical" and scope != "card":
-            view["cards"] = _technical_overview(data["cards"])
+            targets = [t["ticker"] for t in repaint]
+            view["cards"] = _technical_overview(data["cards"], targets)
+            view["macro"] = _macro_prior_view(data["macro"])
             view["technical_view"] = {
                 "purpose": "portfolio_overview", "redraw_allowed": False,
-                "required_redraw_scope": "card",
-                "limitation": "组合综览仅展示最近60根完成日线；technical与level_map仍按完整归档窗口（最多260根）计算。不得凭截取视图重画或提出写卡参数；重画必须重新采集card scope的完整证据及原始卡片CAS。",
+                "required_redraw_scope": "card", "full_view_tickers": sorted(targets),
+                "limitation": "组合综览：待重画卡保留完整卡与最近60根完成日线，其余卡为数字化精简卡 + 最近20根 + 机械 structure_receipt（ATR20 / RelVR / gate streak / zone 位置）；technical与level_map仍按完整归档窗口（最多260根）计算。不得凭截取视图重画或提出写卡参数；重画必须重新采集card scope的完整证据及原始卡片CAS。",
+                "not_provided_by_design": ["60m bars", "IV percentile", "portfolio at-risk"],
             }
-        view.update({k: data[k] for k in ("scope", "evidence_catalog", "freshness", "source_times", "capture_warnings", "authority", "evidence_policy")})
+        view.update({k: data[k] for k in ("scope", "source_times", "capture_warnings", "authority", "evidence_policy")})
+        if role == "technical" and scope != "card":
+            view["evidence_catalog"] = {ref: {"status": meta.get("status"), "owner": meta.get("owner")}
+                                        for ref, meta in data["evidence_catalog"].items()}
+            view["freshness"] = {k: v for k, v in data["freshness"].items() if k not in ("fundamentals", "valuations")}
+        else:
+            view.update({k: data[k] for k in ("evidence_catalog", "freshness")})
         if role == "technical" and scope == "card":
+            view["intelligence_reports"] = data["intelligence_reports"]
             view.update({k: data[k] for k in ("ticker", "bucket", "card", "card_revision", "completed_bars", "latest_completed_session", "technical", "level_map")})
         snapshots[role] = make_snapshot(view, evidence_refs=refs, now=now, ttl_s=ttl_s)
     return {"snapshot": shared, "snapshots": snapshots, "portfolio_inputs": bundle,

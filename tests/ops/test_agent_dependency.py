@@ -123,3 +123,51 @@ def test_cli_exit_code_prevents_followup_when_no_job_finished(tmp_path, capsys):
     receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00")
     assert dependency.main(["--run-dir", str(tmp_path), "--kind", "postclose",
                             "--session", SESSION, "--timeout-s", "0"]) == 0
+
+
+# Regression: the default wait budget must cover the upstream job lease, not a fixed guess.
+
+def test_default_budget_is_the_upstream_business_lease(tmp_path):
+    from quant.ops.agent_health import DOMAIN_JOB_LEASE_S
+    receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00")
+    out = dependency.wait_for_job(tmp_path, "postclose", SESSION, monotonic=lambda: 0,
+                                  sleep=lambda s: None, wall_time=lambda: 1000)
+    assert out["status"] == "settled" and out["budget_s"] == DOMAIN_JOB_LEASE_S
+    assert DOMAIN_JOB_LEASE_S > 1800  # covers research + repaint_bound cards, not the old guess
+
+
+def test_healthy_upstream_is_waited_for_beyond_the_old_thirty_minutes(tmp_path):
+    receipt(tmp_path, status="completed", stage="reviewed_repaint", pid=4242)
+    def progress(elapsed):
+        if elapsed == 2700:
+            receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00", pid=4242)
+    out = wait(tmp_path, Clock(progress), timeout=None, pid_alive=lambda pid: True)
+    assert out["status"] == "settled" and out["elapsed_s"] == 2700
+
+
+def test_dead_upstream_process_fails_fast_instead_of_burning_the_lease(tmp_path):
+    receipt(tmp_path, status="running", stage="reviewed_repaint", pid=4242, lease_until=99999)
+    out = wait(tmp_path, timeout=None, pid_alive=lambda pid: pid != 4242)
+    assert out["status"] == "failure" and out["reason"] == "upstream_process_dead"
+    assert out["elapsed_s"] == 0
+    # A finished receipt is settled by finished_at alone; its writer is expected to be gone.
+    receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00", pid=4242)
+    assert wait(tmp_path, pid_alive=lambda pid: False)["status"] == "settled"
+
+
+def test_receipt_without_pid_is_judged_by_lease_only(tmp_path):
+    receipt(tmp_path, status="running", lease_until=99999)
+    out = wait(tmp_path, timeout=3, pid_alive=lambda pid: (_ for _ in ()).throw(AssertionError))
+    assert out["status"] == "timeout" and out["reason"] == "upstream_unfinished"
+
+
+def test_never_started_upstream_only_gets_the_start_grace(tmp_path):
+    out = wait(tmp_path, timeout=None, not_started_grace_s=5)
+    assert out["status"] == "timeout" and out["reason"] == "upstream_not_started"
+    assert out["elapsed_s"] == 5
+
+
+def test_cli_default_budget_omits_timeout_flag(tmp_path, capsys):
+    receipt(tmp_path, status="completed", finished_at="2026-09-04T22:00:00+00:00")
+    assert dependency.main(["--run-dir", str(tmp_path), "--kind", "postclose", "--session", SESSION]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "settled"

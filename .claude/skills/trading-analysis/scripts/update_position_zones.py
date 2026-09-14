@@ -24,6 +24,7 @@ Usage examples (CLI unchanged from v1; only the storage path moved):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -34,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))          # repo root → `quant.*` (分层见 quant/README.md)
 
 from quant.core import book, schema as _schema  # noqa: E402
-from quant.core.agent_contracts import canonical_hash  # noqa: E402
+from quant.core.agent_contracts import card_revision  # noqa: E402
 from quant.core.io_json import atomic_write_json, read_json, state_lock  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import is_option_ticker  # noqa: E402
@@ -63,9 +64,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--ticker", required=True)
     p.add_argument("--bucket", required=True, choices=["current", "watchlist"])
     p.add_argument("--expected-revision", default=None,
-                   help="Optional canonical SHA256 of the complete target ticker card. "
-                        "Checked under the state lock; stale proposals abort before writing. "
-                        "For a missing card use canonical_hash(None).")
+                   help="Optional agent_contracts.card_revision() of the target ticker card "
+                        "(writer-owned scope: broker 报价 / moomoo_synced_at / agent.valuation "
+                        "这些宿主刷新字段不进判据)。Checked under the state lock; stale "
+                        "proposals abort before writing. For a missing card use card_revision(None).")
     p.add_argument("--instrument-type", default="stock", choices=["stock", "option"])
     p.add_argument("--role", default="")
     p.add_argument("--linked-underlying", default="")
@@ -84,7 +86,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Consecutive closes below stop_level required to call it broken (default 1). "
              "Use 2 when invalid_if says 连续 2 日 — portfolio_brief's stop alert reads this, "
              "and without it the alert fires a day early.",
-)
+    )
+    p.add_argument(
+        "--stop-derivation", default="",
+        help="stop 的来历 (随 --stop-level 落 zones.stop_derivation, 转移机写 bfloor 时也写这个字段)。"
+             "不传 = stop 数值未变时随卡保留, 变了则清空。",
+    )
+    p.add_argument(
+        "--clear-stop", action="store_true",
+        help="显式删除现有 stop_level (只随带价位带的重画使用)。卡上有 stop 的重画不传 "
+             "--stop-level = 拒绝写盘 —— 「不传」从来不是「保持」(zones 整块替换)。保持请传原值。",
+    )
     p.add_argument("--thesis", default="")
     p.add_argument("--key-risk", default="")
     p.add_argument("--invalid-if", default="")
@@ -145,8 +157,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="[已退役 ] 仅 'none' 可用 = 清除老卡遗留的分类天花板字段",
 )
     p.add_argument("--constraint-reason", default="", help="天花板理由 (进播报)")
-    p.add_argument("--constraint-until", default="", help="YYYY-MM-DD, 约束失效日 (含当日); 缺省=永久")
-    p.add_argument("--constraint-from", default="", help="YYYY-MM-DD, 约束生效日 (含当日); 缺省=立即。v3 2026-08-04: 约束仅限结构/量化类 (如 SKHY premium gate), 财报/thesis 类 clamp 已废止不再写入")
+    p.add_argument("--constraint-until", default="", choices=["", "none"], help="已退役；仅 none 可用，清除无执行效力的旧时间窗")
+    p.add_argument("--constraint-from", default="", choices=["", "none"], help="已退役；仅 none 可用，清除无执行效力的旧时间窗")
     p.add_argument(
         "--touch-protocol", default="",
         choices=["", "A_take_first", "B_passive_only", "C_60m_first_bar", "none"],
@@ -156,6 +168,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--vehicle", default="", choices=["", "stock", "leaps", "spread", "stock_first", "none"],
         help="卡片指定 vehicle (期权分支未接线, 当前仅播报)。'none' = 清除",
 )
+    p.add_argument(
+        "--entry-class", default="", choices=["", "gate", "reversal_probe", "none"],
+        help="入场类: reversal_probe = 抄底入场卡 —— exit_guard 把卡的 "
+             "stop_level (underlying 基, 反转波段低点) 当 gate 退出线, S1 关。不传 = 保持; 'none' = 清除",
+    )
     p.add_argument(
         "--next-regime", default=None,
         help='JSON: agent.next_regime — gate 触发后要切换到的**整套**zone。'
@@ -298,6 +315,10 @@ def build_zones_block(args: argparse.Namespace, *, ticker: str = "") -> Dict[str
         # defaults, so silently dropping an explicit one-day value changes behavior.
         if args.stop_level_days and int(args.stop_level_days) >= 1:
             zones["stop_level_days"] = int(args.stop_level_days)
+        if getattr(args, "stop_derivation", ""):
+            zones["stop_derivation"] = args.stop_derivation
+        if getattr(args, "clear_stop", False):
+            raise SystemExit("--clear-stop 与 --stop-level 矛盾: 要么给 stop 要么删 stop")
     if args.valid_until:
         zones["valid_until"] = args.valid_until
     if args.anchored_on or args.anchor_basis:
@@ -331,39 +352,91 @@ def build_zones_block(args: argparse.Namespace, *, ticker: str = "") -> Dict[str
     return zones
 
 
-LEVEL_KEYS = {"accumulation_zone_1", "accumulation_zone_2", "trim_zone",
-              "no_chase_above", "stop_level"}
+# 重画判据 = 价位带 / 追价上限。 起 stop 不算重画键: 只传 --stop-level
+# 是「调 stop」, 并入现有 zones —— 此前它走整块替换, 一条 stop-only 调用会把 z1/z2/trim
+# 换成只剩 stop 的 dict (与纯元数据擦除同形状)。
+REPAINT_KEYS = {"accumulation_zone_1", "accumulation_zone_2", "trim_zone", "no_chase_above"}
+# stop 的随行属性: 确认口径 / 基准 / 来历 —— 描述的是那一条具体的线, stop 换了数值就不再成立。
+STOP_ATTR_KEYS = ("stop_level_days", "stop_level_basis", "stop_derivation")
+LEVEL_KEYS = REPAINT_KEYS | {"stop_level"}
 
 
-def apply_zones_block(agent: Dict[str, Any], zones_block: Dict[str, Any]) -> None:
-    """zones 写入语义: **不含任何价位的调用并入现有 zones**; 传了价位 = 重画 = 整块
-    替换。未显式覆盖时保留 reclaim_gates；若 stop 数值未变，也保留其确认天数与
-    derivation，使元数据与其描述的 stop 本体保持一致。
+def _same_level(a: Any, b: Any) -> bool:
+    return (isinstance(a, (int, float)) and isinstance(b, (int, float))
+            and round(float(a), 2) == round(float(b), 2))
 
-     加价位判别: 此前判据是 `set(zones_block) <= {"reclaim_gates"}`, 于是
+
+def apply_zones_block(agent: Dict[str, Any], zones_block: Dict[str, Any], *,
+                      clear_stop: bool = False) -> None:
+    """zones 写入语义 (三条):
+
+    1. **不含价位带的调用 = 并入**现有 zones (元数据 / reclaim_gates / **stop 调整**)。
+       stop 换了数值 → 旧口径 / 基准 / 来历 (STOP_ATTR_KEYS) 不随行, 除非本次显式给。
+    2. **带价位带 (REPAINT_KEYS) = 重画 = 整块替换** (保留现有 reclaim_gates, 除非本次显式传了
+       --reclaim-gates; stop 数值未变时 stop_level_days / stop_derivation 随卡保留)。
+    3. **重画不许静默擦 stop**: 卡上有 stop、本次没传 --stop-level 也没传 --clear-stop → abort
+       不写盘。「不传 = 保持」是调用方脑补的语义, writer 从来是整块替换 —— 受控重画若有意不传
+       --stop-level 以「保持退出约束」, applied 后卡上 stop_level / stop_level_days 全空; submit 守卫若只比
+       「days 变松」不比「stop 消失」就会放行; regime_transition 下行分支 `if stop is not None`
+       于是整段不评估 → 收盘破 bfloor 不降级, cap 与 Today 授权一直挂着。
+       这是「字段在重建中被丢」与「days 被整块替换擦掉」同一形状的第三个变体。
+
+    加价位判别: 此前判据是 `set(zones_block) <= {"reclaim_gates"}`, 于是
     只传 --valid-until / --reasoning-summary / --update-trigger / --anchored-on 这类
     **纯元数据**的调用走进整块替换分支, 把 zones 换成只剩那一个字段的 dict ——
     z1/z2/trim/no_chase/stop 全部静默消失, schema 仍合法 (都是可选字段) 所以照常落盘。
-    重画必然带价位, 所以替换语义对真重画不变。
     """
     prev = agent.get("zones") if isinstance(agent.get("zones"), dict) else None
-    if zones_block and not (set(zones_block) & LEVEL_KEYS) and prev:
-        agent["zones"] = {**prev, **zones_block}
-    elif zones_block:
-        if "reclaim_gates" not in zones_block and prev and prev.get("reclaim_gates"):
-            zones_block["reclaim_gates"] = prev["reclaim_gates"]
-        # Confirmation and derivation metadata travel with the stop itself. Preserve
-        # them when a redraw keeps the same stop; discard them when the stop changes.
-        prev_stop = prev.get("stop_level") if prev else None
-        new_stop = zones_block.get("stop_level")
-        if (isinstance(prev_stop, (int, float)) and isinstance(new_stop, (int, float))
-                and round(float(prev_stop), 2) == round(float(new_stop), 2)):
-            for k in ("stop_level_days", "stop_derivation"):
-                if k not in zones_block and prev.get(k):
-                    zones_block[k] = prev[k]
-        agent["zones"] = zones_block
-    elif "zones" not in agent:
-        agent["zones"] = None
+    if not zones_block:
+        if "zones" not in agent:
+            agent["zones"] = None
+        return
+    prev_stop = prev.get("stop_level") if prev else None
+    new_stop = zones_block.get("stop_level")
+    if not (set(zones_block) & REPAINT_KEYS) and prev:
+        merged = {**prev, **zones_block}
+        if new_stop is not None and not _same_level(prev_stop, new_stop):
+            for k in STOP_ATTR_KEYS:
+                if k not in zones_block:
+                    merged.pop(k, None)
+        agent["zones"] = merged
+        return
+    if isinstance(prev_stop, (int, float)) and new_stop is None and not clear_stop:
+        keep = f"--stop-level {prev_stop:g}"
+        if prev.get("stop_level_days"):
+            keep += f" --stop-level-days {prev['stop_level_days']}"
+        raise RuntimeError(
+            f"重画擦除现有 stop {prev_stop:g}: 本次带了价位带却没传 --stop-level —— 不传 ≠ 保持 "
+            f"(zones 整块替换)。保持请传 {keep}; 确要删除传 --clear-stop "
+            f"— abort, 未写盘")
+    if "reclaim_gates" not in zones_block and prev and prev.get("reclaim_gates"):
+        zones_block["reclaim_gates"] = prev["reclaim_gates"]
+    # stop 的确认口径与来历随 stop 本体走: 重画没动 stop 数值、也没显式改口径时,
+    # stop_level_days / stop_derivation 随卡保留 —— 转移机写的 bfloor "×1 日"
+    # 曾被重画整块替换静默擦掉, 降级悄悄退回缺省 2 日。
+    # stop 换了数值 = 旧口径与旧来历描述的不再是这条线, 不带。
+    if _same_level(prev_stop, new_stop):
+        for k in ("stop_level_days", "stop_derivation"):
+            if k not in zones_block and prev.get(k):
+                zones_block[k] = prev[k]
+    agent["zones"] = zones_block
+
+
+def warn_missing_stop(ticker: str, agent: Dict[str, Any]) -> None:
+    """有价位带却没有 stop 的正股卡 (⚠️ 提醒不拦截; 全书扫描出口 = brief INFRA:card_missing_stop)。
+
+    `regime_transition.derive` 下行分支是 `if stop is not None:` —— 没有 stop 就没有降级,
+    卡上的 cap / Today 授权会一直挂着; entry_guard 的预设止损退到 2N 兜底 (不是卡的线)。
+    建卡没给 stop 归 INFRA 点名, 不在这里硬拦 (硬拦会逼人随手塞一个数, 比警告更坏)。
+    """
+    z = agent.get("zones") if isinstance(agent.get("zones"), dict) else None
+    if not z or is_option_ticker(ticker):
+        return
+    if ((z.get("accumulation_zone_1") or z.get("accumulation_zone_2"))
+            and coerce_float(z.get("stop_level")) is None):
+        print(f"⚠️ {ticker}: zones 有 z1/z2 但无 stop_level — regime_transition 下行分支不评估, "
+              f"收盘破位不降级、cap/Today 授权不撤 (Q2 错了怎么认?)。补: --stop-level <价> "
+              f"--stop-level-days <n> (只传 stop = 并入不重画); brief INFRA:card_missing_stop 逐日点名")
 
 
 def _warn_form_vs_tape(ticker: str, agent: Dict[str, Any], derive_act: str) -> None:
@@ -379,7 +452,7 @@ def _warn_form_vs_tape(ticker: str, agent: Dict[str, Any], derive_act: str) -> N
 
     不硬拦: 强拦会让人随手塞个假 reclaim gate, 比警告更坏 (has_next_gate 同风格)。
     """
-    if derive_act != "derived_normal":
+    if derive_act not in ("derived_normal", "derived_wait_gate"):
         return
     try:
         from quant.core import technical
@@ -392,7 +465,7 @@ def _warn_form_vs_tape(ticker: str, agent: Dict[str, Any], derive_act: str) -> N
     except Exception:                       # noqa: BLE001 — 守卫失败不挡画卡
         return
     if vetoed:
-        print(f"⚠️ {ticker}: 卡片按干净候选派生「常规参与 cap 40%」, 但 tape 读数 = {why}")
+        print(f"⚠️ {ticker}: 卡片按干净候选派生 (= 候选·等 gate cap 0), 但 tape 读数 = {why}")
         print("   下降/转换趋势候选的正确形态 = --reclaim-gates 修复观察 (cap 0, 收复线"
               "转移后给满额) — 按干净候选画会被 entry_guard 运行时 VETO 天天拦"
               "。确认结构已修复才保留常规参与形态。")
@@ -620,7 +693,7 @@ def merge_position(
 
     prev_zones = dict(agent.get("zones") or {}) if isinstance(agent.get("zones"), dict) else {}
     zones_block = build_zones_block(args, ticker=ticker)
-    apply_zones_block(agent, zones_block)
+    apply_zones_block(agent, zones_block, clear_stop=bool(getattr(args, "clear_stop", False)))
     drop_stale_auto_observation(agent, prev_zones)
     if args.next_regime is not None:
         nr = json.loads(args.next_regime)
@@ -647,6 +720,11 @@ def merge_position(
     action.setdefault("confidence", args.conviction)
     apply_constraints(action, args)
     agent["action"] = action
+    _ec = getattr(args, "entry_class", "") or ""
+    if _ec == "none":
+        agent.pop("entry_class", None)
+    elif _ec:
+        agent["entry_class"] = _ec
 
     if args.key_risk:
         agent["key_risk"] = args.key_risk
@@ -698,7 +776,7 @@ def merge_candidate(
 
     prev_zones = dict(agent.get("zones") or {}) if isinstance(agent.get("zones"), dict) else {}
     zones_block = build_zones_block(args, ticker=str(out.get("_ticker") or ""))
-    apply_zones_block(agent, zones_block)
+    apply_zones_block(agent, zones_block, clear_stop=bool(getattr(args, "clear_stop", False)))
     drop_stale_auto_observation(agent, prev_zones)
     if args.next_regime is not None:
         nr = json.loads(args.next_regime)
@@ -725,6 +803,11 @@ def merge_candidate(
     action.setdefault("confidence", args.conviction)
     apply_constraints(action, args)
     agent["action"] = action
+    _ec = getattr(args, "entry_class", "") or ""
+    if _ec == "none":
+        agent.pop("entry_class", None)
+    elif _ec:
+        agent["entry_class"] = _ec
 
     if args.key_risk:
         agent["key_risk"] = args.key_risk
@@ -752,12 +835,15 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
         raise TypeError("precommit_check must be a trusted callable")
     args = parse_args(argv)
     ticker = args.ticker.upper().strip()
+    if getattr(args, "clear_stop", False) and not (
+            args.zone1 or args.zone2 or args.trim or args.no_chase_above is not None):
+        raise SystemExit("--clear-stop 只随带价位带的重画使用 (不带价位带的调用是并入, 无处可删)")
 
     with state_lock():
         pos = load_doc(POSITIONS_PATH, required=True)
         wl = load_doc(WATCHLIST_PATH)
         target = pos if args.bucket == "current" else wl
-        before_revision = canonical_hash((target.get("tickers") or {}).get(ticker))
+        before_revision = card_revision((target.get("tickers") or {}).get(ticker))
         if args.expected_revision is not None:
             actual = before_revision
             if actual != args.expected_revision:
@@ -766,7 +852,21 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
                     f"(expected {args.expected_revision}, actual {actual}) — abort, 未写盘")
         pos_dirty = wl_dirty = False
 
-        if args.bucket == "current":
+        defaults = vars(parse_args(["--ticker", ticker, "--bucket", args.bucket]))
+        changed = {key for key, value in vars(args).items() if value != defaults[key]}
+        cleanup_only = bool(changed & {"constraint_from", "constraint_until"}) and changed <= {
+            "constraint_from", "constraint_until", "expected_revision", "print_json"}
+        if cleanup_only:
+            if ticker not in target["tickers"]:
+                raise ValueError("constraint cleanup requires an existing card")
+            existing = target["tickers"][ticker]
+            written = copy.deepcopy(existing)
+            apply_constraints(written.setdefault("agent", {}).setdefault("action", {}), args)
+            target["tickers"][ticker] = written
+            target["generated_at"] = utc_now_iso()
+            pos_dirty = args.bucket == "current"
+            wl_dirty = args.bucket == "watchlist"
+        elif args.bucket == "current":
             existing = pos["tickers"].get(ticker, {})
             pos["tickers"][ticker] = merge_position(existing, args, ticker=ticker)
             pos["generated_at"] = utc_now_iso()
@@ -800,6 +900,7 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
 
         warn_bfloor_gap(ticker, written.get("agent") or {})
         warn_missing_next_gate(ticker, written.get("agent") or {})
+        warn_missing_stop(ticker, written.get("agent") or {})
 
         # 保留路径防呆 (): 无 zone 参数的调用是"保留路径" —— 输出的
         # zones / next_regime 必须与输入逐字节相同, 变异即 abort 不落盘。
@@ -838,7 +939,7 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
                 raise RuntimeError("zone update aborted — watchlist.json schema errors")
         if precommit_check is not None:
             precommit_check({"ticker": ticker, "bucket": args.bucket,
-                             "before_revision": before_revision, "after_revision": canonical_hash(written)})
+                             "before_revision": before_revision, "after_revision": card_revision(written)})
         if pos_dirty:
             atomic_write_json(POSITIONS_PATH, pos)
         if wl_dirty:

@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""chart_read.py — **每日收盘后判读**：结构 / 形态 / 潜在机会。
+"""chart_read.py — **每日收盘后判读**：两种模式（抄底 / 趋势确认）已形成或即将形成的标的。
 
 ════════════════════════════════════════════════════════════════════════
-🎯 核心目的（用户  逐字定版 —— 这是本模块存在的唯一理由）
+🎯 核心目的（这是本模块存在的唯一理由）
 ════════════════════════════════════════════════════════════════════════
 
-    「每天收盘后 你根据 k 线 交易量 指标等，分析出当前所处结构及形态，
-      例如这可能是底部 这可能见顶 这会继续延续 这后续会震荡
-      这会形成双顶 楔形 头肩形态，然后进而分析出潜在的交易机会」
+    每天收盘后，根据 K 线、成交量与指标等，分析出当前所处结构及形态，
+    进而分析出潜在的交易机会。
 
-    链条（用户 给的图）:
-        Context → Structure → Price Action → Volume → Indicators → Trade
+    收窄：盘后判读不再关注多种形态，仅关注这两种形态已形成或即将形成的标的，
+      未形成的不需要关注。
+      两种形态 = ① 抄底（止跌底部确认后做反弹或反转）② 趋势确认（等站稳 gate 后的进场）。
+      止跌不用道氏结构判断，只用最基本的价格行为判断空头力量衰竭：
+      次日没有继续新低或收出长下影线，止损放在下影线低点。
+      判别式真源 `quant/core/setups.py`（抄底 = 空头衰竭：次日未新低 / 长下影，止损 = 止跌低；
+      趋势确认 = 卡片 gate 接近度）。
 
-本模块的输出 = 上面六步各出一段**事实**，第七段出**形态假设**（带证伪条件与
-先验强度），第八段指出**潜在机会在哪个既有闸门上**。
+    分析链条仍是：Context → Structure → Price Action → Volume → Indicators → Trade
+    —— 前五步是**事实**（详情页照给，它们喂「确认度」），第六步只剩两种形态。
+    Lo (2000) 形态族（双顶 / 楔形 / 头肩 …）已**退出每日判读**（`core/patterns`
+    保留给研究层，本模块不再 import）；「后续倾向三栏」随之退役。
 
-**改动本模块前先问**：它是否让「每天收盘后看懂这只票现在处在什么结构里」
+**改动本模块前先问**：它是否让「每天收盘后看懂这只票在不在两种模式里、到哪一步了」
 这件事做得更好？不是「是否更严谨/更全面/更像个系统」。
 
 ════════════════════════════════════════════════════════════════════════
@@ -23,13 +29,12 @@
 ════════════════════════════════════════════════════════════════════════
 
   - **不写任何 state**（positions/watchlist/exit_guards/heartbeat-state 一个都不碰）；
-  - **不产出 cap / 股数 / 下单价 / 档位**；「机会」段只能**指向**既有闸门
-    （`entry_guard` / 卡片 zones / gate），不自己算；
-  - 形态永远以「假设 + 确认条件 + 证伪条件 + 先验强度」四件套出现，
-    不以「这是顶 / 这是底」出现。Lo (2000) 自己的限制句：形态提供
-    **信息含量**，「does not necessarily imply … excess trading profits」。
+  - **不产出 cap / 股数 / 下单价 / 档位**；「阶段」只说结构走到哪一步，不说能不能进
+    —— 能不能进、进多少永远以 `entry_guard` / 卡片 zones / `sizing.entry_cap` 为准；
+  - 反弹 vs 反转是**判读**，「反弹就尽早清仓」的机械口径归 exit_guard（须先过
+    `exit_rules_backtest`），本模块只播裁量点。
 
-这与 v3 分工同构：**授权归结构机器，判断权归 用户，agent 供弹药**。
+这与 v3 分工同构：**授权归结构机器，判断权归人工，agent 供弹药**。
 
 ════════════════════════════════════════════════════════════════════════
 数据纪律
@@ -38,16 +43,13 @@
   - 只吃**已完成日线**（`market/klines/` + `market/klines_deep/` 合并去重）。
     盘中跑 = 未完成 bar 当收盘，本仓栽过（`heartbeat.md` §盘中运行，NBIS 7/28）。
     → `--asof` 可显式截断到某个交易日，用于复盘与测试。
-  - 一切读数**归一化**（ATR 尺 / 相对量比 / 百分比），不用全池固定阈值
-    （`portfolio_brief` 固定 5% 的教训：全池固定阈值 = 没有阈值）。
-  - 指标**一轴一票**：`landing_plan` §4 的实测 —— RSI / 布林%B / MA20 偏离 /
-    20 日区间位置 ρ≈0.89–0.95 = 同一个读数四个名字；rsi_div~macd_div 共现提升 ×7.25。
-    所以这里**只报一个**「离均值多远」与**一个**「动量背离」，不堆四个装共振。
+  - 一切读数**归一化**（ATR 尺 / 相对量比 / 百分比），不用全池固定阈值。
+  - 指标**一轴一票**：只报一个「离均值多远」与一个「动量背离」，不堆四个装共振。
 
 Usage:
-    python3 quant/report/chart_read.py --book                 # 全书
-    python3 quant/report/chart_read.py --tickers COHR NBIS
-    python3 quant/report/chart_read.py --tickers COHR --asof  --json
+    python3 quant/report/chart_read.py --book --digest      # 推送：两种模式清单
+    python3 quant/report/chart_read.py --tickers <T1> <T2>  # 详情
+    python3 quant/report/chart_read.py --tickers <T> --asof <YYYY-MM-DD> --json
 """
 from __future__ import annotations
 
@@ -58,10 +60,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 
 import argparse  # noqa: E402
 import json  # noqa: E402
-from typing import Dict, List, Optional, Tuple  # noqa: E402
+from typing import Dict, List, Optional  # noqa: E402
 
 from quant.core import earnings as earn  # noqa: E402
-from quant.core import dow, patterns, technical  # noqa: E402
+from quant.core import dow, setups, technical  # noqa: E402
 from quant.core import structure as st  # noqa: E402
 from quant.core.episodes import (BROKE_WINDOW, DELTA_ATR, breakdown_in_window,  # noqa: E402
                                  episodes_of, gate_path, merge_bars_by_date)
@@ -73,7 +75,10 @@ from quant.core.paths import (EARNINGS_CALENDAR_PATH, KLINE_CACHE_DIR,  # noqa: 
                               KLINE_DEEP_DIR, POSITIONS_PATH, WATCHLIST_PATH)
 from quant.core.sectors import benchmark_for  # noqa: E402
 from quant.decision.level_map import cluster_pivots, find_lvn, top_hvn  # noqa: E402
-from quant.decision.regime_transition import rel_volume  # noqa: E402
+from quant.decision.regime_transition import (rel_volume, streak_above,  # noqa: E402
+                                              volume_leg)
+from quant.report.gate_ladder_report import (PATH_TAGS, fastlane_state,  # noqa: E402  同层: gate 行的渲染辅助, 不另造
+                                             ladder_of)
 
 PROFILE_BARS = 60        # 与卡片画线同口径 (level_map / volume_profile 现行 60 根)
 PIVOT_BARS = 250         # pivot 簇回看
@@ -82,12 +87,15 @@ NEAR_ATR = 3.0           # 只报现价 ±3N 内的墙 (再远今天交互不到
 
 # 力/果的格子边界 —— 与 price_action_framework_design §7.2 同值, 且
 # close_pos 与 tape_check 的 60m 口径对齐 (0.40/0.70), 不另立一套。
+# 🚫 EFFORT_HI 1.2 与**授权量腿**同数不同身份: 这里是判读层
+#    Wyckoff 力/果分格, 零授权效力; 授权阈值 = RelVR ≥1.1
+#    (`rt.RECLAIM_VOL_RATIO_MIN`)。裁的是量腿, 没有证据说这条判读格该跟着动 → 不动。
 EFFORT_HI, EFFORT_LO = 1.2, 0.8
 RESULT_HI, RESULT_LO = 1.0, 0.6
 CLOSE_WEAK, CLOSE_STRONG = 0.40, 0.70
 
-# 「最近」= 一个交易周的短期结构窗口。
-# 短期道氏的终止/恢复只在这个窗口内进「后续倾向」与「潜在机会」，再早的是历史。
+# 「最近」= 一周 —— 判读的时间尺度（短期一周内的结构）。
+# gate 转移 ≤5 根前 = 「已形成」还算现在；再早的是历史。
 RECENT_BARS = 5
 
 
@@ -211,8 +219,7 @@ def book_tickers() -> List[str]:
 
 HEADER = ("[FYI] 收盘判读 — 观察层，零授权效力\n"
           "链条 Context → Structure → Price Action → Volume → Indicators → Trade\n"
-          "形态 = 假设 + 确认 + 证伪 + 先验强度（Lo 2000 族；民间项已标注）\n"
-          + patterns.STATE_LEGEND)
+          "两种模式：🔁 抄底（空头衰竭：次日未新低 / 长下影，止损 = 止跌低）｜ 🚀 趋势确认（站稳 gate ×N + 量腿）")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -254,8 +261,8 @@ def earnings_stale_cards(asof: Optional[str] = None) -> Dict[str, str]:
 
     为什么判读层要管这个：判读读的是**卡片的 zone / gate / regime**。
     卡锚停在财报之前 = 这张图**不含反应日的信息**，而反应日常常是 ±10% 的一根。
-    此时照常打印「zone位置 zone1 / next gate 231」会显得很确定，
-    但那是一张已知过期的地图 —— **不说出来就是本仓最熟的那种静默**。
+    此时照常打印「next gate X」会显得很确定，但那是一张已知过期的地图
+    —— **不说出来就是本仓最熟的那种静默**。
     """
     if asof in _STALE_CACHE:
         return _STALE_CACHE[asof]
@@ -307,15 +314,14 @@ def _tail_jsonl(path: Path, n: int) -> List[dict]:
 def market_breadth(asof: Optional[str] = None) -> Dict:
     """市场宽度代理 —— **只播报数值，不设阈值，不判定**（DoF = 0）。
 
-    landing plan §5 阶段 3：Context 是九节主链里唯一真弱的一节，而宽度是它的核心读数。
-    起步版**刻意不设阈值**—— 一旦给它一条线，它就从观察层变成会改仓位的东西，
-    那要走预注册（§2 的 DoF 预算）。跑 ≥8 周再谈。
+    起步版**刻意不设阈值** —— 一旦给它一条线，它就从观察层变成会改仓位的东西，
+    那要走预注册。
 
     🚨 **两个口径必须播报，否则就是「全池固定阈值 = 没有阈值」的同款错误**：
-      ① `book` = 这本书自己（12 张活跃卡）—— 样本极小，但**它才是我们的暴露**；
+      ① `book` = 这本书自己 —— 样本极小，但**它才是我们的暴露**；
       ② `pool` = `klines_deep` 去相关池（~167 票）—— **不是任何指数的成分**，
          是为回测去相关自己挑的，所以它是**有偏代理**，不是「市场」；
-         而且 `klines_deep` 不入 git、**无刷新 SLA**（BACKLOG 已登记）⇒ 必须报 as_of。
+         而且 `klines_deep` 不入 git、**无刷新 SLA** ⇒ 必须报 as_of。
     """
     if asof in _BREADTH_CACHE:
         return _BREADTH_CACHE[asof]
@@ -394,8 +400,8 @@ def structure_block(ticker: str, bars: List[dict], card: Optional[Dict]) -> Dict
     }
     if weekly and weekly["trend"] != "insufficient" and daily["trend"] != "insufficient":
         out["timeframe_conflict"] = weekly["trend"] != daily["trend"]
-    # 短期道氏：四步状态机（core/dow）。快照标签只有「最近两个摆动点」且不记序列，
-    # 形态语法最小尺度 35 根 —— 两者都看不见「一周内处在趋势终止的第几步」。
+    # 短期道氏：四步状态机（core/dow）。快照标签只有「最近两个摆动点」且不记序列 ——
+    # 看不见「一周内处在趋势终止的第几步」。
     out["dow"] = dow_block(ticker, bars, atr20)
 
     # 卡片：regime / gate / zone 位置（**只读，不判定授权**）
@@ -450,14 +456,14 @@ def dow_block(ticker: str, bars: List[dict], atr20: Optional[float]) -> Dict:
     量只做**限定词**（破坏日 / 终止日的 RelVR，反弹腿 vs 回调腿的均量比），不驱动阶段
     —— 阶段由价格序列给，这与「力果不携带方向」同一条纪律。
     """
-    st = dow.structure_state(bars)
+    state = dow.structure_state(bars)
     close = float(bars[-1]["close"])
-    view: Dict = {k: st.get(k) for k in (
+    view: Dict = {k: state.get(k) for k in (
         "trend", "phase", "stage_cn", "labels", "bars_in_phase", "candidate",
         "leg_volume", "obs_start", "last_resolution", "imp", "ret", "obs", "cnt",
         "retrace", "swings")}
-    view["retrace_at_form"] = st.get("retrace_at_form")
-    view["lines"] = {k: _gap_of(v, close, atr20) for k, v in (st.get("watch") or {}).items()}
+    view["retrace_at_form"] = state.get("retrace_at_form")
+    view["lines"] = {k: _gap_of(v, close, atr20) for k, v in (state.get("watch") or {}).items()}
     # 嵌套第二级：同一台机器跑**走完的**周 K（resample_weekly 丢未完成周 = 无前视）。
     # 道氏本来就是 primary / secondary / minor 三层；只有一层时「终止」分不清回调与反转。
     wk_bars = technical.resample_weekly(bars)
@@ -469,7 +475,7 @@ def dow_block(ticker: str, bars: List[dict], atr20: Optional[float]) -> Dict:
     view["nested"] = nested_reading(view)
     view["effort"] = {}
     n = len(bars)
-    for e in (st.get("events") or [])[-4:]:
+    for e in (state.get("events") or [])[-4:]:
         if e["type"] in ("obs1", "obs2", "obs3", "terminate", "resume") \
                 and n - 1 - e["idx"] <= 2 * RECENT_BARS:
             val, _, _ = rel_volume(bars[:e["idx"] + 1], ticker)
@@ -715,7 +721,6 @@ def price_action_block(bars: List[dict], atr20: Optional[float]) -> Dict:
     out["close_label"] = ("强收" if cp is not None and cp >= CLOSE_STRONG else
                           "弱收" if cp is not None and cp <= CLOSE_WEAK else "中性收")
     # 上/下影线相对实体 —— 只作为**观测特征**，不作为独立信号
-    # （Bulkowski: 长上影 59% ≈ 近随机 rank 55/103；Marshall 等对整类 K 线负面）
     if rng > 0:
         upper, lower = h - max(o, c), min(o, c) - l
         out["wick"] = {"upper_pct": round(upper / rng * 100), "lower_pct": round(lower / rng * 100)}
@@ -790,281 +795,185 @@ def indicator_block(bars: List[dict]) -> Dict:
 
 
 # ══════════════════════════════════════════════════════════════════
-# ⑦ 判读 + ⑧ 机会
+# ⑥ 两种模式
 # ══════════════════════════════════════════════════════════════════
 
-def synthesize(struct: Dict, pa: Dict, vol: Dict, ind: Dict, pats: List[Dict]) -> Dict:
-    """机械判读：把六步事实压成两三句。**不加入任何本函数之外的信息。**
+def _pct_n(level: Optional[float], close: float, atr: Optional[float]) -> str:
+    """「距现价 −3.2%/1.2N」—— 线到现价的有符号距离（线在下为负）。"""
+    if level is None or not close:
+        return ""
+    pct = (level / close - 1) * 100
+    n = f"/{abs(level - close) / atr:.1f}N" if atr else ""
+    return f"{pct:+.1f}%{n}"
 
-    这一段是 `heartbeat` 推 `fired_cards` 原文那条规矩的同款：会被人当结论读的
-    文本必须由代码渲染，叙述者只能在它**之上**追加，不能替代它。
-    """
-    lines: List[str] = []
-    d, w = struct["daily"]["trend"], (struct["weekly"] or {}).get("trend")
-    tf = {"up": "上升", "down": "下降", "transition": "混合(HH+LL 类)",
-          "insufficient": "样本不足"}
-    if w:
-        lines.append(f"结构：日线{tf.get(d, d)} / 周线{tf.get(w, w)}"
-                     + ("　⚠️ 两级分歧 —— 大周期没转，小周期先动（或反之）"
-                        if struct.get("timeframe_conflict") else "　两级同向"))
+
+def bottom_block(bars: List[dict], atr20: Optional[float], dv: Optional[Dict]) -> Dict:
+    """模式 1 抄底：`core/setups.bottom_setup` + 周线级先验 + 探针 [FYI] + 墙。"""
+    b = setups.bottom_setup(bars)
+    close = float(bars[-1]["close"])
+    b["dist"] = {
+        "low": _pct_n(b.get("low"), close, atr20),
+        "bounce_high": _pct_n(b.get("bounce_high"), close, atr20),
+        "pullback_low": _pct_n(b.get("pullback_low"), close, atr20),
+        "lh": _pct_n(b.get("lh"), close, atr20),
+    }
+    b["probe"] = setups.probe_marker(bars, atr20) if b.get("listed") else None
+    wk = (dv or {}).get("weekly")
+    if wk:
+        wph = "推进中" if wk["phase"] == 0 else f"观察{'①②③'[wk['phase'] - 1]}"
+        b["weekly_cn"] = f"周线级{TREND_CN[wk['trend']]}·{wph}"
+        b["weekly_prior"] = ("反弹先验" if wk["trend"] == "down" and wk["phase"] <= 1 else
+                             "两级共振" if wk["trend"] == "down" else
+                             "大级别回调结束候选")
     else:
-        lines.append(f"结构：日线{tf.get(d, d)}（周线样本不足）")
-    dv = struct.get("dow") or {}
-    if dv.get("trend"):
-        lines.append("短期道氏：" + dv["stage_cn"]
-                     + (f"　{_res_mark(dv['recent_resolution'], dv['trend'])} {dv['recent_resolution']['date']} "
-                        f"{dv['recent_resolution']['cn']}" if dv.get("recent_resolution") else ""))
-
-    zp = struct.get("zone_position")
-    if zp:
-        lines.append("位置：" + {"zone1": "在吸纳带 z1 内", "zone2": "在吸纳带 z2 内",
-                                "trim": "在减仓带内", "waiting": "等待区（z1 与 trim 之间）",
-                                "above_no_chase": "已越过不追价上限",
-                                "gap_z1_z2": "两条吸纳带之间",
-                                "below_zones": "在全部吸纳带之下"}.get(zp, zp))
-    ab = (struct.get("walls") or {}).get("above") or []
-    be = (struct.get("walls") or {}).get("below") or []
-    if ab or be:
-        lines.append("　　头顶 " + (f"{ab[0]['level']}({ab[0]['kind']}, {ab[0]['dist_n']}N)" if ab else "±3N 内无墙")
-                     + " / 脚下 " + (f"{be[0]['level']}({be[0]['kind']}, {be[0]['dist_n']}N)" if be else "±3N 内无墙"))
-
-    if vol.get("cell"):
-        lines.append(f"力果：{vol['effort']}×{vol['result']} → {vol['cell']}")
-        lines.append("　　⚠️ 这一格**不携带方向**—— 方向由位置（在哪条线上）与前置状态给。"
-                     "同一根放量在大市值低价差票上偏反转、在小市值高价差票上偏延续（LMSW02）")
-
-    live = [p for p in pats if p["state"] != "invalidated"]
-    if live:
-        p = live[0]
-        lines.append(f"形态假设：{p['cn']}（{patterns.STATE_CN[p['state']]}）"
-                     f"　[{p['evidence']}]")
-        lines.append(f"　　确认 = {p['confirm_if']}")
-        lines.append(f"　　证伪 = {p['invalidate_if']}")
-    else:
-        lines.append(f"形态假设：{patterns.summarize(pats)}")
-    return {"lines": lines}
+        b["weekly_cn"], b["weekly_prior"] = None, None
+    return b
 
 
-REVERSAL_NAMES = {"HS", "IHS", "DTOP", "DBOT", "RWEDGE", "FWEDGE"}
-RANGE_NAMES = {"RTOP", "RBOT", "TTOP", "TBOT"}
+def _last_up_transition(agent: Optional[Dict]) -> Optional[Dict]:
+    hist = ((agent or {}).get("regime_history") or [])
+    for h in reversed(hist):
+        if str(h.get("direction")) == "up" and h.get("date"):
+            return h
+    return None
 
 
-def posture(struct: Dict, pa: Dict, vol: Dict, ind: Dict, pats: List[Dict]) -> Dict:
-    """**「后续会怎么走」的三个候选，各自列出支持它的观测 —— 不给概率。**
+def _bars_since(bars: List[dict], day: str) -> Optional[int]:
+    """`day` 之后有几根完成日线（0 = day 就是最后一根）。day 不在序列内 → 按日期比较。"""
+    d = str(day)[:10]
+    later = sum(1 for b in bars if str(b.get("time", ""))[:10] > d)
+    if not any(str(b.get("time", ""))[:10] <= d for b in bars):
+        return None
+    return later
 
-    这一段直接回答核心目的里的「这会继续延续 / 这后续会震荡 / 这可能见顶」。
 
-    🚨 **为什么没有概率**：给概率就要有校准，我们从来没校准过这三类的先验。
-    本仓已经为「未经校准的分数」付过一次学费 —— `sss_backtest` 的连续评分
-    在 123,576 个样本上非但没有单调性，高分带还轻微反向。所以这里给的是
-    **支持观测的清单**，让 用户 自己权衡；三栏可以同时有勾，那不是矛盾，
-    是「这只票现在确实处在一个两可的位置」的诚实表达。
+def trend_setup(ticker: str, agent: Optional[Dict], bars: List[dict], atr20: Optional[float],
+                gate_cls: Optional[str] = None) -> Dict:
+    """模式 2 趋势确认：卡片的转移轴（`next_regime.entry_gate`）走到哪一步。
+
+    状态（`core/setups.TREND_STATES`）：
+      transitioned  最近一次上行转移 ≤ RECENT_BARS 根前（已形成；卡上的 gate 已是下一道）
+      standing      连续收盘 > gate ≥ N 日但量腿未过（价腿成立、转移未发生）
+      counting      1 ≤ streak < N（⏳ m/n）
+      near          收盘在 gate 之下 ≤ 1N（即将形成）
+    量腿 / streak / 快车道全部读 `regime_transition` 与 `gate_ladder_report` 同一份函数，
+    本模块不另造。无卡 / 无转移轴 → {"state": None}。
     """
-    d = struct["daily"]["trend"]
-    w = (struct["weekly"] or {}).get("trend")
-    walls = struct.get("walls") or {}
-    up_w = (walls.get("above") or [None])[0]
-    dn_w = (walls.get("below") or [None])[0]
-    live = [p for p in pats if p["state"] in ("shaped", "triggered")]
-    cont: List[str] = []
-    rng: List[str] = []
-    rev: List[str] = []
-
-    if d in ("up", "down"):
-        cont.append(f"日线有方向（{d}）")
-        if w == d:
-            cont.append("周线同向（两级共振）")
-    if d == "up" and "MA20" in ind["above_ma"] and "MA60" in ind["above_ma"]:
-        cont.append("站上 MA20 与 MA60")
-    if d == "down" and not ind["above_ma"]:
-        cont.append("MA 全线之下")
-    if vol.get("cell", "").startswith("驱动"):
-        cont.append("力果落在驱动格（放量走出果）")
-    if (struct.get("_rs") or 0) > 0 and d == "up":
-        cont.append("相对基准领先")
-
-    if d == "transition":
-        rng.append("日线结构混合（HH+LL 类）")
-    rc = ind.get("range_contraction")
-    if rc is not None and rc < 0.85:
-        rng.append(f"波动收缩（{rc}）")
-    if up_w and dn_w and up_w["dist_n"] <= 1.0 and dn_w["dist_n"] <= 1.0:
-        rng.append(f"上下两堵墙都在 1N 内（{dn_w['level']} / {up_w['level']}）")
-    for p in live:
-        if p["name"] in RANGE_NAMES:
-            rng.append(f"{p['cn']} 已成立（区间/收敛形状）")
-    if struct.get("zone_position") in ("waiting", "gap_z1_z2"):
-        rng.append("价格在两带之间的无人区")
-
-    for p in live:
-        if p["name"] in REVERSAL_NAMES:
-            rev.append(f"{p['cn']}（{patterns.STATE_CN[p['state']]}）[{p['evidence']}]")
-    if w and d != "insufficient" and w != "insufficient" and w != d:
-        rev.append(f"日线({d})与周线({w})分歧")
-    if vol.get("cell", "").startswith("吸收") and up_w and up_w["dist_n"] <= 1.0:
-        rev.append("力大果小 且 头顶 1N 内有墙（供给吸收候选）")
-    if (ind.get("divergence") or {}).get("detected"):
-        rev.append("动量背离（rsi_div/macd_div 合并计一票）")
-    if d == "up" and pa.get("close_label") == "弱收" and up_w and up_w["dist_n"] <= 0.5:
-        rev.append("上升中在墙下弱收")
-    if d == "down" and pa.get("close_label") == "强收" and dn_w and dn_w["dist_n"] <= 0.5:
-        rev.append("下降中在墙上强收（止跌候选）")
-
-    # 短期道氏四步（core/dow）：推进中 → 延续；观察期 → 反转栏；②③夹在两条线之间 → 震荡栏
-    dv = struct.get("dow") or {}
-    if dv.get("trend"):
-        up = dv["trend"] == "up"
-        res = dv.get("recent_resolution")
-        if dv["phase"] == 0:
-            if dv["trend"] == d:
-                cont.append(f"短期道氏推进中（{dv['labels']}，尚无{'阴' if up else '阳'}线破坏）")
-            elif d in ("up", "down"):
-                rev.append(f"短期道氏序列为{TREND_CN[dv['trend']]}（与 5 根分形快照 {d} 相反）")
-        if res and res["type"] == "resume":
-            cont.append(f"观察期内{'收复 lsh' if up else '跌破 lsl'}（洗盘后延续，{res['date']}）")
-        if dv["phase"] in (2, 3) and dv["lines"].get("terminate_level"):
-            rng.append(f"观察期内夹在 {dv['lines']['terminate_level']['level']:g} 与 "
-                       f"{dv['lines']['resume_level']['level']:g} 之间")
-        if dv["phase"] >= 1:
-            rev.append(f"短期道氏 {dv['stage_cn']}")
-        if res and res["type"] == "terminate":
-            rev.append(f"短期道氏 {res['cn']}（{res['date']}）")
-        nk = (dv.get("nested") or {}).get("key")
-        if nk in ("pullback_prior", "bounce_prior"):
-            cont.append("周线级结构未动（日线级观察 = 回调/洗盘先验）")
-        elif nk in ("both_obs", "higher_down", "higher_up"):
-            rev.append("周线级同向（两级共振）" if nk == "both_obs" else "周线级已翻面（大级别延续）")
-
-    return {"continuation": cont, "range": rng, "reversal": rev,
-            "note": "三栏可同时有勾 = 位置本身两可；**不给概率**（我们没校准过）"}
-
-
-def _resolved_hypothesis(p: Dict, atr20: Optional[float]) -> str:
-    """已破确认线的形态怎么写 —— **已然式 + 破哪边 + 破了多远 + 现在的证伪线**。
-
-    用户  抓：「收盘突破最近高点 211.08 = 向上解决」印在一张收 224.09
-    的卡上，读起来像在等一件 12 根前就发生完的事，而且把「往哪边解决的」这个
-    唯一有用的信息丢了 —— 容器型形态的方向**只**由破哪边决定，不写就等于没判读。
-    """
-    lvl, close = p.get("confirm_level"), p.get("last_close")
-    side = {"up": "向上", "down": "向下"}.get(p.get("resolved_side") or "", "")
-    bits = []
-    if close is not None and lvl:
-        bits.append(f"收 {close} vs 线 {lvl}")
-        if atr20:
-            bits.append(f"已走 {abs(close - lvl) / atr20:.1f}N")
-    if p.get("bars_since_trigger") is not None:
-        bits.append(f"破线 {p['bars_since_trigger']} 根前")
-    # 原来那条 invalidate_level 是**破线之前**的证伪条件，破了之后它已经过期
-    # （NVDA 三角的 195.44 距现价 -3.8N，印出来是噪音）。破线之后唯一还活着的
-    # 证伪就是走回线的另一侧 = 假突破。
-    back = "之下" if p.get("resolved_side") == "up" else "之上"
-    fail = f"收盘回到 {lvl} {back} = 解决失败（假突破）" if lvl else "走回线的另一侧 = 假突破"
-    return (f"已{side}解决" + (f"（{'，'.join(bits)}）" if bits else "")
-            + f" —— 已发生，不是待确认条件；{fail}")
-
-
-def _hypothesis_tail(p: Dict, atr20: Optional[float]) -> str:
-    """一个形态的假设正文（**不含形态名**）—— 名字抽出去是为了让共线的两个
-    形态能合并成一行，见 `pattern_hypotheses`。"""
-    if p["state"] == "triggered":
-        return _resolved_hypothesis(p, atr20)
-    if p["name"] in patterns.DIRECTIONAL:
-        side = "下行" if p["direction"] == "bearish" else "上行"
-        return (f"若成立 = {side}方向：{p['confirm_if']}；"
-                f"若 {p['invalidate_if']} 则这条假设作废")
-    # 容器型形态（矩形/三角/扩散/楔形）方向未定 —— 不许套用名字里的 TOP/BOT
-    return f"：方向未定，由突破选边 —— {p['confirm_if']}；{p['invalidate_if']}"
-
-
-def pattern_hypotheses(pats: List[Dict], atr20: Optional[float] = None) -> List[str]:
-    """形态假设三件套：**若成立 = 什么方向 · 确认条件 · 证伪条件**。
-
-    用户  指定这就是扫描表上「潜在机会」要的全部内容 —— 只说假设，
-    不说能不能进。两个消费者（详情的 `opportunity` 段 + 扫描表）读同一份，
-    抄第二遍的那天两处就会开始各说各话。
-
-    **共线的形态合并成一行**（用户  裁）：AMZN 的收敛三角底与双底
-    确认线同为 258.08（同一个 pivot），逐字印两遍在推送里就是噪音 —— 而
-    「两个独立形态在同一条线上确认」这件事本身是信息（收敛），值得说出口。
-    合并判据 = **正文逐字相同**（不是「线相近」）：正文里已经带了线、方向、
-    破线年龄、证伪条件，全等就意味着这两行本来就要说同一句话，合并零信息损失；
-    只要有一个字不同（方向不同 / 一个破了一个没破）就不合并。**没有容差参数。**
-    分组在截断**之前**做，所以合并腾出的位置能让第三个形态露出来。
-    """
-    groups: List[Tuple[str, List[Dict]]] = []
-    for p in [x for x in pats if x["state"] != "invalidated"]:
-        tail = _hypothesis_tail(p, atr20)
-        for t, members in groups:
-            if t == tail:
-                members.append(p)
-                break
-        else:
-            groups.append((tail, [p]))
-    out: List[str] = []
-    for tail, members in groups[:2]:
-        names = " + ".join(m["cn"] for m in members)
-        mark = "" if len(members) == 1 else \
-            f"（{'两' if len(members) == 2 else len(members)}个形态共线）"
-        out.append(f"{names}{mark}{tail}")
+    out: Dict = {"state": None, "gate": None}
+    if not agent or not bars:
+        return out
+    close = coerce_float(bars[-1].get("close"))
+    entry = next((g for g in ladder_of(agent) if g.get("kind") == "entry"), None)
+    last_up = _last_up_transition(agent)
+    if last_up:
+        since = _bars_since(bars, last_up["date"])
+        if since is not None and since <= RECENT_BARS:
+            out.update({"state": "transitioned", "since_bars": since,
+                        "level": coerce_float(last_up.get("level")),
+                        "date": str(last_up.get("date"))[:10],
+                        "fastlane": bool(last_up.get("fastlane")),
+                        "reason": str(last_up.get("reason") or "")[:80]})
+    if entry:
+        lvl = float(entry["level"])
+        need = int(entry.get("days") or 2)
+        streak = streak_above(bars, lvl)
+        prox = setups.gate_proximity(close, atr20, lvl, streak, need)
+        vol_ok, vol_note = (volume_leg(bars, entry.get("vol_min"), ticker, streak=streak)
+                            if streak >= 1 else (None, None))
+        tag = PATH_TAGS.get(gate_cls, entry.get("tag") or "收复线")
+        out["gate"] = {"level": lvl, "need": need, "streak": streak, "tag": tag,
+                       "label": entry.get("label"), "vol_min": entry.get("vol_min"),
+                       "vol_ok": vol_ok, "vol_note": vol_note,
+                       "dist_pct": prox["dist_pct"] if prox else round((lvl / close - 1) * 100, 2) if close else None,
+                       "dist_n": prox["dist_n"] if prox else (round((lvl - close) / atr20, 2) if (atr20 and close) else None)}
+        if streak == 1 and atr20 and close is not None:
+            out["gate"]["fastlane"] = fastlane_state(bars, close, atr20, entry, 1, ticker, gate_cls)
+        if out["state"] is None and prox:
+            out["state"] = prox["state"]
+    if out["state"]:
+        meta = setups.TREND_STATES[out["state"]]
+        out.update(cn=meta["cn"], formed=meta["formed"], rank=meta["rank"])
     return out
 
 
-def opportunity(struct: Dict, pats: List[Dict]) -> Dict:
-    """潜在机会 —— **只指路，不发牌**。
+def _next_step(b: Dict) -> str:
+    """抄底框架里「下一根要看什么」—— 阶段 → 确认 / 证伪条件。"""
+    stg = b.get("stage")
+    if stg == "watch":
+        return f"明日不再新低 = ✓止跌（止损 = 今日低 {b['low']:g}）；再新低 = 框架顺延到新低"
+    if stg == "formed":
+        hh, hl = bool(b.get("above_lh")), bool(b.get("higher_low"))
+        want = []
+        if not hh and b.get("lh"):
+            want.append(f"收盘越前高 {b['lh']:g}")
+        if not hl:
+            want.append("回踩低不破止跌低且次日未再新低 = 更高的低点")
+        tail = "；".join(want) if want else "两个反转事实都已成立 → 此后看 gate（模式 2）"
+        return f"{tail}；收破止跌低 {b['low']:g} = ✗反弹结束"
+    return "—"
 
-    这里刻意不算 cap / 股数 / 限价：那是 `entry_guard` 与 `sizing.entry_cap` 的活，
-    第二份实现会立刻变成第二个真源（本仓最贵的一类 bug）。
-    """
-    items: List[str] = []
-    reg = struct.get("regime") or {}
-    cap = reg.get("cap_pct_nav")
-    gate = struct.get("next_gate")
-    zp = struct.get("zone_position")
 
-    if gate:
-        items.append(f"上行转移轴：{gate['level']}（距 {gate['dist_pct']:+.1f}% / "
-                     f"{gate['dist_n']}N，身份 {gate.get('path', '未判')}）"
-                     " —— 收盘越过 ×N 日 + 量腿成立 = 整张图上移，不只是 cap 变")
-    else:
-        items.append("⚠️ 这张卡没有上行转移轴（`next_regime.entry_gate` 缺）"
-                     " —— 「没有 gate」= 这张图还没读完，它只能活一轮")
-
-    if zp in ("zone1", "zone2"):
-        items.append(f"现价在{zp} —— 入场计划与实际额度跑 "
-                     f"`entry_guard.py --tickers {struct.get('_ticker', '<T>')}`（那里才是授权）")
-    elif zp == "trim":
-        items.append("现价在减仓带 —— 加仓方向的机会不在这里；退出栈告警看 brief")
-    elif zp == "above_no_chase":
-        items.append("现价已越过不追价上限 —— 追价不是机会，等回踩或等 gate 转移后的新图")
-
-    if cap == 0:
-        items.append("⛔ 当前 regime cap 0（无加仓授权）—— 上面的形态判读**不改变这一点**，"
-                     "解除只能靠 gate 转移或重画")
-
-    # 短期道氏：终止确认是裁量复核点；观察期播报恢复线和终止线。
-    dv = struct.get("dow") or {}
-    res = dv.get("recent_resolution")
-    if res and res["type"] == "terminate":
-        if dv["trend"] == "down":
-            items.append(f"🔻 短期道氏：{res['cn']}（{res['date']}）—— "
-                         "这是提前复核的裁量点；"
-                         "stop/棘轮/趋势死亡线仍是硬线（退出栈看 brief / exit_guard），判读层不替它下裁决")
+def setups_lines(r: Dict) -> List[str]:
+    """详情页的「⑥ 两种模式」段。"""
+    b, t = r["setups"]["bottom"], r["setups"]["trend"]
+    L: List[str] = []
+    # 抄底
+    if b.get("listed"):
+        L.append(f"🔁 抄底 {b['cn']}（{'已形成' if b['formed'] else '即将形成'}）"
+                 f"　止跌低 {b['low']:g}（{b['low_date'][5:]}，{b['dist']['low']}）= 止损（下影线低点）"
+                 f"　距 60 日高 {b['dd_at_low']:+.0%}@低 / {b['dd_now']:+.0%}@现价")
+        sh = b.get("shadow") or {}
+        shadow_txt = (f"下影 {sh['lower_pct']}% / 实体 {sh['body_pct']}% / 收盘位 {sh['close_pos']}"
+                      if sh.get("lower_pct") is not None else "影线不可算")
+        if b.get("stage") == "dead":
+            L.append(f"　　{b['why']}")
+        elif b.get("stage") == "watch":
+            L.append(f"　　今日 K 线：{shadow_txt}（不是长下影）")
+            L.append("　　下一步：" + _next_step(b))
         else:
-            items.append(f"🔺 短期道氏：{res['cn']}（{res['date']}）—— 修复路径的早信号；"
-                         "授权仍只看 gate 转移，这条不改变 cap")
-    elif dv.get("phase", 0) >= 1:
-        ln = dv["lines"]
-        tail = (f" / {'终止' if dv['trend'] == 'up' else '反转'}确认线 "
-                f"{ln['terminate_level']['level']:g}{_g(ln['terminate_level'])}"
-                if ln.get("terminate_level") else " / 等新折返点成形")
-        items.append(f"短期道氏观察期{'①②③'[dv['phase'] - 1]}：恢复线 "
-                     f"{ln['resume_level']['level']:g}{_g(ln['resume_level'])}" + tail)
-
-    items += pattern_hypotheses(pats, struct.get("atr20"))
-    return {"items": items,
-            "disclaimer": "以上是判读，不是授权。能不能下、下多少，"
-                          "以 entry_guard / 卡片 zones / sizing.entry_cap 为准。"}
+            L.append(f"　　衰竭证据 {b['signal']}（信号日 {b['signal_date'][5:]}，{b['bars_since_signal']} 根前）"
+                     f"　止跌日 K 线 {shadow_txt}"
+                     + (f"　量比 {b['low_bar_vol_ratio']}" if b.get("low_bar_vol_ratio") is not None else "")
+                     + f"　收盘{'已' if b.get('above_low_bar_high') else '未'}站上止跌日高 {b['low_bar_high']:g}")
+            L.append(f"　　反弹 {b['bounce_pct']:+.1%}：反弹高 {b['bounce_high']:g}（{b['bounce_high_date'][5:]}，{b['dist']['bounce_high']}）"
+                     + (f"　回踩低 {b['pullback_low']:g}（{b['pullback_low_date'][5:]}，{b['dist']['pullback_low']}"
+                        + (f"，更高的低点 {str(b.get('higher_low_date') or '')[5:]} 守住" if b.get("higher_low") else "，回踩进行中")
+                        + "）" if b.get("pullback_low") else "")
+                     + (f"　前高 {b['lh']:g}（{b['lh_date'][5:]}，{b['dist']['lh']}）" if b.get("lh") else "　前高无（60 日内无分形高）"))
+            L.append("　　下一步：" + _next_step(b))
+        if b.get("undercut_prev"):
+            L.append(f"　　⚠️ {b['undercut_prev']['cn']} —— 止损在下影线低点的仓位盘中已被扫，归执行层裁")
+        if b.get("verdict"):
+            L.append(f"　　反弹 vs 反转：{b['verdict']}"
+                     + (f"　｜ {b['weekly_cn']}（{b['weekly_prior']}）" if b.get("weekly_cn") else ""))
+        if b.get("probe"):
+            L.append(f"　　[FYI] {b['probe']} —— 授权层的反转探针信号（PLAN/VETO 看 entry_guard）")
+    else:
+        why = b.get("why") or setups.STAGES[b["stage"]]["desc"]
+        L.append(f"🔁 抄底：不在形态内（{why}）")
+    # 趋势确认
+    g = t.get("gate")
+    if t.get("state"):
+        head = f"🚀 趋势确认 {t['cn']}（{'已形成' if t['formed'] else '即将形成'}）"
+        if t["state"] == "transitioned":
+            head += (f"　{t['date'][5:]} 站稳 {t['level']:g}（{t['since_bars']} 根前"
+                     + ("，⚡快车道" if t.get("fastlane") else "") + "）")
+        L.append(head)
+    else:
+        L.append("🚀 趋势确认：不在形态内（无转移轴或 gate 在 1N 之外）" if not g else
+                 f"🚀 趋势确认：不在形态内（gate {g['level']:g} 距 {g['dist_pct']:+.1f}%/{g['dist_n']}N，>1N）")
+    if g:
+        st_txt = (f"✅ {g['streak']}/{g['need']}" if g["streak"] >= g["need"] else
+                  f"⏳ {g['streak']}/{g['need']}" if g["streak"] >= 1 else "▫️ 0/" + str(g["need"]))
+        vol = ("" if g["vol_ok"] is None else
+               f"　量腿 {'✓' if g['vol_ok'] else '✗'}" + (f"（{g['vol_note']}）" if g.get("vol_note") else ""))
+        L.append(f"　　{'下一' if t.get('state') == 'transitioned' else ''}gate {g['level']:g} {g['tag']}"
+                 f"　{st_txt}　距 {g['dist_pct']:+.1f}%/{g['dist_n']}N{vol}")
+        fl = g.get("fastlane")
+        if fl and fl.get("domain") == "repair":
+            L.append(f"　　⚡快车道 首日超 {fl['over_n']:.2f}N（门槛 0.5N）"
+                     f" 幅度{'✓' if fl['mag_ok'] else '✗'} 量腿{'✓' if fl['vol_ok'] else '✗'}")
+    return L
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1085,38 +994,28 @@ def read(ticker: str, asof: Optional[str] = None) -> Dict:
     pa = price_action_block(bars, atr20)
     vol = volume_block(t, bars, pa)
     ind = indicator_block(bars)
-    pats = patterns.detect_multi(bars)
+    bottom = bottom_block(bars, atr20, struct.get("dow"))
+    trend = trend_setup(t, (card or {}).get("agent"), bars, atr20,
+                        gate_cls=((struct.get("next_gate") or {}).get("path")))
     return {
         "ticker": t, "asof": pa["date"], "bars": len(bars),
         # ⚠️ `--asof` 只截断**价格**，卡片读的仍是**今天**那张（zones/regime/gate 都是现在的值）。
         # 拿今天的卡去跑过去的 bar = 前视，只能当「输出面长什么样」的样张，**不能当证据**。
-        # （design §11.5 注 1 同款：COHR 的 zones 是 8/11 重画的，却被用来读 8/07 的 bar。）
         "card_stale_earnings": earnings_stale_cards(asof).get(t),
         "lookahead_warning": ("卡片是**今天**那张（zones/regime/gate 未回溯）= 前视，"
                               "复盘样张可用，作证据不可用") if asof else None,
         "merge_note": merge_note, "context": ctx,
         "structure": struct, "price_action": pa, "volume": vol,
-        "indicators": ind, "patterns": pats,
-        "read": synthesize(struct, pa, vol, ind, pats),
-        "posture": posture(struct, pa, vol, ind, pats),
-        "opportunity": opportunity(struct, pats),
+        "indicators": ind,
+        "setups": {"bottom": bottom, "trend": trend},
+        "disclaimer": DISCLAIMER,
     }
 
 
-def _gap(level: Optional[float], pa: Dict, s: Dict) -> str:
-    """「距现价还有多远」—— 让「未触发」这个词自明。
+DISCLAIMER = ("以上是判读，不是授权。能不能下、下多少，"
+              "以 entry_guard / 卡片 zones / sizing.entry_cap 为准。")
 
-     用户 当场问「未触发是什么意思」：状态词本身不自明，
-    但「确认线 432.50，距现价 +31.6% / 3.1N」是自明的 ——
-    **一条 3N 之外的确认线和一条 0.2N 之外的确认线，是完全不同的两件事**，
-    而状态词把它们说成同一个「未触发」。
-    """
-    close, atr = pa.get("close"), s.get("atr20")
-    if not level or not close:
-        return ""
-    pct = (level / close - 1) * 100
-    n = f" / {abs(level - close) / atr:.1f}N" if atr else ""
-    return f"　〔距现价 {pct:+.1f}%{n}〕"
+TREND_CN = {"up": "上涨", "down": "下跌", "transition": "震荡", "insufficient": "方向未定"}
 
 
 def render(r: Dict) -> str:
@@ -1124,16 +1023,14 @@ def render(r: Dict) -> str:
         return f"── {r['ticker']}　{r['error']}"
     L: List[str] = []
     pa, s, v, i = r["price_action"], r["structure"], r["volume"], r["indicators"]
-    L.append(f"━━━ {r['ticker']}　{r['asof']} 收盘 ${pa['close']}"
-             f"（{pa['chg_pct']:+.2f}%）　{len(r['patterns'])} 个形态假设 ━━━")
+    L.append(f"━━━ {r['ticker']}　{r['asof']} 收盘 ${pa['close']}（{pa['chg_pct']:+.2f}%） ━━━")
     if r.get("merge_note"):
-        L.append(f"　⚠️ {r['merge_note']}（序列不连续，MA60/形态可能失真）")
+        L.append(f"　⚠️ {r['merge_note']}（序列不连续，MA60 可能失真）")
     if r.get("lookahead_warning"):
         L.append(f"　🚫 {r['lookahead_warning']}")
     if r.get("card_stale_earnings"):
         L.append(f"　🚨 **卡片待重画（财报 SLA）**：{r['card_stale_earnings']}")
-        L.append("　　→ 下面的 zone / gate / regime 来自**不含反应日的旧图**，"
-                 "重画前只当价格读数看")
+        L.append("　　→ 下面的 gate / regime 来自**不含反应日的旧图**，重画前只当价格读数看")
 
     c = r["context"]
     idx = "　".join(f"{k} {vv['chg_1d']:+.2f}%(5d {vv['chg_5d']:+.1f}%)"
@@ -1168,9 +1065,7 @@ def render(r: Dict) -> str:
     L.extend("　　" + x for x in dow_lines(s.get("dow")))
     if s.get("regime"):
         rg = s["regime"]
-        L.append(f"　　regime {rg['name']}　cap {rg['cap_pct_nav']}　"
-                 f"since {rg['since']}　[{rg['bucket']}]"
-                 + (f"　zone位置 {s['zone_position']}" if s.get("zone_position") else ""))
+        L.append(f"　　regime {rg['name']}　since {rg['since']}　[{rg['bucket']}]")
     if s.get("next_gate"):
         g = s["next_gate"]
         L.append(f"　　next gate {g['level']}（{g['dist_pct']:+.1f}% / {g['dist_n']}N，"
@@ -1203,105 +1098,20 @@ def render(r: Dict) -> str:
              + ("　动量背离 ✓" if (i.get("divergence") or {}).get("detected") else ""))
     L.append(f"　　{i['axis_note']}")
 
-    L.append(f"⑥ 形态　　{patterns.summarize(r['patterns'])}")
-    for p in r["patterns"]:
-        mark = patterns.STATE_CN[p["state"]]
-        scale = f"{p['window']}日窗" + ("" if p.get("lo_calibrated") else "·尺度外推")
-        L.append(f"　　{mark}　{p['cn']}（{p['name']}）　关键位 {p['key_level']}"
-                 f"　{scale}　[{p['evidence']}]")
-        L.append(f"　　　　确认 → {p['confirm_if']}{_gap(p.get('confirm_level'), pa, s)}")
-        L.append(f"　　　　证伪 → {p['invalidate_if']}{_gap(p.get('invalidate_level'), pa, s)}")
-        pts = "　".join(f"{x['date']}@{x['price']}" for x in p["points"])
-        L.append(f"　　　　极值 {pts}")
-        if p["note"]:
-            L.append(f"　　　　注 {p['note']}")
-
-    L.append("━━ 判读 ━━")
-    L.extend("　" + x for x in r["read"]["lines"])
-    ps = r["posture"]
-    L.append("━━ 后续倾向（各栏列支持它的观测；**不给概率**）━━")
-    for key, label in (("continuation", continuation_label(s)), ("range", "震荡"),
-                       ("reversal", "反转/见顶底")):
-        items = ps[key]
-        L.append(f"　{label}({len(items)})　" + ("　".join("✓" + x for x in items) if items else "—"))
-    L.append(f"　{ps['note']}")
-    L.append("━━ 潜在机会（判读层，零授权效力）━━")
-    L.extend("　• " + x for x in r["opportunity"]["items"])
-    L.append("　" + r["opportunity"]["disclaimer"])
+    L.append("⑥ 两种模式（判读层，零授权效力）")
+    L.extend("　" + x for x in setups_lines(r))
+    L.append("　" + r["disclaimer"])
     return "\n".join(L)
 
 
-TREND_CN = {"up": "上涨", "down": "下跌", "transition": "震荡", "insufficient": "方向未定"}
+# ══════════════════════════════════════════════════════════════════
+# 推送：两种模式清单（只列这两种形态已形成或即将形成的标的）
+# ══════════════════════════════════════════════════════════════════
 
-
-def continuation_label(struct: Dict) -> str:
-    """「延续」延续的是**什么**—— 用户：「延续的话是延续上涨还是
-    延续下跌还是延续震荡」。方向不是新判断，就是当前日线趋势本身；
-    光写「延续 3」等于让读的人自己回去翻结构。"""
-    return "延续" + TREND_CN.get(struct["daily"]["trend"], "方向未定")
-
-
-def dow_digest_line(dv: Optional[Dict], label: bool = True) -> str:
-    """扫描表上的结构行 —— 一行：第几步 + 要看的线 + 距离。
-
-    `label=False` 去掉「结构 」前缀：票头下面只有这一行时，标签就是重复。
-    """
-    tag = "结构 " if label else ""
-    if not dv or not dv.get("trend"):
-        return tag + "方向未定（K 线不足）"
-    up = dv["trend"] == "up"
-    ln, ph = dv["lines"], dv["phase"]
-    head = f"{tag}{TREND_CN[dv['trend']]}·"
-    if ph == 0:
-        body = (f"推进中 {dv['labels']} ｜ {'lsh' if up else 'lsl'} {ln['imp_level']['level']:g}"
-                f"{_g(ln['imp_level'])} ｜ {'阴' if up else '阳'}线收{'破' if up else '上'}"
-                f"{ln['trigger_ref']['level']:g}=观察①")
-    else:
-        parts = [f"{'终止观察' if up else '止跌观察'}{'①②③'[ph - 1]}"]
-        ob = dv.get("obs_start")
-        cand = dv.get("candidate")
-        if ph == 1:
-            if ob:
-                parts.append(f"{ob['date'][5:]}{'阴' if up else '阳'}线破坏")
-            if cand:
-                parts.append(f"候选{cand['role']}{cand['price']:g}({cand['confirm_if']}即成形)")
-            parts.append(f"{'收复' if up else '跌破'}{ln['resume_level']['level']:g}"
-                         f"{_g(ln['resume_level'])}=延续")
-        elif ph == 2:
-            parts.append(f"{'lsl' if up else 'lsh'} {ln['terminate_level']['level']:g} 已成形")
-            parts.append(f"{'反弹' if up else '回踩'}看{'lsh' if up else 'lsl'} "
-                         f"{ln['resume_level']['level']:g}{_g(ln['resume_level'])}")
-            parts.append(f"{'跌破' if up else '站上'}{ln['terminate_level']['level']:g}"
-                         f"={'终止确认' if up else '反转确认'}")
-        else:
-            parts.append(f"{'LH' if up else 'HL'} {ln['cnt_level']['level']:g} 已定格" if ln.get("cnt_level")
-                         else ("反弹失败" if up else "回踩守住"))
-            parts.append(f"{'跌破' if up else '站上'}{ln['terminate_level']['level']:g}"
-                         f"{_g(ln['terminate_level'])}={'终止确认' if up else '反转确认'}")
-        r = dv.get("retrace")
-        rf = dv.get("retrace_at_form")
-        if r and r["broke_prev_ret"]:
-            # 动词带方向：上涨 = 回调跌破前 HL；下跌 = 反弹站上前 LH。
-            pr = ln.get("prev_ret")
-            lvl = f" {pr['level']:g}" if pr else ""
-            parts.append(f"回调已跌破前HL{lvl}(整段吐回)" if up else f"反弹已站上前LH{lvl}(整段收复)")
-        elif rf:
-            parts.append(f"回撤带{rf['band']}")
-        body = " ｜ ".join(parts)
-    wk = dv.get("weekly")
-    if wk:
-        nk = (dv.get("nested") or {}).get("key")
-        tag = {"pullback_prior": "洗盘先验", "both_obs": "两级共振", "higher_down": "大级别延续",
-               "bounce_prior": "反弹先验", "higher_up": "大级别回调结束候选"}.get(nk, "")
-        wph = "推进中" if wk["phase"] == 0 else f"观察{'①②③'[wk['phase'] - 1]}"
-        body += f" ｜ 周线级{TREND_CN[wk['trend']]}·{wph}" + (f"({tag})" if tag else "")
-    res = dv.get("recent_resolution")
-    if res:
-        body += f"　{_res_mark(res, dv['trend'])}{res['date'][5:]} {res['cn']}"
-    return head + body
-
-
-DIGEST_TABLE_HEADER = ("| 票 | 档 | 结构 |", "|---|:-:|---|")
+BOTTOM_TABLE_HEADER = ("| 票 | 止跌 | 止跌低=stop | 反弹 | 前高 | 反弹/反转 |",
+                       "|---|---|---|---|---|---|")
+TREND_TABLE_HEADER = ("| 票 | 状态 | gate | 计数 | 量腿 | 距离 |",
+                      "|---|---|---|---|---|---|")
 
 
 def _cell(x) -> str:
@@ -1309,56 +1119,121 @@ def _cell(x) -> str:
     return str(x).replace("|", "\\|").replace("\n", " · ").strip()
 
 
-def digest_row(r: Dict) -> str:
-    """扫描表一行 = 一只票（GFM 表行, 富消息通道渲染成原生表格）:
-    票（+ 🚨待重画）| 档（优先/次位/末位 = `dow.priority`, 与盘前清单同尺）| 短期道氏结构一行。
+def _row(cells) -> str:
+    return "| " + " | ".join(_cell(c) for c in cells) + " |"
 
-    只留下结构列 —— 早先定的四件
-    （力果 / 形态 / 倾向 / 机会）退回 `--tickers <T>` 详情页，只有 08-22 早加的第五件
-    （结构）留在推送上。**收盘价 / 涨跌 / 日周 / 授权 cap / zone 位置照旧不进**
-    —— 判读层搬来授权层的东西，只会让人以为这里能下单。
-    """
+
+def bottom_row(r: Dict) -> str:
+    """抄底表一行 = 一只票：止跌（证据 + 信号日）/ 止跌低（= stop）/ 反弹（幅度 + 反弹高 + 回踩低）/
+    前高 / 反弹 vs 反转（+ 周线级先验 + 探针 FYI）。"""
     who = f"**{r['ticker']}**" + ("  🚨待重画" if r.get("card_stale_earnings") else "")
-    if r.get("error"):
-        return "| " + " | ".join(_cell(c) for c in (who, "—", r["error"])) + " |"
-    dv = (r.get("structure") or {}).get("dow") or {}
-    tier = dow.priority(dv, dv.get("weekly"))["short"]
-    return "| " + " | ".join(_cell(c) for c in (who, tier, dow_digest_line(dv or None, label=False))) + " |"
+    b = r["setups"]["bottom"]
+    sh = b.get("shadow") or {}
+    if b["stage"] == "formed":
+        stage = f"{b['cn']} {b['signal_date'][5:]} {b['signal']}"
+        if sh.get("lower_pct") is not None:
+            stage += f"(下影{sh['lower_pct']}%)"
+        stage += " · 收上止跌日高" if b.get("above_low_bar_high") else " · 未收上止跌日高"
+    elif b["stage"] == "dead":
+        stage = f"{b['cn']} 收{b['close']:g}<{b['low']:g}"
+    else:
+        stage = f"{b['cn']}" + (f"(下影{sh['lower_pct']}%)" if sh.get("lower_pct") is not None else "")
+    if b.get("undercut_prev"):
+        stage += f" ⚠️盘中破{b['undercut_prev']['low']:g}收回"
+    low = f"{b['low']:g} ({b['dist']['low']})"
+    if b["stage"] == "formed":
+        bh = f"{b['bounce_pct']:+.1%} · 高 {b['bounce_high']:g}"
+        if b.get("pullback_low"):
+            bh += f" · 回踩低 {b['pullback_low']:g}" + (
+                f"↑{str(b.get('higher_low_date') or '')[5:]}" if b.get("higher_low") else "")
+    else:
+        bh = "—"
+    lh = f"{b['lh']:g} ({b['dist']['lh']})" if b.get("lh") else "—"
+    verdict = b.get("verdict") or ("明日不再新低=止跌" if b["stage"] == "watch" else "")
+    if b.get("weekly_cn"):
+        verdict += f" ｜ {b['weekly_cn']}"
+    if b.get("probe"):
+        verdict += f" ｜ {b['probe']}"
+    return _row((who, stage, low, bh, lh, verdict))
 
 
-def digest_block(r: Dict) -> List[str]:
-    """兼容名: 一只票在扫描表上的全部内容 = 一行表行。"""
-    return [digest_row(r)]
+def trend_row(r: Dict) -> str:
+    """趋势确认表一行：状态 / gate（线名）/ 计数 m/n / 量腿 / 距离。"""
+    who = f"**{r['ticker']}**" + ("  🚨待重画" if r.get("card_stale_earnings") else "")
+    t = r["setups"]["trend"]
+    g = t.get("gate") or {}
+    state = t["cn"]
+    if t["state"] == "transitioned":
+        state += f" {t['date'][5:]}@{t['level']:g}" + ("⚡" if t.get("fastlane") else "")
+    gate = "—"
+    if g:
+        same = (t["state"] == "transitioned" and t.get("level") is not None
+                and g["level"] <= float(t["level"]))
+        gate = (f"{g['level']:g} {g['tag']}（卡上仍是刚过的线，待重画）" if same
+                else f"{'下一 ' if t['state'] == 'transitioned' else ''}{g['level']:g} {g['tag']}")
+    cnt = (f"{g['streak']}/{g['need']}" if g else "—")
+    vol = ("—" if not g or g.get("vol_ok") is None else
+           ("✓" if g["vol_ok"] else "✗") + (f" {g['vol_note'].rsplit(' ', 1)[-1]}" if g.get("vol_note") else ""))
+    dist = (f"{g['dist_pct']:+.1f}%/{g['dist_n']}N" if g and g.get("dist_n") is not None else "—")
+    fl = g.get("fastlane") if g else None
+    if fl and fl.get("domain") == "repair" and fl.get("first_day"):
+        dist += f" ⚡{fl['over_n']:+.2f}N"
+    return _row((who, state, gate, cnt, vol, dist))
 
 
-def _digest_sort_key(r: Dict):
-    """顺序 = 与盘前挂单清单**同一把尺** `dow.priority`：优先（上涨推进中 / 洗盘后延续 /
-    反转向上已确认）→ 次位（观察期）→ 末位（下跌推进中 / 止跌① / 未定），同档周线级打平局，
-    再同则票名。形态距离那套排序随四件退回详情页一起退役 —— 表上只剩结构行，
-    按看不见的东西排等于乱序。只排序不授权。"""
-    dv = (r.get("structure") or {}).get("dow") or {}
-    return (*dow.priority(dv, dv.get("weekly"))["sort_key"], r.get("ticker") or "")
+def _bottom_key(r: Dict):
+    """✓止跌 → ⏳今日新低 → ✗；✓ 内最新的信号在前（最新鲜的止跌最可操作），同日票名序。"""
+    b = r["setups"]["bottom"]
+    return (b["rank"], b.get("bars_since_signal") or 0, r["ticker"])
+
+
+def _trend_key(r: Dict):
+    t = r["setups"]["trend"]
+    return (t["rank"], r["ticker"])
 
 
 def digest(reports: List[Dict], asof: Optional[str] = None) -> str:
-    """**唯一那条推送**（不需要每票详情，只在总结里一并说明；只留下结构列；富消息 = 标题 + 图例引用块 + 一票一行的表）。"""
-    L = [f"## [FYI] 收盘判读 {asof or ''} · 判读层，零授权效力".replace("  ", " "),
-         "> 结构 = 短期道氏四步：推进中 → 一根阴线收破前一根低点=观察① 等lsl成形 → ② 看反弹vs lsh → ③ 反弹失败LH 看lsl → 跌破=终止确认；"
-         "｜周线级 = 同一台机器跑周K（回调还是反转的先验）；回撤带 = Rhea 1/3–2/3",
-         "> 档 = 优先(上涨推进/反转向上已确认) → 次位(观察期) → 末位(下跌)，与盘前清单同尺；只排序不授权",
-         "", *DIGEST_TABLE_HEADER]
-    for r in sorted(reports, key=_digest_sort_key):
-        L.append(digest_row(r))
+    """**唯一那条推送**：两张表（🔁 抄底 / 🚀 趋势确认），只列已形成或即将形成的票；
+    其余票名单独一行（dead-man：证明全书扫过，没有静默丢票）。"""
+    ok = [r for r in reports if not r.get("error")]
+    errs = [r for r in reports if r.get("error")]
+    bottoms = sorted((r for r in ok if r["setups"]["bottom"].get("listed")), key=_bottom_key)
+    trends = sorted((r for r in ok if r["setups"]["trend"].get("state")), key=_trend_key)
+    listed = {r["ticker"] for r in bottoms} | {r["ticker"] for r in trends}
+    rest = sorted(r["ticker"] for r in ok if r["ticker"] not in listed)
+    L = [f"## [FYI] 收盘判读 {asof or ''} · 两种模式 · 判读层，零授权效力".replace("  ", " "),
+         "> 🔁 抄底 = 近 20 日低距 60 日高 ≥10%，空头衰竭：✓止跌 = 次日未新低 或 止跌日长下影（已形成）；⏳今日新低 = 明日不再新低即止跌（即将形成）；"
+         "✗ = 收破止跌低。止跌低 = 下影线低点 = 止损。反弹/反转 = 两个事实：越前高（该段下跌最后一个 lower high）/ 回踩更高低点",
+         "> 🚀 趋势确认 = 收盘站上卡片 gate ×N + 量腿 RelVR≥1.1 → 转移；只列 ≤5 根内已转移 / 站稳量腿未过 / 计数中 / gate 之下 ≤1N。"
+         "已形成 = ✓已转移·✅站稳；即将形成 = ⏳▫️",
+         ""]
+    L.append(f"### 🔁 抄底（{len(bottoms)}）")
+    if bottoms:
+        L.extend(BOTTOM_TABLE_HEADER)
+        L.extend(bottom_row(r) for r in bottoms)
+    else:
+        L.append("无")
+    L.append("")
+    L.append(f"### 🚀 趋势确认（{len(trends)}）")
+    if trends:
+        L.extend(TREND_TABLE_HEADER)
+        L.extend(trend_row(r) for r in trends)
+    else:
+        L.append("无")
+    L.append("")
+    L.append(f"其余 {len(rest)} 票不在两种形态内（不列）：{'、'.join(rest) if rest else '—'}")
+    for r in errs:
+        L.append(f"⚠️ {r['ticker']} {r['error']}")
     return "\n".join(L)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="每日收盘后判读：结构 / 形态 / 潜在机会")
+    ap = argparse.ArgumentParser(description="每日收盘后判读：两种模式（抄底 / 趋势确认）")
     ap.add_argument("--tickers", nargs="*", help="默认 = 全书")
     ap.add_argument("--book", action="store_true", help="全书（有 zones 的活跃正股卡）")
     ap.add_argument("--asof", help="截断到该交易日（复盘用；不传 = 缓存最后一根完成日线）")
     ap.add_argument("--digest", action="store_true",
-                    help="只出一票一行的扫描表（推 TG 的第一条；单条装得下）")
+                    help="只出两种模式的清单（推 TG 的那一条）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 

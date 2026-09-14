@@ -296,6 +296,46 @@ def atr(klines: List[dict], period: int = 20) -> List[Optional[float]]:
     return out
 
 
+def hv(klines: List[dict], period: int = 20) -> List[Optional[float]]:
+    """已实现波动率序列 (年化: 对数收益样本标准差 × √252), 窗口 = 含当日的 period 根。
+
+    用途 = **IV 分位的代理** (不同标的 IV 绝对值本身水平不同, 应看分位
+    而不是绝对值): iv_history 落库时间短, 池内可信 (≥60 样本) 的票
+    寥寥, 而 HV20 在 K 线缓存上每只票都能算满 252 日窗。IV ≈ HV × 波动风险溢价, 分位
+    口径下常数溢价被约掉 —— 所以代理的是**分位**不是水平。period 20 与 ATR20 同尺
+    (算钱口径), 与 research/synthetic_longcall_backtest 的 HV20 同定义 (同一批回测数据
+    支撑了 reversal_probe 的 IVP 阈值, 判据与渲染必须同一把尺)。序列不足 → None。
+    """
+    closes = _extract(klines, "close")
+    n = len(closes)
+    out: List[Optional[float]] = [None] * n
+    if n < period + 1:
+        return out
+    logs = [0.0] * n
+    for i in range(1, n):
+        if closes[i] > 0 and closes[i - 1] > 0:
+            logs[i] = math.log(closes[i] / closes[i - 1])
+    for i in range(period, n):
+        seg = logs[i - period + 1:i + 1]
+        m = sum(seg) / period
+        var = sum((x - m) ** 2 for x in seg) / (period - 1)
+        out[i] = math.sqrt(var) * math.sqrt(252)
+    return out
+
+
+def hv_percentile(series: List[Optional[float]], i: int, lookback: int = 252,
+                  min_samples: int = 120) -> Optional[float]:
+    """series[i] 在其**之前** lookback 根 (不含 i) 里的分位 ∈ [0, 1]; 有效样本 <
+    min_samples → None (分位是噪声不是极值, 与 iv_logger.percentile 的 ≥60 同一哲学)。
+    严格小于计数 (与 research 回测同口径)。"""
+    if i < 0 or i >= len(series) or series[i] is None:
+        return None
+    seg = [x for x in series[max(0, i - lookback):i] if x is not None]
+    if len(seg) < min_samples:
+        return None
+    return sum(1 for x in seg if x < series[i]) / len(seg)
+
+
 def range_contraction(klines: List[dict], window: int = 10, period: int = 14) -> Optional[float]:
     """波动收缩比 = ATR(近 window 根) / ATR(前 window 根)。<1 = 收缩，>1 = 扩张。
 

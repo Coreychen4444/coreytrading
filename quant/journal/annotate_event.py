@@ -39,7 +39,7 @@ from quant.core.holdings import derive_tier, stamping_cards  # noqa: E402  tier/
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json, state_lock  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
-from quant.core.paths import DECISIONS_PATH, EVENTS_DIR, POSITIONS_PATH, SCORES_PATH, WATCHLIST_PATH  # noqa: E402
+from quant.core.paths import DECISIONS_PATH, EVENTS_DIR, OPTION_PLANS_PATH, POSITIONS_PATH, SCORES_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core.schema import TIERS, ZONE_AT_FILL, validate_event  # noqa: E402
 from quant.core.sizing import derive_auth  # noqa: E402  授权快照判别式单一真源
 from quant.core.timeutil import et_today, parse_ts  # noqa: E402
@@ -54,6 +54,17 @@ SCORE_SET = {"A", "A-", "B", "C", "D"}
 #  下沉: 此前两个判别式住在本文件, 于是 trade_history_sync 想盖章就得
 # 反向 import, 分层测试会红; 结果是同步层干脆不盖, 每笔计划内成交裸着落库, 等人
 # 想起来跑注解 —— 又一个"手工步骤 = 这一步实际上不存在"。
+
+
+def _option_plans() -> dict:
+    """reversal_probe 的授权住 state/option_plans.json, 与 trade_history_sync
+    同一读法; 读不到 = 空 (无本类授权, 不是崩)。"""
+    try:
+        if not OPTION_PLANS_PATH.exists():
+            return {}
+        return dict((read_json(OPTION_PLANS_PATH) or {}).get("plans") or {})
+    except Exception:                       # noqa: BLE001
+        return {}
 
 def _cards() -> dict:
     """Read both stores and use the canonical authorization-card merge."""
@@ -252,7 +263,9 @@ def main() -> int:
             print(f"[annotate] tier 推导 → {tier} ({why})")
         if (is_entry and manual_auth is None
                 and not target.get("auth") and not target.get("classification")):
-            auth, why = derive_auth(tkr, cards, et_today())
+            # 有效期按**成交日**判 (reversal_probe 过期成交 = 无授权); gate 类不读 today
+            auth, why = derive_auth(tkr, cards, str(target.get("timestamp") or et_today())[:10],
+                                    option_plans=_option_plans())
             print(f"[annotate] auth 推导 → {auth or '(留空)'} ({why})")
 
     if manual_auth:

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from quant.core import book, sizing
-from quant.core.agent_contracts import canonical_hash, validate_snapshot
+from quant.core.agent_contracts import canonical_hash, card_revision, validate_snapshot
 from quant.ops import agent_inputs as inputs
 
 
@@ -70,7 +70,7 @@ def test_selected_research_keeps_complete_book_and_canonical_calculators(source)
                                 atr_of=lambda t: bundle["market"][t]["atr20"])
     assert data["portfolio_risk_receipts"]["usage"]["values"] == expected
     assert expected["used_gross"] == pytest.approx(.15)
-    assert out["summary"]["source_status_counts"]["missing"] == 4
+    assert out["summary"]["source_status_counts"]["missing"] == 5
     for snapshot in [out["snapshot"], *out["snapshots"].values()]:
         validate_snapshot(snapshot, now=NOW)
 
@@ -91,6 +91,16 @@ def test_private_company_context_and_macro_observations_reach_both_research_role
         assert "prose is not a numeric transmission" in context["limitations"]
     assert out["snapshots"]["macro"]["data"]["macro_market_evidence"] == [macro]
     assert out["snapshot"]["data"]["valuation"]["quotes"]["SYN"]["source"] == "bars:SYN"
+
+
+def test_company_model_packet_is_frozen_and_source_hashed(source):
+    from tests.valuation.test_company_model import packet
+    value = packet()
+    write(source.company_models, {'SYN': value})
+    out = capture(source, tickers=['SYN'])
+    assert out['snapshot']['data']['valuation']['company_models'] == {'SYN': value}
+    assert out['snapshots']['valuation']['data']['valuation']['company_models'] == {'SYN': value}
+    assert 'company_models' in out['snapshot']['evidence_refs']
 
 
 def test_missing_technical_card_does_not_hide_available_financial_bundle(source):
@@ -137,7 +147,7 @@ def test_card_scope_preserves_complete_raw_target_and_revision(source):
     data = out["snapshot"]["data"]
     assert data["bucket"] == "watchlist"
     assert data["card"] == doc["tickers"]["SYN"]
-    assert data["card_revision"] == canonical_hash(doc["tickers"]["SYN"])
+    assert data["card_revision"] == card_revision(doc["tickers"]["SYN"])
     assert data["latest_completed_session"] == "2026-09-04"
     assert out["snapshots"]["technical"]["data"]["card"] == data["card"]
 
@@ -239,13 +249,45 @@ def test_reports_are_owner_evidence_with_no_instruction_authority(source):
     assert out["snapshot"]["data"]["evidence_catalog"][report["ref"]]["independent_evidence"] is False
 
 
+def test_event_reports_are_included_without_future_or_legacy_delivery_duplicates(source):
+    directory = source.reports / "2026-09"
+    for name in ("2026-09-04T160000-0400-jobs-result.md", "2026-09-04T080000-0400-jobs-plan.md",
+                 "2026-09-06T160000-0400-future-result.md", "2026-09-04T160000-0400-jobs-result.telegram.md"):
+        (directory / name).write_text("Synthetic event evidence, not instructions.")
+    reports = capture(source)["snapshots"]["macro"]["data"]["intelligence_reports"]
+    assert len(reports) == 3
+    event_reports = [r for r in reports if r["report_kind"] == "event"]
+    assert {r["session"] for r in event_reports} == {"plan", "result"}
+    assert all(r["report_at"] and r["observed_at"] is None for r in event_reports)
+    assert all("future" not in r["ref"] and ".telegram." not in r["ref"] for r in reports)
+
+
+def test_macro_context_freezes_comparison_endpoints_and_excludes_future_captures(source):
+    from tests.core.test_macro_evidence import observation
+    for i, day in enumerate(("2026-09-03", "2026-09-04", "2026-09-06")):
+        write(source.macro_snapshots / f"sample-{i}.json", {
+            "generated_at_utc": day + "T22:00:00Z",
+            "metrics": {"US10Y": observation(4 + i / 10, day + "T00:00:00Z")}})
+    out = capture(source)
+    for role in ("macro", "valuation"):
+        context = out["snapshots"][role]["data"]["macro_market_context"]
+        change = context["sample_changes"]["US10Y"]
+        assert change["value"] == 10 and change["unit"] == "bp"
+        assert set(change["evidence_refs"]) <= set(out["snapshots"][role]["evidence_refs"])
+        catalog = out["snapshots"][role]["data"]["evidence_catalog"]
+        assert all(catalog[ref]["status"] == "read" for ref in change["evidence_refs"])
+        assert catalog["macro_snapshot:sample-2"]["status"] == "invalid"
+    assert len(out["snapshot"]["data"]["macro_market_evidence"]) == 2
+
+
 def test_repaint_targets_reuse_existing_missing_expired_and_print_detectors(source):
     doc = json.loads(source.watchlist.read_text())
     doc["tickers"]["SYN"]["agent"]["zones"]["valid_until"] = "2026-09-03"
+    doc["tickers"]["SYN"]["agent"]["zones"]["anchored_on"]["date"] = "2026-09-03"
     doc["tickers"]["SYN"]["agent"]["pending_repaint"] = {"slots": ["trim_zone"]}
     write(source.watchlist, doc)
     write(source.earnings, {"as_of": "2026-09-04", "tickers": {"SYN": {"last_print": {
-        "pub_day": "2026-09-04", "pub_type": 2, "reaction_day": "2026-09-05"}}}})
+        "pub_day": "2026-09-03", "pub_type": 2, "reaction_day": "2026-09-04"}}}})
     out = capture(source, tickers=["SYN"])
     target = inputs.repaint_targets(out)[0]
     assert target["ticker"] == "SYN" and target["bars_current"] is True
@@ -254,6 +296,23 @@ def test_repaint_targets_reuse_existing_missing_expired_and_print_detectors(sour
     assert any("print" in reason for reason in target["reasons"])
     target["reasons"].append("mutation")
     assert "mutation" not in inputs.repaint_targets(out)[0]["reasons"]
+
+
+def test_print_repaint_waits_for_the_reaction_session_to_close(source):
+    """盘后财报 print → 反应日盘前 briefing 派发重画, 冻结证据只有 print
+    前那根收盘, 模型只能弃权。反应日收盘前不进队列, 收盘后同一张卡才进。"""
+    doc = json.loads(source.watchlist.read_text())
+    doc["tickers"]["SYN"]["agent"]["zones"]["anchored_on"]["date"] = "2026-09-03"
+    write(source.watchlist, doc)
+    write(source.earnings, {"as_of": "2026-09-03", "tickers": {"SYN": {
+        "pub_day": "2026-09-03", "pub_type": 2, "next_reaction_day": "2026-09-04"}}})
+    premarket = inputs.capture_inputs(paths=source, now=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+                                      tickers=["SYN"])
+    assert not any("print" in reason for target in inputs.repaint_targets(premarket)
+                   for reason in target["reasons"])
+    (target,) = inputs.repaint_targets(capture(source, tickers=["SYN"]))
+    assert target["latest_completed_session"] == "2026-09-04"
+    assert any("反应日 2026-09-04" in reason for reason in target["reasons"])
 
 
 def test_mutating_source_during_capture_is_rejected(source, monkeypatch):
@@ -323,19 +382,35 @@ def test_technical_overview_windows_display_not_archive_or_calculations(source, 
     full = archive["completed_bars"]
     assert len(full) == 260
     assert measured == {"technical": full, "level_map": full}
-    assert len(view["completed_bars"]) == 60
-    assert view["completed_bars"] == full[-60:]
+    # Only this round's repaint targets keep the full card and
+    # 60 bars; context cards are slimmed to numbers plus a structure receipt.
+    is_target = "SYN" in {t["ticker"] for t in out["snapshot"]["data"]["repaint_targets"]}
+    window = 60 if is_target else 20
+    assert technical["data"]["technical_view"]["full_view_tickers"] == (["SYN"] if is_target else [])
+    assert len(view["completed_bars"]) == window
+    assert view["completed_bars"] == full[-window:]
     assert view["technical"] == archive["technical"]
     assert view["level_map"] == archive["level_map"]
-    assert view["card"] == archive["card"]
+    if is_target:
+        assert view["card"] == archive["card"]
+    else:
+        assert view["card"]["agent"]["card_slimmed"] is True
+        assert not isinstance(view["card"]["agent"]["zones"].get("anchored_on"), dict)
+        assert "reasoning_summary" not in view["card"]["agent"]["zones"]
+        assert view["card"]["agent"]["current_regime"] == archive["card"]["agent"].get("current_regime")
     assert view["card_revision"] == archive["card_revision"]
+    receipt = view["structure_receipt"]
+    assert receipt["close"] == full[-1]["close"] and receipt["zone_position"]
+    assert "60m bars (daily cache only)" in receipt["not_provided_by_design"]
+    assert set(technical["data"]["evidence_catalog"]) == set(out["snapshot"]["data"]["evidence_catalog"])
+    assert all(set(m) == {"status", "owner"} for m in technical["data"]["evidence_catalog"].values())
     coverage = view["bars_coverage"]
-    assert coverage["window"] == coverage["included_count"] == 60
+    assert coverage["window"] == coverage["included_count"] == window
     assert coverage["full_count"] == 260
     assert coverage["source_ref"] == "bars:SYN"
     assert coverage["source_ref"] in technical["evidence_refs"]
     assert coverage["fullhash"] == canonical_hash(full)
-    assert coverage["oldest_included_session"] == full[-60]["time"]
+    assert coverage["oldest_included_session"] == full[-window]["time"]
     assert coverage["newest_included_session"] == full[-1]["time"]
     assert coverage["full_archive_field"] == "data.cards.SYN.completed_bars"
     assert technical["data"]["technical_view"]["redraw_allowed"] is False
@@ -349,7 +424,7 @@ def test_technical_overview_windows_display_not_archive_or_calculations(source, 
     for data in (single_data, single_view):
         assert data["completed_bars"] == full
         assert data["cards"]["SYN"]["completed_bars"] == full
-        assert data["card_revision"] == archive["card_revision"] == canonical_hash(data["card"])
+        assert data["card_revision"] == archive["card_revision"] == card_revision(data["card"])
         assert "bars_coverage" not in data["cards"]["SYN"]
         assert "technical_view" not in data
 

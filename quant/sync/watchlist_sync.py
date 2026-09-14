@@ -248,6 +248,8 @@ def closed_analysis(pos: dict, held: set) -> Dict[str, dict]:
         if not exit_info.get("closed_at"):
             continue
         agent = body.get("agent") or {}
+        if not agent.get("zones"):
+            agent = exit_info.get("closed_agent") or agent
         thesis = agent.get("thesis") or {}
         if not thesis.get("summary") or thesis.get("status") == "needs_card":
             continue                       # 那张卡自己就是空的, 没什么可搬

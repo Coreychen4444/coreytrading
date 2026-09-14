@@ -264,12 +264,14 @@ def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
                         avg_cost: Optional[float], qty: float, dte: Optional[int],
                         underlying: str, klines: List[dict],
                         p: Dict = PARAMS, *,
-                        gate_level: Optional[float] = None) -> Tuple[List[Dict], List[str]]:
+                        gate_level: Optional[float] = None,
+                        gate_label: Optional[str] = None,
+                        s1_enabled: bool = True) -> Tuple[List[Dict], List[str]]:
     """单腿 long call 亏损侧 S1/S2/S4 + S3 advisory (用户终裁接线)。
 
     盈利侧 (棘轮/G-01/趋势死亡线) 已有 —— 本函数只补**棘轮武装前**的裸窗口
-    (构造性盲区: OTM 横盘 + IV 回落 premium -64% 零告警, §13.4 立项 ;
-    GOOGL  案: spot -6.2% 时 premium -41.5%, underlying stop 慢一个量级)。
+    (构造性盲区: OTM 横盘 + IV 回落 premium 大幅回落零告警;
+    正股小幅下跌时 premium 已大幅亏损, underlying stop 慢一个量级)。
     fired flags 一次性; S1 收复 stop 线 +2% 重新武装 (同棘轮语义)。
     S2 单张不可拆: 减半档降级为提示行, d25 清仓档照常 (整股约束哲学)。
 
@@ -277,6 +279,11 @@ def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
     那道 gate (sizing.granting_gate_level); underlying 收盘 ×opt_gate_stop_days 跌破
     → 清仓一枪, 收回 gate 之上重新武装。这是「见底条件失效」的机械形状 —— 期权
     不等正股的 bfloor_buf。None = 常规参与卡/参与流已断, 退回卡 stop (S5)。
+
+    reversal_probe (止损放在 gate): 调用方传 gate_level = 期权卡自己的
+    stop_level (反转波段低点, underlying 基) + s1_enabled=False —— 本类止损只有 gate 一条,
+    S1 保费百分比线关闭 (倒推 cap 已按 gate 处投影亏损定 size, S1 先响会让 cap 数学失真)。
+    S2 / S4 / S3 advisory 照旧。
     """
     shots: List[Dict] = []
     lines: List[str] = []
@@ -287,17 +294,21 @@ def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
     # 写回 guard 供显示层/画线读 (brief stop_status · price_reminder exit_floor_map):
     # gate 线是 underlying 基, 与 trail 同基, 挂正股 code。
     g["opt_gate_stop"] = ({"level": round(float(gate_level), 4),
-                           "days": int(p.get("opt_gate_stop_days") or 1)}
+                           "days": int(p.get("opt_gate_stop_days") or 1),
+                           **({"label": gate_label} if gate_label else {})}
                           if gate_level else None)
+    g["opt_s1_enabled"] = bool(s1_enabled)
     if mark is None or not avg_cost:
         return shots, lines
     s1_level = avg_cost * (1 + p["opt_s1_stop"])
 
-    # S1 premium 硬 stop
-    if ov["s1_fired"] and mark >= s1_level * 1.02:
+    # S1 premium 硬 stop (reversal_probe 关: 止损只有 gate 一条)
+    if not s1_enabled:
+        ov["s1_fired"] = False
+    if s1_enabled and ov["s1_fired"] and mark >= s1_level * 1.02:
         ov["s1_fired"] = False
         lines.append(f"{ticker}: mark {_fmt(mark)} 收复 S1 线 {_fmt(s1_level)} (+2%), S1 重新武装")
-    if not ov["s1_fired"] and mark <= s1_level:
+    if s1_enabled and not ov["s1_fired"] and mark <= s1_level:
         ov["s1_fired"] = True
         shots.append({
             "ticker": ticker, "type": "opt_s1_stop", "value": mark,
@@ -320,7 +331,7 @@ def option_loss_overlay(ticker: str, g: Dict, mark: Optional[float],
             ov["gate_fired"] = True
             shots.append({
                 "ticker": ticker, "type": "opt_gate_stop", "value": latest,
-                "text": (f"🚨 {ticker} 跌破授权 gate: {underlying} 收盘 {_fmt(latest)} < gate "
+                "text": (f"🚨 {ticker} 跌破{gate_label or '授权 gate'}: {underlying} 收盘 {_fmt(latest)} < gate "
                          f"{_fmt(gate_level)} (×{gdays}日)。行动【今日内】: 清仓 {qty:g} 张 — "
                          f"见底条件失效即走, 不等正股 bfloor (期权含杠杆, 接受稍高止损率)。"
                          f"无 override 路径, "
@@ -661,11 +672,20 @@ def evaluate(doc: Dict, guards: Dict, today: str,
                     "text": (f"🎯 {ticker} {hit['tier']} lot ({hit['qty']:g}张@{hit['cost']}) 过 G-01 "
                              f"{hit['level']} (mark {_fmt(mark)} ≥ {hit['threshold']}): "
                              f"行动【今日内】trim {hit['trim_pct']}% ≈ {hit['trim_qty']} 张。"
-                             f"let-winner-run 只减不清。无 override 路径；不执行 = 规则外评 C 起步。(G-01)")})
-            # 亏损侧 overlay S1/S2/S4 + S3 advisory（终裁；棘轮武装前的裸窗口）
+                             f"let-winner-run 只减不清。无 override 路径, 不执行 = 规则外评 C 起步。(G-01)")})
+            # 亏损侧 overlay S1/S2/S4 + S3 advisory (终裁; 棘轮武装前的裸窗口)
+            # 入场类分流 : reversal_probe 卡的 gate = 卡自己的 stop_level
+            # (反转波段低点, underlying 基), S1 关; 其余 = 授予正股 cap 的 gate (S5g)。
+            _agent = body.get("agent") or {}
+            _zones = _agent.get("zones") or {}
+            if _agent.get("entry_class") == "reversal_probe" \
+                    and (_zones.get("stop_level_basis") or "underlying") == "underlying":
+                _gate_kw = {"gate_level": coerce_float(_zones.get("stop_level")),
+                            "gate_label": "止跌低 (抄底 reversal_probe gate)", "s1_enabled": False}
+            else:
+                _gate_kw = {"gate_level": granting_gate_level((doc.get("tickers") or {}).get(underlying))}
             ov_shots, ov_lines = option_loss_overlay(
-                ticker, g, mark, avg_cost, qty, dte, underlying, klines, p,
-                gate_level=granting_gate_level((doc.get("tickers") or {}).get(underlying)))
+                ticker, g, mark, avg_cost, qty, dte, underlying, klines, p, **_gate_kw)
             one_shot.extend(ov_shots)
             lines.extend(ov_lines)
 
@@ -749,7 +769,8 @@ def evaluate(doc: Dict, guards: Dict, today: str,
                                  .get("zones") or {}).get("stop_level_days")) or 1)
         kw = {}
         if occ:
-            kw = {"s1_floor": round(avg_cost * (1 + p["opt_s1_stop"]), 2) if avg_cost else None,
+            kw = {"s1_floor": (round(avg_cost * (1 + p["opt_s1_stop"]), 2)
+                               if (avg_cost and g.get("opt_s1_enabled", True)) else None),
                   "mark": mark,
                   "spot": coerce_float((klines[-1] or {}).get("close")) if klines else None,
                   "strike": occ.get("strike"), "dte_days": dte,

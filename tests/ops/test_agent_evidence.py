@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from quant.core import book, sizing
-from quant.core.agent_contracts import ContractError, canonical_hash
+from quant.core.agent_contracts import ContractError, canonical_hash, card_revision
 from quant.core.holdings import UNMANAGED_ROLES
 from quant.ops.agent_evidence import build_portfolio_evidence
 
@@ -46,7 +46,7 @@ def test_matches_canonical_sizing_with_frozen_inputs(bundle):
     receipt = output["entries"]["SYN"]
     assert receipt["status"] == "computed" and receipt["values"] == expected
     assert receipt["inputs"]["exposure"] == exposure == 1000
-    assert receipt["inputs"]["card_revision"] == canonical_hash(entry["card"])
+    assert receipt["inputs"]["card_revision"] == card_revision(entry["card"])
     assert output["positions_revision"] == canonical_hash(bundle["positions_doc"])
     assert output["policy_constants_hash"] == canonical_hash(output["policy_constants"])
 

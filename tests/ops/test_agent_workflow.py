@@ -33,6 +33,31 @@ def request(role, text="Check source timing", refs=None):
     return {"role": role, "question": text, "evidence_refs": refs if refs is not None else ["price"]}
 
 
+@pytest.mark.parametrize("purpose,downstream,calls", [("trading", "risk", 3), ("valuation", "valuation", 2)])
+def test_causal_digest_and_original_research_reach_downstream_without_extra_calls(snapshot, routes, purpose, downstream, calls):
+    from tests.core.test_agent_contracts import result
+    from quant.core.agent_contracts import validate_result
+    seen = {}
+    def worker(role, task, inputs, **kwargs):
+        seen[role] = deepcopy(inputs)
+        output = report(role, inputs)
+        if role == "macro":
+            payload = result("macro", inputs)
+            payload.update(generated_at=inputs["as_of"], observations=[], hypotheses=[], risks=[])
+            output["result"] = validate_result("macro", payload, snapshot=inputs)
+        return output
+    workflow = run_workflow("Synthetic causal handoff", snapshot, routes=routes, purpose=purpose, run_role_fn=worker)
+    context = seen[downstream]["data"]["workflow_context"]
+    assert context["macro_digest"]["status"] == "available"
+    assert context["macro_digest"]["synthesis"]["status"] == "unknown"
+    assert context["macro_digest"]["independent_evidence"] is False
+    original = next(peer["result"] for peer in context["peer_reports"] if peer["role"] == "macro")
+    assert original["macro_diagnosis"]["synthesis"] == context["macro_digest"]["synthesis"]
+    assert workflow["macro_research"]["initial"]["synthesis"] == context["macro_digest"]["synthesis"]
+    assert "hypotheses" not in context["macro_digest"] and "hypothesis_index" in context["macro_digest"]
+    assert workflow["macro_research"]["followup"] is None and workflow["total_calls"] == calls
+
+
 def test_macro_and_technical_parallel_then_valuation_then_risk(snapshot, routes):
     barrier = threading.Barrier(2)
     finished = set()
@@ -103,6 +128,31 @@ def test_peer_results_are_marked_same_source_not_independent_evidence(snapshot, 
     assert run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)["status"] == "completed"
 
 
+@pytest.mark.parametrize("purpose,downstream,calls", [("trading", {"risk"}, 3),
+                                                   ("valuation", {"valuation"}, 2)])
+def test_macro_modules_reach_consumers_without_a_fifth_role(snapshot, routes, purpose, downstream, calls):
+    from tests.core.test_macro_analysis import macro_fields
+    fields = macro_fields()
+    seen = set()
+
+    def worker(role, task, inputs, **kwargs):
+        if role in downstream:
+            peers = inputs["data"]["workflow_context"]["peer_reports"]
+            macro = next(p for p in peers if p["role"] == "macro")
+            assert macro["result"]["macro_diagnosis"] == fields["macro_diagnosis"]
+            assert macro["result"]["market_structure"] == fields["market_structure"]
+            assert macro["independent_evidence"] is False
+            seen.add(role)
+        result = report(role, inputs)
+        if role == "macro":
+            result["result"].update(deepcopy(fields))
+        return result
+
+    output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker, purpose=purpose)
+    assert seen == downstream and output["total_calls"] == calls
+    assert output["status"] == "completed"
+
+
 def test_one_round_deduplicates_questions_and_never_chases_new_requests(snapshot, routes):
     seen = []
 
@@ -124,6 +174,32 @@ def test_one_round_deduplicates_questions_and_never_chases_new_requests(snapshot
     assert len([entry for entry in output["unhandled_requests"] if entry["reason"] == "duplicate_request"]) == 3
     assert any(entry["reason"] == "depth_limit" for entry in output["unhandled_requests"])
     assert len(seen) == 5
+
+
+def test_disabled_followups_preserve_questions_without_dispatch(snapshot, routes):
+    routes["limits"]["max_followup_rounds"] = 0
+    seen = []
+
+    def worker(role, task, inputs, **kwargs):
+        seen.append(role)
+        assert not inputs["data"].get("workflow_context", {}).get("targeted_requests")
+        return report(role, inputs, [request("technical")] if role == "macro" else [])
+
+    output = run_workflow("Review", snapshot, routes=routes, purpose="trading", run_role_fn=worker)
+    assert sorted(seen) == ["macro", "risk", "technical"]
+    assert output["total_calls"] == 3
+    assert output["followups"] == {}
+    pending = [x for x in output["unhandled_requests"] if x["reason"] == "followup_disabled"]
+    assert len(pending) == 1 and pending[0]["request"]["role"] == "technical"
+
+
+@pytest.mark.parametrize("value", [True, -1, 2, "0"])
+def test_invalid_followup_budget_rejected_before_dispatch(snapshot, routes, value):
+    routes["limits"]["max_followup_rounds"] = value
+    def worker(*args, **kwargs):
+        pytest.fail("invalid budget must not dispatch")
+    with pytest.raises(ValueError, match="max_followup_rounds"):
+        run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
 
 
 @pytest.mark.parametrize("max_calls", [1, 2, 3, 4, 5, 8])
@@ -389,3 +465,32 @@ def test_valuation_scope_cannot_expand_to_trading_roles(snapshot, routes):
     assert seen == ['macro', 'valuation']
     assert out['risk_snapshot'] is None and out['valuation_calculations'] is not None
     assert len(out['unhandled_requests']) == 4
+
+
+def test_trading_workflow_cross_provider_failover_respects_eight_call_budget(tmp_path):
+    from quant.ops import agent_runtime as runtime
+    from tests.ops.test_agent_runtime import fake_runner
+    from quant.core.io_json import read_json
+    roles = ('macro', 'technical', 'risk', 'valuation')
+    config = {'version': 2, 'model_profiles': {
+        'anthropic': {'runtime': 'claude', 'primary': {'model': 'claude-fable-5-1', 'effort': 'xhigh'},
+                      'fallback': [{'model': 'claude-opus-5', 'effort': 'xhigh'}]},
+        'openai': {'runtime': 'codex', 'primary': {'model': 'gpt-6-astra', 'effort': 'high'},
+                   'fallback': [{'model': 'gpt-5.6-sol', 'effort': 'high'}]}},
+        'roles': {role: {'profile': 'anthropic', 'fallback_profile': 'openai',
+                         'reviewer_profile': 'openai', 'timeout_s': 600} for role in roles},
+        'limits': {'max_parallel': 3, 'max_calls': 8},
+        'autopaint': {'enabled': True, 'apply': False, 'review': True}}
+    inputs = make_snapshot({'synthetic': True}, evidence_refs=['synthetic'])
+    def runner(provider, prompt, schema, **kwargs):
+        if provider == 'claude':
+            return {'status': 'failed', 'error': 'provider_session_limit'}
+        return fake_runner(provider, prompt, schema)
+    def worker(*args, **kwargs):
+        return runtime.run_role(*args, **kwargs, runner=runner)
+    workflow = run_workflow('合成盘前故障切换', inputs, routes=config,
+                             purpose='trading', run_role_fn=worker, run_dir=tmp_path)
+    assert workflow['status'] == 'completed'
+    assert workflow['total_calls'] == 6
+    assert len(read_json(tmp_path / 'control' / 'global-calls.json')['calls']) == 6
+    assert all(r['provider'] == 'codex' for r in workflow['reports'].values())
