@@ -99,7 +99,12 @@ def build(data: dict) -> dict:
                 "portfolio_at_risk: no canonical pure at-risk receipt exists; do not sum ceilings",
                 "batch_allocation: single-name ceilings share one budget; no reservations computed",
             ],
-            "unknowns": unknowns}
+            "unknowns": unknowns,
+            # 冻结时刻要印在脸上。这份收据是**采集那一刻**的世界, 而盘后流水线里它排在
+            # 受控重画**之前** —— 当晚被重画的卡, 表上的价与 stop 仍是旧卡数值,
+            # 否则只能靠人手写一句括号说明。
+            # 靠人记得加注解 = 迟早漏; 时刻自己说出来, 读者拿它跟重画回执对得上。
+            "as_of": receipts.get("as_of")}
 
 
 def render(view: dict) -> str:
@@ -108,7 +113,11 @@ def render(view: dict) -> str:
     lines = ["## 🛡️ 机械风控收据（代码渲染，零授权效力）",
              f"NAV {_fmt(book['nav'])} ｜ 购买力余额 {_fmt(book['power_room'])} ｜ "
              f"冲击预算已用 {_pct(book['used_budget'])} ｜ gross 已用 {_pct(book['used_gross'])} ｜ "
-             f"时效 {view['freshness']}"]
+             f"时效 {view['freshness']}"
+             + (f" ｜ 冻结于 {view['as_of']}" if view.get("as_of") else "")]
+    if view.get("as_of"):
+        lines.append(f"> 本表是采集时刻 {view['as_of']} 的快照, **早于同一轮的受控重画** —— "
+                     f"重画过的卡, 价 / 真 stop 两列仍是重画前的数值, 以重画回执为准。")
     if view["entries"]:
         lines += ["", "| 票 | 档 | 上限 $ | binding | 价 | 真 stop | 敞口 | 状态 |", "|---|---|---|---|---|---|---|---|"]
         for e in view["entries"]:

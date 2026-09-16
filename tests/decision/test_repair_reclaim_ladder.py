@@ -18,8 +18,11 @@ def _k(closes, vol=1e7):
 
 
 def _card(gate=100.0, days=2):
+    # cap_pct_nav 必填: 带 entry_gate 的 regime 必须说出这道 gate
+    # 授予多少 —— schema 与转移机两侧都拦, fixture 照现实形状给。
     return {"agent": {"zones": {}, "next_regime": {
-        "name": "R_up", "entry_gate": {"level": gate, "days": days}}}}
+        "name": "R_up", "cap_pct_nav": 0.4,
+        "entry_gate": {"level": gate, "days": days}}}}
 
 
 # ── 1. 快车道四条件 (⓪域  加) ─────────────────────────

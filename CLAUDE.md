@@ -33,6 +33,7 @@
 | 定时任务 prompt 真源 | `tasks/`：Claude Desktop 任务在 `tasks/claude/`，Codex 运行器规范在 `tasks/codex/`（自行注册到任务运行器；判据取运行时任务清单，文件在不算注册） |
 | 市场情报（只读） | 数据目录 `trade/intelligence/`（公开仓只有 README 与合成示例；宏观 `macro/current.json`、报告归档与估值 overlay 由用户自有的采集流程写入，本仓不采集）；运行状态 `var/intelligence/`；交易研究角色只读，缺失时优雅降级 |
 | 估值层（判断层，零授权效力） | `quant/valuation/`（合同 `quant/valuation/README.md`）；账本 `trade/valuation/valuations.jsonl`；人工区 `inputs.json`（新票画卡时一并 `quant/valuation/archetypes.py set` 归原型，缺 = brief `INFRA:card_missing_archetype`）；卡片镜像 `agent.valuation` 由 `quant/sync/valuation_sync.py` 写；独立日更 `quant/ops/valuation_daily.py`（归档 `var/valuation-daily/`） |
+| 基本面框架（判断层，零授权效力） | 方法规格在 `agents/methods/`（若配置）；卡片字段 `agent.thesis.frame`（判别式 `quant/core/thesis_frame.py`，writer `--thesis-frame`）；存量散文 thesis 不专门迁，重画价位带时逐张替换 |
 | 研究层 | `quant/research/`：可复用机械件与合成脚手架；私有预注册、数据、结果与裁决不入库，live 代码不得 import 它 |
 | OpenD | `.claude/skills/openapi/scripts/`；环境细节 `.claude/rules/tools-environment.md`；订单类底层脚本不在 pipeline 内，任何改单动作先取显式授权 |
 
@@ -54,9 +55,9 @@
 |---|---|---|
 | heartbeat | `17 0,6,12,18 * * 1-6` | 持仓巡逻 `pipeline --mode heartbeat`，退出栈 / 异动告警原文推送 |
 | overnight-briefing | `30 18 * * 1-5` | 盘前简报 + 开盘操作手册 + 当日挂单清单（`--mode briefing`），技术研究回执 + 代码渲染风控收据，宏观先验读发布快照 |
-| postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画（每轮 `repaint_bound`）→提醒线 / 白名单→转移达标收据与简报 |
+| postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画（每轮 `repaint_bound`）→入场计划（`option_plans` 按同一收盘重锚）→提醒线 / 白名单→转移达标收据与简报 |
 | gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled（等待预算 = 上游 lease，不私设秒数）后推 gate 阶梯表原文 |
-| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：两种模式清单（🔁 抄底 / 🚀 趋势确认 已形成·即将形成）原文推送，未形成不列（判别式 `quant/core/setups.py`；零授权、零模型调用） |
+| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：两种模式清单（🔁 抄底 = 次日未新低 / 长下影，止损 = 止跌低，附 [FYI] 底部确认概率 / 🚀 趋势确认 gate 接近度；已形成·即将形成）原文推送，未形成不列（判别式 `quant/core/setups.py`；零授权、零模型调用） |
 | weekly-portfolio-review | `3 10 * * 6` | 周复盘（宏观 / 技术 / 风控三角色唯一时点 + Agent 层周基线；估值归独立任务） |
 | valuation-daily | 每日 08:00（示例，Codex 运行器） | 独立估值：刷新→冻结→宏观情景→计算→估值报告；规范 `tasks/codex/valuation-daily.md`，零授权效力 |
 

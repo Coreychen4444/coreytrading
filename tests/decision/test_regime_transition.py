@@ -652,7 +652,8 @@ def test_transition_receipt_carries_the_qualifying_condition(monkeypatch):
         "benchmark_ratio": 0.51, "date": "2026-09-09"})
     bars = _bars([90.0] * 20 + [101.25, 104.75])
     card = {"agent": {"zones": {}, "next_regime": {
-        "name": "R_突破_100", "entry_gate": {"level": 100.0, "days": 2, "volume_ratio_min": 1.1}}}}
+        "name": "R_突破_100", "cap_pct_nav": 0.4,
+        "entry_gate": {"level": 100.0, "days": 2, "volume_ratio_min": 1.1}}}}
     tr = rt.detect_transition("SYN", card, bars, today="2026-09-09")
     assert tr["confirm"]["mode"] == "close_x2" and tr["confirm"]["level"] == 100.0
     assert [c["close"] for c in tr["confirm"]["closes"]] == [101.25, 104.75]
@@ -673,3 +674,74 @@ def test_unknown_ticker_still_resolves_to_the_default_benchmark():
     for tk in (None, "", "ZZZZ"):
         assert rt.rel_volume_detail(bars, tk)["benchmark"] == "QQQ"
     assert rt.rel_volume_detail(bars, "MU")["benchmark"] == "SMH"
+
+
+# ── 爆炸半径 = 1 张卡 ────────────────────────────────────────────
+#
+# 失败形状: 某张卡的 `next_regime.cap_pct_nav` 是 null。schema 两头宽严不一致
+# (next 可空 / current 必须 numeric) + 上行分支原样搬 ⇒ 整本 watchlist 写入被拒,
+# **同日达标的其他卡一起没落卡**, 报告那头还渲染成「盘后：无 regime 转移」。
+# 一张卡的字段缺失不该有全局爆炸半径 —— 下面两条把它钉死。
+
+def _writable_card(gate, cap, *, closes):
+    """能过 watchlist schema 的最小活跃卡 + 一道已达标的 up gate。"""
+    return {"instrument": {"type": "stock"}, "status": "watching", "moomoo_listed": True,
+            "agent": {"thesis": {"summary": "fixture"},
+                      "zones": {"stop_level": gate * 0.9, "anchored_on": {"date": "2026-07-01"}},
+                      "current_regime": {"name": "候选·等 gate", "cap_pct_nav": 0,
+                                         "participation": "gate_only", "since": "2026-07-01",
+                                         "source": "card", "reason": "fixture"},
+                      "next_regime": {"name": f"R_突破_{gate:g}", "cap_pct_nav": cap,
+                                      "entry_gate": {"level": gate, "days": 2}}},
+            "_closes": closes}
+
+
+@pytest.fixture
+def two_card_book(monkeypatch, tmp_path):
+    """GOOD (cap 合法) 与 BAD (cap None) 同日双双达标, 同一本 watchlist。"""
+    pos, wl = tmp_path / "positions.json", tmp_path / "watchlist.json"
+    good = _writable_card(100.0, _CONF, closes=[105.0, 106.0])
+    bad = _writable_card(200.0, None, closes=[205.0, 206.0])
+    bars = {"GOOD": _bars([90.0] * 20 + good.pop("_closes")),
+            "BAD": _bars([190.0] * 20 + bad.pop("_closes"))}
+    pos.write_text(json.dumps({"schema_version": 2, "tickers": {}}))
+    wl.write_text(json.dumps({"schema_version": 2, "tickers": {"GOOD": good, "BAD": bad}}))
+    from quant.core import io_json
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
+    monkeypatch.setattr(rt.state_io, "POSITIONS_PATH", pos)
+    monkeypatch.setattr(rt.state_io, "WATCHLIST_PATH", wl)
+    monkeypatch.setattr(rt, "_klines", lambda t: bars.get(t, []))
+    monkeypatch.setattr(rt, "et_today", lambda: "2026-07-22")
+    return wl
+
+
+def test_one_unwritable_card_does_not_cancel_the_other_transitions(two_card_book):
+    out = rt.run(apply=True)
+    assert [t["ticker"] for t in out["transitions"]] == ["GOOD"]
+    assert [r["ticker"] for r in out["rejected"]] == ["BAD"]
+    assert "cap_pct_nav" in out["rejected"][0]["error"]
+    book = json.loads(two_card_book.read_text())["tickers"]
+    # 合规的那张真的落了库 (cap 到手), 坏的那张原样不动 —— 不是"两张都不动"。
+    assert book["GOOD"]["agent"]["current_regime"]["cap_pct_nav"] == _CONF
+    assert book["GOOD"]["agent"]["current_regime"]["since"] == "2026-07-22"
+    assert book["BAD"]["agent"]["current_regime"]["cap_pct_nav"] == 0
+    assert book["BAD"]["agent"]["next_regime"]["cap_pct_nav"] is None
+
+
+def test_a_preexisting_broken_card_no_longer_freezes_the_whole_book(two_card_book, capsys):
+    """既存坏卡不再连坐: 没被碰过的坏卡照常报出来, 但合规转移该落库还是落库。
+
+    旧行为是反过来的 —— 写闸校验整份文件, BAD 的空 cap 让 GOOD 的转移
+    一起写不进去, 外面只看到「无 regime 转移」。归责口径改成「本次写入有没有把
+    文件弄坏」之后, 这张没人碰的坏卡只留下告警。
+    """
+    doc = json.loads(two_card_book.read_text())
+    doc["tickers"]["BAD"]["agent"]["current_regime"]["cap_pct_nav"] = None
+    two_card_book.write_text(json.dumps(doc))
+    out = rt.run(apply=True)
+    assert [t["ticker"] for t in out["transitions"]] == ["GOOD"]
+    assert [r["ticker"] for r in out["rejected"]] == ["BAD"]
+    book = json.loads(two_card_book.read_text())["tickers"]
+    assert book["GOOD"]["agent"]["current_regime"]["cap_pct_nav"] == _CONF
+    assert book["BAD"]["agent"]["current_regime"]["cap_pct_nav"] is None   # 原样, 没被"顺手修好"
+    assert "既存错误未被本次写入触及" in capsys.readouterr().err

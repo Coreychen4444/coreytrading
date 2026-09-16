@@ -71,3 +71,23 @@ def test_cli_accepts_run_record_and_snapshot(tmp_path, capsys):
     plain.write_text(json.dumps({"data": _data()}))
     assert risk_receipt.main([str(plain)]) == 0
     assert "机械风控收据" in capsys.readouterr().out
+
+
+def test_the_freeze_moment_is_printed_instead_of_left_to_a_handwritten_note():
+    """收据排在同一轮受控重画之前 —— 冻结时刻必须自己说出来。
+
+    若几张卡在同一轮被重画, 表上的价与 stop 仍是重画前的数值; 只靠会话手写
+    一句括号交代 = 迟早漏。
+    """
+    view = risk_receipt.build(_data())
+    assert view["as_of"] == "2026-09-09T00:00:00+00:00"
+    out = risk_receipt.render(view)
+    assert "冻结于 2026-09-09T00:00:00+00:00" in out
+    assert "早于同一轮的受控重画" in out and "以重画回执为准" in out
+
+
+def test_a_receipt_without_a_capture_time_says_nothing_rather_than_guessing():
+    data = _data()
+    del data["portfolio_risk_receipts"]["as_of"]
+    out = risk_receipt.render(risk_receipt.build(data))
+    assert "冻结于" not in out and "早于同一轮的受控重画" not in out

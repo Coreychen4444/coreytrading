@@ -14,6 +14,8 @@ from typing import Any
 
 from .occ import is_option_ticker
 from .timeutil import parse_ts
+# thesis.frame: 基本面判断框架的形状 + summary 派生一致; 判别式与 writer / 提交边界共用, 零授权
+from .thesis_frame import thesis_errors as _thesis_frame_errors
 
 INSTRUMENT_TYPES = {"stock", "option", "warrant", "fund", "etf"}
 POSITION_STATUS = {"active", "closed"}
@@ -108,7 +110,20 @@ def _validate_regime(block: Any, p: str, *, is_last: bool) -> list[str]:
                           f"(观察层永不授权入场; got {cap!r})")
         if block.get("participation") != "gate_only":
             errors.append(f"{p}.participation must be 'gate_only' (got {block.get('participation')!r})")
-    elif cap is not None:
+    elif cap is None:
+        # 带 gate 的 next_regime **必须**说出这道 gate 授予多少。current_regime 要求
+        # numeric, 而转移机上行分支原样搬 (`nr.get("cap_pct_nav")`) —— 若这里允许 None,
+        # 一张卡的省略字段会在**转移发生的那一刻**变成整本文件写入被拒, 报告还印成
+        # 「无 regime 转移」。两头宽严不一致 = 把写卡期的沉默兑换成转移期的全局失败。
+        # 「中间站不授权」本来就有合法写法: **显式 0**。None 不多表达任何东西, 只表达
+        # 「没人回答过」—— 而 gate_count 判的正是「给了 cap 的 up 转移」, 它推不回来。
+        # 不带 gate 的骨架块 (转移机的 pending_after 会立刻补, 见 regime_transition)
+        # 不在此列, 保持可空。
+        if block.get("entry_gate"):
+            errors.append(f"{p}.cap_pct_nav must be numeric in [0, {CAP_CONFIRMED_MAX}] "
+                          f"(带 entry_gate 的 regime 必须说明该 gate 授予多少; "
+                          f"中间站写显式 0, 不写 None)")
+    else:
         if not _is_num(cap) or not (0 <= cap <= CAP_CONFIRMED_MAX):
             errors.append(f"{p}.cap_pct_nav must be numeric in [0, {CAP_CONFIRMED_MAX}] (got {cap!r})")
 
@@ -301,6 +316,7 @@ def validate_positions_doc(doc: dict) -> tuple[list[str], list[str]]:
         agent = t.get("agent") or {}
         if not (agent.get("thesis") or {}).get("summary"):
             errors.append(f"{p}.agent.thesis.summary missing")
+        errors.extend(_thesis_frame_errors(agent.get("thesis"), f"{p}.agent.thesis"))
         if not (agent.get("action") or {}).get("intent"):
             errors.append(f"{p}.agent.action.intent missing")
         ec = agent.get("entry_class")
@@ -377,6 +393,7 @@ def validate_watchlist_doc(doc: dict) -> tuple[list[str], list[str]]:
         agent = t.get("agent") or {}
         if not (agent.get("thesis") or {}).get("summary"):
             errors.append(f"{p}.agent.thesis.summary missing")
+        errors.extend(_thesis_frame_errors(agent.get("thesis"), f"{p}.agent.thesis"))
         ec = agent.get("entry_class")
         if ec is not None and ec not in ENTRY_CLASSES:
             errors.append(f"{p}.agent.entry_class must be one of {sorted(ENTRY_CLASSES)} (got {ec!r})")

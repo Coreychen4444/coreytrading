@@ -180,8 +180,8 @@ def test_nested_next_regime_cannot_smuggle_protected_state(record, mutate):
         submit.apply_proposal(record)
 
 
-@pytest.mark.parametrize("optional", [{}, {"cap_pct_nav": None, "zones": None},
-                                     {"cap_pct_nav": 0.4}])
+@pytest.mark.parametrize("optional", [{"cap_pct_nav": 0.4}, {"cap_pct_nav": 0},
+                                     {"cap_pct_nav": 0.4, "zones": None}])
 def test_future_gate_skeleton_applies_without_changing_current_authority(record, writer, optional):
     before = deepcopy(record["snapshot"]["data"]["card"]["agent"])
     future = {"name": "pending_after_repair", "entry_gate": {
@@ -194,6 +194,23 @@ def test_future_gate_skeleton_applies_without_changing_current_authority(record,
     assert after["current_regime"] == before["current_regime"]
     assert after["zones"]["stop_level"] == before["zones"]["stop_level"]
     assert after["next_regime"] == future
+
+
+@pytest.mark.parametrize("optional", [{}, {"cap_pct_nav": None}, {"cap_pct_nav": None, "zones": None}])
+def test_future_gate_skeleton_without_a_cap_is_rejected(record, writer, optional):
+    """带 gate 却不说授予多少 = 写卡期沉默, 转移期全局失败。
+
+    `next_regime.cap_pct_nav: null` 会在**转移发生的那一刻**才现形 ——
+    `current_regime` 那边要求 numeric, 转移机上行分支原样搬, 于是整本 watchlist
+    写入被拒, 同日达标的其他卡一起没落卡。空 cap 必须在提交边界就挡掉;
+    「这道 gate 不授权」有合法写法: 显式 0。
+    """
+    future = {"name": "pending_after_repair", "entry_gate": {
+        "level": 130, "days": 2, "volume_ratio_min": 1.2}, **optional}
+    record["result"]["proposal"]["zone_update_args"] += ["--next-regime", json.dumps(future)]
+    bind_review(record)
+    with pytest.raises(submit.SubmitError, match="cap_pct_nav"):
+        submit.apply_proposal(record, apply=True)
 
 
 @pytest.mark.parametrize("mutate", [
@@ -550,3 +567,51 @@ def test_worker_cannot_use_the_clear_stop_escape_hatch(record):
     bind_review(record)
     with pytest.raises(submit.SubmitError, match="unauthorized"):
         submit.apply_proposal(record, apply=False)
+
+
+# ── thesis.frame: 受控路径与人工 CLI 走同一个判别式 ─────────────────────
+def _synthetic_frame(**over):
+    frame = {"as_of": "2026-09-04", "hypothesis": "Synthetic revenue rests on demand leg A",
+             "drivers": [{"name": "A", "mechanism": "usage billing", "evidence": "待核实", "kpi": "A share"}],
+             "bear_case": {"claim": "competitor parity", "rebuttal": "待核实",
+                           "falsifier": "A revenue turns negative"},
+             "valuation": "待核实",
+             "catalyst": {"event": "next print", "date": "待核实", "baseline": "待核实", "watch": ["A share"]},
+             "sources": ["synthetic fixture"]}
+    frame.update(over)
+    return frame
+
+
+def test_worker_thesis_frame_applies_through_the_same_writer(record, writer, monkeypatch):
+    monkeypatch.setattr(writer, "et_today", lambda: "2026-09-05")
+    record["result"]["proposal"]["zone_update_args"] += ["--thesis-frame", json.dumps(_synthetic_frame())]
+    bind_review(record)
+    assert submit.preview_candidate(record)["can_apply"] is True
+    assert submit.apply_proposal(record, apply=True)["status"] == "applied"
+    thesis = json.loads(writer.WATCHLIST_PATH.read_text())["tickers"]["SYN"]["agent"]["thesis"]
+    assert thesis["frame"] == _synthetic_frame()
+    assert thesis["summary"] == _synthetic_frame()["hypothesis"]
+
+
+@pytest.mark.parametrize("frame", [_synthetic_frame(rating="OW"), _synthetic_frame(drivers=[]),
+                                   ["not", "an", "object"]])
+def test_malformed_thesis_frame_is_rejected_at_the_boundary(record, frame):
+    record["result"]["proposal"]["zone_update_args"] += ["--thesis-frame", json.dumps(frame)]
+    bind_review(record)
+    with pytest.raises(submit.SubmitError, match="thesis-frame"):
+        submit.apply_proposal(record)
+
+
+def test_preview_blocks_a_frame_that_drops_reached_watch_items(record, writer, monkeypatch):
+    """预注册的看点到期后被静默换掉 = 事件后讲故事; Desktop 会话在 preview 就要看到。"""
+    monkeypatch.setattr(writer, "et_today", lambda: "2026-09-05")
+    data = record["snapshot"]["data"]
+    prior = _synthetic_frame(catalyst={"event": "last print", "date": "2026-09-01",
+                                       "baseline": "待核实", "watch": ["A share"]})
+    data["card"]["agent"]["thesis"].update(summary=prior["hypothesis"], frame=prior)
+    data["card_revision"] = card_revision(data["card"])
+    record["result"]["proposal"]["zone_update_args"] += ["--thesis-frame", json.dumps(_synthetic_frame())]
+    rebind_snapshot(record)
+    receipt = submit.preview_candidate(record)
+    assert receipt["can_apply"] is False
+    assert any("review" in reason for reason in receipt["blocked_reasons"])

@@ -170,3 +170,55 @@ def test_zero_absent_never_touches_another_brokers_position(tmp_state):
     state_io.update_broker_blocks({"INTC": {"qty": 29.0, "currency": "USD"}},
                                   zero_absent=True)
     assert json.loads(tmp_state.read_text())["tickers"]["SIVE"]["broker"]["qty"] == 5.0
+
+
+# ── 写闸的归责口径 ────────────────────────────────────────────────
+#
+# 「整份文件必须干净」的实际效果是: 一张早就不合规的卡冻结这个文件的所有
+# 写路径 —— 一个空 cap 就能让整本零转移, 连带同日达标的其他卡也没落卡,
+# 外面只看到「无 regime 转移」。判据 = 这次写入有没有把文件弄坏。
+
+def _two_card_book(pos_path):
+    doc = _seed(pos_path)
+    doc["tickers"]["SYNB"] = json.loads(json.dumps(doc["tickers"]["MU"]))
+    pos_path.write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
+def test_untouched_broken_card_does_not_block_another_cards_write(tmp_state, capsys):
+    doc = _two_card_book(tmp_state)
+    doc["tickers"]["SYNB"]["agent"]["thesis"]["summary"] = ""      # 坏卡, 本次不碰
+    tmp_state.write_text(json.dumps(doc), encoding="utf-8")
+    doc["tickers"]["MU"]["agent"]["action"]["reason"] = "updated"  # 只动 MU
+    state_io.write_positions(doc)
+    on_disk = json.loads(tmp_state.read_text())
+    assert on_disk["tickers"]["MU"]["agent"]["action"]["reason"] == "updated"
+    assert "既存错误未被本次写入触及" in capsys.readouterr().err
+
+
+def test_touching_a_broken_card_still_aborts(tmp_state):
+    """「没碰就不用修」不能变成绕过校验的后门: 动了这张卡就得把它留在合规状态。"""
+    doc = _two_card_book(tmp_state)
+    doc["tickers"]["SYNB"]["agent"]["thesis"]["summary"] = ""
+    tmp_state.write_text(json.dumps(doc), encoding="utf-8")
+    before = tmp_state.read_text()
+    doc["tickers"]["SYNB"]["agent"]["action"]["reason"] = "touched it"
+    with pytest.raises(RuntimeError, match="schema validation"):
+        state_io.write_positions(doc)
+    assert tmp_state.read_text() == before
+
+
+def test_a_newly_introduced_error_always_aborts(tmp_state):
+    doc = _seed(tmp_state)
+    before = tmp_state.read_text()
+    doc["tickers"]["MU"]["agent"]["current_regime"]["cap_pct_nav"] = None
+    with pytest.raises(RuntimeError, match="schema validation"):
+        state_io.write_positions(doc)
+    assert tmp_state.read_text() == before
+
+
+def test_a_document_level_error_is_never_waived(tmp_state):
+    """非 ticker 归属的错误是整本的结构, 不归任何单卡 —— 即使是旧错也一律拦。"""
+    tmp_state.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="schema validation"):
+        state_io.write_positions({"schema_version": 2, "generated_at": "2026-06-12T00:00:00Z"})

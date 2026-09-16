@@ -74,6 +74,7 @@ from quant.core.num import coerce_float  # noqa: E402
 from quant.core.paths import (EARNINGS_CALENDAR_PATH, KLINE_CACHE_DIR,  # noqa: E402
                               KLINE_DEEP_DIR, POSITIONS_PATH, WATCHLIST_PATH)
 from quant.core.sectors import benchmark_for  # noqa: E402
+from quant.core import bottom_evidence  # noqa: E402  (底部确认概率: 随机游走位置几何, 零参数)
 from quant.decision.level_map import cluster_pivots, find_lvn, top_hvn  # noqa: E402
 from quant.decision.regime_transition import (rel_volume, streak_above,  # noqa: E402
                                               volume_leg)
@@ -818,6 +819,7 @@ def bottom_block(bars: List[dict], atr20: Optional[float], dv: Optional[Dict]) -
         "lh": _pct_n(b.get("lh"), close, atr20),
     }
     b["probe"] = setups.probe_marker(bars, atr20) if b.get("listed") else None
+    b["confirm_p"] = confirm_block(b, bars)
     wk = (dv or {}).get("weekly")
     if wk:
         wph = "推进中" if wk["phase"] == 0 else f"观察{'①②③'[wk['phase'] - 1]}"
@@ -828,6 +830,20 @@ def bottom_block(bars: List[dict], atr20: Optional[float], dv: Optional[Dict]) -
     else:
         b["weekly_cn"], b["weekly_prior"] = None, None
     return b
+
+
+def confirm_block(b: Dict, bars: List[dict]) -> Optional[Dict]:
+    """底部确认概率（`core/bottom_evidence`）：
+    20 根内**先收盘越前高、后才收破止跌低**的随机游走概率（位置 × 该票 HV20，零拟合参数）。
+
+    只给 ✓止跌 且前高在止跌低之上的框架；已收在前高之上 = 已确认（不给数）。**不是排序键**：离止损越近
+    概率越低、赔率越高，两者是同一件几何。"""
+    if b.get("stage") != "formed" or not b.get("lh") or not b.get("low") or float(b["lh"]) <= float(b["low"]):
+        return None
+    if b.get("above_lh"):
+        return {"state": "above", "p": None, "cn": "已越前高"}
+    p = bottom_evidence.confirm_prob_rw(b.get("close"), b["low"], b["lh"], bottom_evidence.daily_sigma(bars))
+    return None if p is None else {"state": "open", "p": p, "cn": f"{p:.0%}"}
 
 
 def _last_up_transition(agent: Optional[Dict]) -> Optional[Dict]:
@@ -940,6 +956,11 @@ def setups_lines(r: Dict) -> List[str]:
                         + (f"，更高的低点 {str(b.get('higher_low_date') or '')[5:]} 守住" if b.get("higher_low") else "，回踩进行中")
                         + "）" if b.get("pullback_low") else "")
                      + (f"　前高 {b['lh']:g}（{b['lh_date'][5:]}，{b['dist']['lh']}）" if b.get("lh") else "　前高无（60 日内无分形高）"))
+            cf = b.get("confirm_p")
+            if cf:
+                L.append("　　底部确认：" + (f"收盘已越前高 {b['lh']:g}" if cf["state"] == "above" else
+                         f"{cf['cn']}（20 根内先收盘越前高 {b['lh']:g}、后才收破止跌低 {b['low']:g} 的概率；"
+                         "位置 × 波动的随机游走基准，零参数；离止损越近越低、赔率越高，不是排序键）"))
             L.append("　　下一步：" + _next_step(b))
         if b.get("undercut_prev"):
             L.append(f"　　⚠️ {b['undercut_prev']['cn']} —— 止损在下影线低点的仓位盘中已被扫，归执行层裁")
@@ -1108,8 +1129,8 @@ def render(r: Dict) -> str:
 # 推送：两种模式清单（只列这两种形态已形成或即将形成的标的）
 # ══════════════════════════════════════════════════════════════════
 
-BOTTOM_TABLE_HEADER = ("| 票 | 止跌 | 止跌低=stop | 反弹 | 前高 | 反弹/反转 |",
-                       "|---|---|---|---|---|---|")
+BOTTOM_TABLE_HEADER = ("| 票 | 止跌 | 止跌低=stop | 反弹 | 前高 | 确认 | 反弹/反转 |",
+                       "|---|---|---|---|---|---|---|")
 TREND_TABLE_HEADER = ("| 票 | 状态 | gate | 计数 | 量腿 | 距离 |",
                       "|---|---|---|---|---|---|")
 
@@ -1154,7 +1175,9 @@ def bottom_row(r: Dict) -> str:
         verdict += f" ｜ {b['weekly_cn']}"
     if b.get("probe"):
         verdict += f" ｜ {b['probe']}"
-    return _row((who, stage, low, bh, lh, verdict))
+    cf = b.get("confirm_p")
+    confirm = cf["cn"] if cf else "—"
+    return _row((who, stage, low, bh, lh, confirm, verdict))
 
 
 def trend_row(r: Dict) -> str:
@@ -1203,7 +1226,8 @@ def digest(reports: List[Dict], asof: Optional[str] = None) -> str:
     rest = sorted(r["ticker"] for r in ok if r["ticker"] not in listed)
     L = [f"## [FYI] 收盘判读 {asof or ''} · 两种模式 · 判读层，零授权效力".replace("  ", " "),
          "> 🔁 抄底 = 近 20 日低距 60 日高 ≥10%，空头衰竭：✓止跌 = 次日未新低 或 止跌日长下影（已形成）；⏳今日新低 = 明日不再新低即止跌（即将形成）；"
-         "✗ = 收破止跌低。止跌低 = 下影线低点 = 止损。反弹/反转 = 两个事实：越前高（该段下跌最后一个 lower high）/ 回踩更高低点",
+         "✗ = 收破止跌低。止跌低 = 下影线低点 = 止损。反弹/反转 = 两个事实：越前高（该段下跌最后一个 lower high）/ 回踩更高低点。"
+         "确认 = 20 根内先收盘越前高、后才收破止跌低的概率（位置 × 波动的随机游走基准，零参数；离止损越近越低、赔率越高，不是排序键）",
          "> 🚀 趋势确认 = 收盘站上卡片 gate ×N + 量腿 RelVR≥1.1 → 转移；只列 ≤5 根内已转移 / 站稳量腿未过 / 计数中 / gate 之下 ≤1N。"
          "已形成 = ✓已转移·✅站稳；即将形成 = ⏳▫️",
          ""]

@@ -42,6 +42,7 @@ from quant.core.occ import is_option_ticker  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, VALUATION_INPUTS_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core import structure  # noqa: E402
 from quant.core.structure import derive_card_regime  # noqa: E402
+from quant.core import thesis_frame  # noqa: E402
 from quant.core.timeutil import et_today, now_utc_iso as utc_now_iso  # noqa: E402
 
 KNOWN_ROLES = {
@@ -97,7 +98,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="显式删除现有 stop_level (只随带价位带的重画使用)。卡上有 stop 的重画不传 "
              "--stop-level = 拒绝写盘 —— 「不传」从来不是「保持」(zones 整块替换)。保持请传原值。",
     )
-    p.add_argument("--thesis", default="")
+    p.add_argument("--thesis", default="",
+                   help="旧散文 thesis.summary。卡上已有 thesis.frame 后拒绝 (改假设走 --thesis-frame)")
+    p.add_argument(
+        "--thesis-frame", default=None,
+        help="JSON: agent.thesis.frame — 基本面判断框架 (假设 / 驱动 / 空头与证伪 / 估值 / 下一催化剂 / 出处; "
+             "写法见可选方法 agents/methods/fundamental-frame.md (若配置), 形状判别式 quant/core/thesis_frame.py)。"
+             "写入即由 hypothesis 派生 thesis.summary, 与 --thesis 二选一; 上一版 catalyst 到了事件日 → "
+             "新 frame 必须带 review 逐条对账, 否则拒绝写盘。省略 = 保留现有。零授权。",
+    )
     p.add_argument("--key-risk", default="")
     p.add_argument("--invalid-if", default="")
     p.add_argument("--notes", default="", help="Free-form notes (currently appended to thesis if non-empty)")
@@ -209,8 +218,54 @@ def load_doc(path: Path, *, required: bool = False) -> Dict[str, Any]:
 def apply_notes(thesis: Dict[str, Any], notes: str) -> None:
     """Idempotent notes block: replaces any prior '[notes]' block instead of
     appending again (repeated CLI runs used to duplicate the block)."""
-    base = (thesis.get("summary") or "").split("\n\n[notes] ")[0].rstrip()
-    thesis["summary"] = base + "\n\n[notes] " + notes
+    base = thesis_frame.summary_base(thesis.get("summary"))
+    thesis["summary"] = base + thesis_frame.NOTES_SEPARATOR + notes
+
+
+def apply_thesis(agent: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    """thesis 块写入语义 (两代卡共存; 存量卡不立即迁, 重画时逐张替换)。
+
+    · --thesis-frame: 写 thesis.frame, summary = hypothesis (单一真源); 与 --thesis 同传拒绝;
+      上一版 catalyst 已到事件日而新 frame 没有逐条对账 → 拒绝 (thesis_frame.transition_errors)。
+    · --thesis: 只写旧散文卡; 卡上已有 frame 时拒绝 —— 否则 summary 与 hypothesis 两个真源分叉。
+    · 都不传: frame 与 summary 原样保留 (thesis 是并入, 不是 zones 那种整块替换)。
+    拒绝一律 ValueError: 受控提交的 preview 靠 `except Exception` 把它变成 blocked_reason,
+    SystemExit 会越过那一层。
+    """
+    thesis = dict(agent.get("thesis") or {})
+    prior_frame = thesis.get("frame")
+    raw_frame = getattr(args, "thesis_frame", None)     # 手搓 Namespace 的调用方 (测试 / 旧脚本) 没有这个属性
+    if raw_frame is not None:
+        if args.thesis:
+            raise ValueError("--thesis 与 --thesis-frame 二选一: frame 卡的 summary 由 hypothesis 派生 — abort, 未写盘")
+        frame = json.loads(raw_frame)
+        errors = (thesis_frame.frame_errors(frame)
+                  or thesis_frame.transition_errors(prior_frame, frame, et_today()))
+        if errors:
+            raise ValueError("thesis frame rejected: " + "; ".join(errors) + " — abort, 未写盘")
+        thesis["frame"] = frame
+        thesis["summary"] = frame["hypothesis"].strip()
+        if thesis.get("status") == "needs_card":
+            thesis["status"] = "intact"
+    elif args.thesis:
+        if prior_frame is not None:
+            raise ValueError("卡上已有 thesis.frame: 改假设走 --thesis-frame (--thesis 只写旧散文卡) — abort, 未写盘")
+        thesis["summary"] = args.thesis
+        # stub 卡 (watchlist_sync 建的 needs_card) 拿到真 thesis 即升级为 intact
+        if thesis.get("status") == "needs_card":
+            thesis["status"] = "intact"
+    elif "summary" not in thesis:
+        thesis["summary"] = "[pending]"
+    thesis.setdefault("status", "intact")
+    # 显式覆盖优先于上面的 stub→intact 升级: 一张卡可以同时"有真 thesis"和
+    # "thesis 待再验证" (如验证窗口已到但结果偏弱)。entry_guard 读这个字段决定
+    # gate_only, 此前没有任何写入路径能设它。
+    if args.thesis_status:
+        thesis["status"] = args.thesis_status
+    thesis["conviction"] = args.conviction
+    thesis["last_reviewed"] = utc_now_iso()
+    agent["thesis"] = thesis
+    return thesis
 
 
 def warn_bfloor_gap(ticker: str, agent: Dict[str, Any],
@@ -439,6 +494,20 @@ def warn_missing_stop(ticker: str, agent: Dict[str, Any]) -> None:
               f"--stop-level-days <n> (只传 stop = 并入不重画); brief INFRA:card_missing_stop 逐日点名")
 
 
+def warn_legacy_thesis(ticker: str, agent: Dict[str, Any], *, repainted: bool) -> None:
+    """重画了价位带、thesis 仍是旧散文 → ⚠️ 提醒 (不拦截)。
+
+    已存在的卡片不需要立即同步更新, 重画时逐步替换 ——
+    所以没有全书扫描、没有 brief 点名; 重画这一刻就是替换时点, 提醒只在这一刻出。
+    """
+    thesis = agent.get("thesis")
+    if (not repainted or is_option_ticker(ticker) or not isinstance(thesis, dict)
+            or thesis.get("frame") is not None):
+        return
+    print(f"⚠️ {ticker}: 重画了价位带, thesis 仍是旧散文 — 本次可一并 --thesis-frame '<JSON>' 迁入 "
+          f"(规格 agents/methods/fundamental-frame.md, 若配置; 基本面证伪条件从 invalid_if 移进 bear_case; 不拦截)")
+
+
 def _warn_form_vs_tape(ticker: str, agent: Dict[str, Any], derive_act: str) -> None:
     """画卡时的「形态 ↔ tape」交叉验证（提醒但不拦截）。
 
@@ -538,6 +607,32 @@ def drop_stale_auto_observation(agent: Dict[str, Any], prev_zones: Dict[str, Any
     agent.pop("last_regime", None)
     print(f"[zones] last_regime {lr.get('name') or ''} (auto, 按旧 stop {old_stop:g} 预推) 随 stop "
           f"→ {new_stop:g} 作废并清除 — 转移机在破位时按新 stop 重推 (下行分支只在该块为空时重推)")
+
+
+# 转移机独占字段: 只有 `regime_transition` 的下行分支写得出它 (破位时把上行阶梯的
+# **结构**原样带走, 数字全标 stale)。它不在 `agent_submit.NEXT_KEYS` 里 —— 也就是说
+# 提案方**既传不了它、也没法保留它**: 传 `--next-regime` 整块替换就把它抹掉, 不传
+# 又动不了 gate 的锚。于是一张降级卡的 gate 锚永远停在破位那天, `INFRA:gate_anchor_desync`
+# 天天点名而没有任何合法修法 (报告只能印「块内有转移机字段 preserved_upper_ladder → 未改写」)。
+# 语义与 stop 的写法同拍: **「不传」从来不是「删除」**。
+# 清除归转移机 —— 卡片升回上一档时整块重写, 自然不带它。
+MACHINE_OWNED_NEXT_KEYS = ("preserved_upper_ladder",)
+
+
+def replace_next_regime(agent: Dict[str, Any], raw: str) -> None:
+    """`--next-regime` 整块替换, 但转移机独占字段未提及 = 保留 (不是删除)。"""
+    nr = json.loads(raw)
+    if nr is None:
+        agent.pop("next_regime", None)
+        return
+    prior = agent.get("next_regime")
+    prior = prior if isinstance(prior, dict) else {}
+    for key in MACHINE_OWNED_NEXT_KEYS:
+        if key in prior and key not in nr:
+            nr[key] = prior[key]
+            print(f"[zones] next_regime.{key} 未在本次提案中出现 → 原样保留 "
+                  f"(转移机独占字段, 提案方无通道重写; 清除归转移机升档时整块重写)")
+    agent["next_regime"] = nr
 
 
 def apply_next_gate_anchor(agent: Dict[str, Any], args: argparse.Namespace) -> None:
@@ -654,7 +749,7 @@ def merge_position(
     """Apply CLI args onto an existing positions.json[ticker] block.
 
     Preserve broker / lots / pending_orders / exit_info exactly. Update only
-    instrument.role + agent.zones + agent.thesis (summary, conviction) +
+    instrument.role + agent.zones + agent.thesis (summary / frame, conviction) +
     agent.key_risk / invalid_if + agent.linked_underlying + agent.action.
     """
     out: Dict[str, Any] = dict(existing) if existing else {}
@@ -673,34 +768,14 @@ def merge_position(
     out.setdefault("pending_orders", [])
 
     agent = dict(out.get("agent") or {})
-    thesis = dict(agent.get("thesis") or {})
-    if args.thesis:
-        thesis["summary"] = args.thesis
-        # stub 卡 (watchlist_sync 建的 needs_card) 拿到真 thesis 即升级为 intact
-        if thesis.get("status") == "needs_card":
-            thesis["status"] = "intact"
-    elif "summary" not in thesis:
-        thesis["summary"] = "[pending]"
-    thesis.setdefault("status", "intact")
-    # 显式覆盖优先于上面的 stub→intact 升级: 一张卡可以同时"有真 thesis"和
-    # "thesis 待再验证" (如验证窗口已到但结果偏弱)。entry_guard 读这个字段决定
-    # gate_only, 此前没有任何写入路径能设它。
-    if args.thesis_status:
-        thesis["status"] = args.thesis_status
-    thesis["conviction"] = args.conviction
-    thesis["last_reviewed"] = utc_now_iso()
-    agent["thesis"] = thesis
+    thesis = apply_thesis(agent, args)
 
     prev_zones = dict(agent.get("zones") or {}) if isinstance(agent.get("zones"), dict) else {}
     zones_block = build_zones_block(args, ticker=ticker)
     apply_zones_block(agent, zones_block, clear_stop=bool(getattr(args, "clear_stop", False)))
     drop_stale_auto_observation(agent, prev_zones)
     if args.next_regime is not None:
-        nr = json.loads(args.next_regime)
-        if nr is None:
-            agent.pop("next_regime", None)
-        else:
-            agent["next_regime"] = nr
+        replace_next_regime(agent, args.next_regime)
     apply_repair_gate_anchor(agent, args)
     apply_next_gate_anchor(agent, args)
     # card 源 current_regime 跟着结构走 (regime 统一); 期权卡不参与
@@ -756,34 +831,14 @@ def merge_candidate(
     out.setdefault("status", args.status or "watching")
 
     agent = dict(out.get("agent") or {})
-    thesis = dict(agent.get("thesis") or {})
-    if args.thesis:
-        thesis["summary"] = args.thesis
-        # stub 卡 (watchlist_sync 建的 needs_card) 拿到真 thesis 即升级为 intact
-        if thesis.get("status") == "needs_card":
-            thesis["status"] = "intact"
-    elif "summary" not in thesis:
-        thesis["summary"] = "[pending]"
-    thesis.setdefault("status", "intact")
-    # 显式覆盖优先于上面的 stub→intact 升级: 一张卡可以同时"有真 thesis"和
-    # "thesis 待再验证" (如验证窗口已到但结果偏弱)。entry_guard 读这个字段决定
-    # gate_only, 此前没有任何写入路径能设它。
-    if args.thesis_status:
-        thesis["status"] = args.thesis_status
-    thesis["conviction"] = args.conviction
-    thesis["last_reviewed"] = utc_now_iso()
-    agent["thesis"] = thesis
+    thesis = apply_thesis(agent, args)
 
     prev_zones = dict(agent.get("zones") or {}) if isinstance(agent.get("zones"), dict) else {}
     zones_block = build_zones_block(args, ticker=str(out.get("_ticker") or ""))
     apply_zones_block(agent, zones_block, clear_stop=bool(getattr(args, "clear_stop", False)))
     drop_stale_auto_observation(agent, prev_zones)
     if args.next_regime is not None:
-        nr = json.loads(args.next_regime)
-        if nr is None:
-            agent.pop("next_regime", None)
-        else:
-            agent["next_regime"] = nr
+        replace_next_regime(agent, args.next_regime)
     apply_repair_gate_anchor(agent, args)
     apply_next_gate_anchor(agent, args)
     # card 源 current_regime 跟着结构走 (regime 统一 ; 机器源不触碰)
@@ -901,6 +956,8 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
         warn_bfloor_gap(ticker, written.get("agent") or {})
         warn_missing_next_gate(ticker, written.get("agent") or {})
         warn_missing_stop(ticker, written.get("agent") or {})
+        warn_legacy_thesis(ticker, written.get("agent") or {},
+                           repainted=bool(set(build_zones_block(args, ticker=ticker)) & REPAINT_KEYS))
 
         # 保留路径防呆 (): 无 zone 参数的调用是"保留路径" —— 输出的
         # zones / next_regime 必须与输入逐字节相同, 变异即 abort 不落盘。

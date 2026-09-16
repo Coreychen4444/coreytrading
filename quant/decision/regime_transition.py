@@ -33,6 +33,7 @@ CLI:
 from __future__ import annotations
 
 from contextlib import nullcontext
+from copy import deepcopy
 
 import sys
 from pathlib import Path
@@ -57,6 +58,17 @@ from quant.core.paths import KLINE_CACHE_DIR, KLINE_DEEP_DIR  # noqa: E402
 from quant.core.sectors import benchmark_for  # noqa: E402  量比基准映射 (冻结表)
 from quant.core.sizing import NOTIONAL_CAP  # noqa: E402
 from quant.core.timeutil import et_today  # noqa: E402
+from quant.core import schema as _schema  # noqa: E402  每票隔离校验 (与 state_io 写闸同一份)
+
+
+class TransitionCardError(ValueError):
+    """这一张卡的转移落不了库 —— 其余各票不受影响。
+
+    若把整本文件当一个事务 (逐票 apply 完再 `write(doc)`), 任何一票让 schema 不过就
+    **全书零转移** —— 一张卡的空 cap 会连带扣住同日已达标的其他卡, 报告还渲染成
+    「盘后：无 regime 转移」。一张卡的字段缺失不该有全局爆炸半径。
+    """
+
 
 PARAMS = {
     # 算钱口径统一 ATR20 (stop 距离 / sizing 必须同一个 N, 见 trend-exit-system §2b)
@@ -547,9 +559,18 @@ def apply_transition(card: Dict, tr: Dict, klines: Optional[List[dict]] = None) 
         agent["zones"] = new_zones
         # 升档同样要落 current_regime —— 否则"上一次是向下转移"留下的 cap 0
         # 会残留下来, 把一个已经修复的仓位永久锁死。
+        # cap 必须是数字 —— current_regime 那边 schema 要求 numeric, 这里原样搬
+        # 会把「卡上没写」兑换成**整本文件写入被拒** (达标的转移一笔未落, 报告还印成
+        # 「无转移」)。schema 在
+        # 写卡期就拦住带 gate 的空 cap; 这里是第二道闸, 转移不靠运气。
+        granted = nr.get("cap_pct_nav")
+        if not isinstance(granted, (int, float)) or isinstance(granted, bool):
+            raise TransitionCardError(
+                f"next_regime.cap_pct_nav 不是数字 ({granted!r}) — 这道 gate 授予多少"
+                f"卡上没说, 转移无法落库。中间站写显式 0, 授权站写 {NOTIONAL_CAP}")
         agent["current_regime"] = {
             "name": nr.get("name") or f"promoted_at_{tr['date']}",
-            "cap_pct_nav": nr.get("cap_pct_nav"),
+            "cap_pct_nav": granted,
             "participation": nr.get("participation") or "zone_eligible",
             "source": nr.get("source") or "auto",
             "since": tr["date"],
@@ -558,13 +579,22 @@ def apply_transition(card: Dict, tr: Dict, klines: Optional[List[dict]] = None) 
         action["intent"] = "hold"
         # next ← preview 的骨架 (只有 gate 和 cap, zone 待推导)
         preview = dict(nr.get("next_gate_preview") or {})
+        # preview 块历来不带 cap (它只是「再上一档在哪」), 于是骨架的 cap 是 None ——
+        # 而骨架带着 entry_gate, 下一次转移会在它身上重演空 cap 的全局失败。
+        # 继承本次刚授予的 cap: 骨架本来就锁在 pending_repaint.slots=["next"] 里
+        # (补画前 entry_guard = NEEDS_CARD), 继承值是占位不是授权, 补画时重新回答。
+        preview_cap = preview.get("cap_pct_nav")
+        if not isinstance(preview_cap, (int, float)) or isinstance(preview_cap, bool):
+            preview_cap = granted
         agent["next_regime"] = {
             "name": f"pending_after_{nr.get('name') or tr['date']}",
             "entry_gate": {k: preview[k] for k in ("level", "days",
                                                    "volume_ratio_min") if k in preview} or None,
-            "cap_pct_nav": preview.get("cap_pct_nav"),
+            "cap_pct_nav": preview_cap,
             "zones": None,
-            "derivation": "上一档 preview 的骨架 — zone 待 trading-analysis 推导",
+            "derivation": ("上一档 preview 的骨架 — zone 待 trading-analysis 推导"
+                           + ("" if preview.get("cap_pct_nav") is not None else
+                              f"; cap {preview_cap} 继承自本次转移 (preview 未声明), 补画时重新回答")),
         } if preview else None
         # 新 current 的 provisional 项 + 新 next 都要补画才能授权
         slots = ["next"]
@@ -692,13 +722,21 @@ def run(apply: bool = False) -> Dict:
     buckets = (
         ("positions", state_io.read_positions, state_io.write_positions),
         ("watchlist", state_io.read_watchlist, state_io.write_watchlist),
-)
+    )
+    rejected: List[Dict] = []
+    stale_cards: List[str] = []
     for bucket, read, write in buckets:
         # Hold the lock from the read through the merge and write. Locking only
         # write(doc) can overwrite a broker sync or a newly repainted card with
         # the old whole-document snapshot. A preview neither writes nor locks.
         with state_lock() if apply else nullcontext():
             doc = read()
+            validate = (_schema.validate_positions_doc if bucket == "positions"
+                        else _schema.validate_watchlist_doc)
+            # 基线 = 转移**之前**这本文件已有的错误。判据是「这笔转移新造出什么」,
+            # 不是「这本文件干不干净」—— 否则转移机会替上游的旧账坐牢, 而那正好是
+            # 反的: 一张早就不合规的卡会把当天所有合规转移一起扣住。
+            baseline = set(validate(doc)[0])
             hits: List[Dict] = []
             for ticker, card in (doc.get("tickers") or {}).items():
                 if bucket == "positions":
@@ -711,19 +749,61 @@ def run(apply: bool = False) -> Dict:
                     if card.get("moomoo_listed") is False:
                         continue
                 tr = detect_transition(ticker, card, today=today)
-                if tr:
-                    tr["bucket"] = bucket
+                if not tr:
+                    continue
+                tr["bucket"] = bucket
+                if not apply:
                     found.append(tr)
-                    hits.append(tr)
-                    if apply:
-                        apply_transition(card, tr)
+                    continue
+                # 爆炸半径 = 1 张卡。在这张卡的**副本**上转移,
+                # 只有它自己过了写闸才合入 doc —— 坏票留原样并逐笔报出, 其余照常落库。
+                # 校验用的是 state_io 写盘时的同一份判别式, 不另写一套 (同概念两份
+                # 判别式会漂移)。
+                probe = deepcopy(doc)
+                try:
+                    apply_transition(probe["tickers"][ticker], tr)
+                    introduced = sorted(set(validate(probe)[0]) - baseline)
+                    if introduced:
+                        raise TransitionCardError("; ".join(introduced[:4]))
+                except TransitionCardError as exc:
+                    rejected.append({"ticker": ticker, "bucket": bucket,
+                                     "direction": tr.get("direction"), "level": tr.get("level"),
+                                     "reason": tr.get("reason"), "error": str(exc)})
+                    print(f"[regime] ⛔ {ticker} 转移被拒 (本票跳过, 其余照常): {exc}",
+                          file=sys.stderr)
+                    continue
+                doc["tickers"][ticker] = probe["tickers"][ticker]
+                baseline = set(validate(doc)[0])
+                found.append(tr)
+                hits.append(tr)
             if apply and hits:
-                write(doc)
+                try:
+                    write(doc)
+                except Exception as exc:                    # noqa: BLE001  写闸拒绝 = 要诊断不要 traceback
+                    # 写闸校验的是**整份文件**, 不是单卡 —— 一张早就不合规的卡能把当天
+                    # 所有合规转移一起焊死, 而且原来是在 write() 里以裸 traceback 现形
+                    # (表现为「无 regime 转移」+ stderr 里一段栈)。
+                    # baseline 是进场前就已存在的错误, 逐条点名 —— 那才是要修的东西。
+                    stale_cards.extend(sorted(baseline))
+                    print(f"[regime] ⛔ {bucket}: 本轮 {len(hits)} 笔转移未落库 — {exc}",
+                          file=sys.stderr)
+                    if baseline:
+                        print(f"[regime]    文件已有 {len(baseline)} 条既存 schema 错误 "
+                              f"(写闸校验整份文件, 与本轮转移无关), 先修这些卡:", file=sys.stderr)
+                        for err in sorted(baseline):
+                            print(f"           · {err}", file=sys.stderr)
+                    for tr in hits:
+                        rejected.append({"ticker": tr["ticker"], "bucket": bucket,
+                                         "direction": tr.get("direction"), "level": tr.get("level"),
+                                         "reason": tr.get("reason"),
+                                         "error": f"write_aborted: {exc}"})
+                        found.remove(tr)
         for t, c in (doc.get("tickers") or {}).items():
             pr = (c.get("agent") or {}).get("pending_repaint")
             if pr:
                 pending[t] = pr
     return {"date": today, "transitions": found, "applied": bool(apply and found),
+            "rejected": rejected, "preexisting_card_errors": stale_cards,
             "pending_repaint": pending}
 
 
@@ -744,6 +824,10 @@ def main() -> int:
         arrow = "↑" if t["direction"] == "up" else "↓"
         print(f"[regime] {arrow} {t['ticker']}: {t['reason']}"
               + ("  → 已执行" if out["applied"] else "  (--apply 才写)"))
+    for rj in (out.get("rejected") or []):
+        print(f"[regime] ⛔ {rj['ticker']} 达标但落不了库 — {rj['error']}")
+    for err in (out.get("preexisting_card_errors") or []):
+        print(f"[regime] 🩹 先修这张卡 (挡住本轮落库): {err}")
     for tk, pr in (out.get("pending_repaint") or {}).items():
         print(f"[regime] ⏳ {tk} 待补画 {pr.get('slots')} (since {pr.get('since')}) — "
               "补画前不授权入场")

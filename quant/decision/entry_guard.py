@@ -53,7 +53,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
-from quant.core import book, dow, earnings, market_sessions, reversal  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓 + 短期道氏排序键 + 交易日历 + 反转探针判别式)
+from quant.core import book, bottom_evidence, dow, earnings, market_sessions, reversal  # noqa: E402  (NAV/ATR20/组合占用 + 财报反应日缩仓 + 短期道氏排序键 + 交易日历 + 反转探针判别式)
 from quant.core.holdings import is_candidate, is_traded  # noqa: E402  (参考票判据单一真源)
 from quant.data import iv_logger  # noqa: E402  (期权 IV 硬门槛的 percentile 源)
 from quant.core.io_json import append_jsonl, iter_jsonl, read_json  # noqa: E402
@@ -621,7 +621,9 @@ def dow_line(pr: dict) -> str:
 #
 # 第二入场类, 不是替代: 正股 gate 授权一字不动; 本类只对**空仓**的候选卡出计划 (抄底的前提是该
 # 标的为空仓; 持仓票的加仓仍走 cap + Iron Rule #2 v2)。
-#   信号   = setups.bottom_setup 的 ✓止跌 (止跌低之后次日未新低 或 止跌日长下影), 有效 valid_days 个交易日
+#   信号   = setups.bottom_setup 的 ✓止跌 (止跌低之后次日未新低 或 止跌日长下影)
+#   有效   = 存活 (无收盘 < 止跌低) ∧ 收盘 ≤ 止跌低 + max_dist_atr×ATR20 ∧ age < valid_days (10)
+#            (位置受控后年龄无效; ATR 是上限不是门槛, 防止离底部太远、进场距离不上不下 → TOO_FAR 只播不授权)
 #   域     = R0: 止跌低距 60 日高 ≥10% (不排 R2; 见 bottom_stage_backtest 探索定价)
 #   限价   = reversal.ladder: min(信号收盘, 最新收盘) / 止跌低之上 2/3 / 1/3 (不锚 z1, z1 是 gate 类的锚)
 #   止损   = 止跌低 (下影线低点) 收盘 ×1, 无 S1 (exit_guard 按卡 entry_class 分流; 正股 = 卡 stop)
@@ -650,11 +652,29 @@ def _held_tickers() -> Optional[set]:
     return _HELD_CACHE
 
 
+def confirm_line(rows: List[dict], sig: dict) -> Optional[str]:
+    """[FYI] 底部确认概率 (core/bottom_evidence):
+    20 根内先收盘越前高、后才收破止跌低的随机游走概率 (最新收盘的位置 × HV20, 零拟合参数)。
+    **判读, 不进 verdict / cap / 阶梯 / Today 取舍** (tests/decision/test_entry_guard.py 钉); 也不是排序键
+    (离止损越近概率越低、赔率越高, 同一件几何)。"""
+    lh, sup = coerce_float(sig.get("lower_high")), coerce_float(sig.get("support"))
+    last = coerce_float(rows[-1].get("close")) if rows else None
+    if not (lh and sup and last) or lh <= sup:
+        return None
+    if last > lh:
+        return f"[FYI] 底部确认: 收盘 {last:g} 已越前高 {lh:g}"
+    p = bottom_evidence.confirm_prob_rw(last, sup, lh, bottom_evidence.daily_sigma(rows))
+    if p is None:
+        return None
+    return (f"[FYI] 底部确认概率 {p:.0%} (20 根内先收盘越前高 {lh:g}、后才收破止跌低 {sup:g}; "
+            "位置 × 波动的随机游走基准, 零参数; 判读不进 cap, 不是排序键)")
+
+
 def reversal_probe_plan(tk: str, rows: List[dict], atr: Optional[float],
                         nav: Optional[float], usage: Optional[dict], today: str,
                         exposure: Optional[float] = None,
                         held: Optional[set] = None) -> Optional[dict]:
-    """→ None (无信号) | {"verdict": PLAN|OUT_OF_DOMAIN|VETO|NEEDS_CHAIN, signal, lines, reasons,
+    """→ None (无信号) | {"verdict": PLAN|OUT_OF_DOMAIN|TOO_FAR|VETO|NEEDS_CHAIN, signal, lines, reasons,
     ladder, stop, stock_plan, option_plan(_data), cap, loss_frac, valid_until}。
     纯读 (K 线缓存 / iv_history / OpenD 链), 不写文件。`held` = 持仓票集合 (None = 读不到 → 不授权)。"""
     sig = reversal.detect(rows, atr)
@@ -675,7 +695,12 @@ def reversal_probe_plan(tk: str, rows: List[dict], atr: Optional[float],
         + (f" · 止跌日 下影 {sh['lower_pct']}%" if sh.get("lower_pct") is not None else "")
         + f" · 收盘{'已' if sig.get('above_low_bar_high') else '未'}站上止跌日高"
         + f" · 止跌低距 60 日高 {sig['drawdown']:+.1%} → 域 {sig['domain']}"
+        + (f" · 收盘距止跌低 {sig['dist_n']:g}N (上限 {reversal.PARAMS['max_dist_atr']:g}N)"
+           if sig.get("dist_n") is not None else " · 收盘距止跌低 ?N (ATR 缺)")
         + (f" · 有效至 {out['valid_until']}" if out["valid_until"] else ""))
+    cl = confirm_line(rows, sig)
+    if cl:
+        out["lines"].append(cl)
     if held is None:
         out["verdict"] = "VETO"
         out["reasons"].append("⛔ 持仓表读不到 — 抄底前提 (空仓) 判不了, 不授权 (fail-closed)")
@@ -689,6 +714,17 @@ def reversal_probe_plan(tk: str, rows: List[dict], atr: Optional[float],
         out["verdict"] = "OUT_OF_DOMAIN"
         out["reasons"].append(f"域外不开: 止跌低距 60 日高仅 {sig['drawdown']:+.1%}, "
                               f"不算「跌到足够便宜」(门 {reversal.PARAMS['drawdown_min']:.0%}) — 只播不授权")
+        return out
+    if sig.get("too_far") is None:
+        out["verdict"] = "VETO"
+        out["reasons"].append("⛔ ATR20 缺 — 收盘距止跌低判不了 (有效期第二条件), 不授权 (fail-closed)")
+        return out
+    if sig["too_far"]:
+        out["verdict"] = "TOO_FAR"
+        out["reasons"].append(
+            f"离底太远不开: 收盘 {sig['last_close']:g} 距止跌低 {sig['support']:g} = {sig['dist_n']:g}N "
+            f"> {reversal.PARAMS['max_dist_atr']:g}N (已离底部太远, 进场距离不上不下) — "
+            "只播不授权; 回落到上限内且未收破止跌低 = 信号仍在, 计划次日重出")
         return out
     if not nav:
         out["verdict"] = "VETO"
@@ -1391,8 +1427,9 @@ def write_option_plans(results: List[dict], today: str) -> int:
     today_group_sync (合约 code 进 Today 组, 响铃那刻直接下单那张) +
     price_reminder_sync (合约首档限价 oz1 线)。两者**纯文件读**— sync 层不
     import decision (分层)。全量覆盖 = 授权撤销/VETO/重画后旧选约自然消失;
-    刷新节奏 = pipeline briefing 模式 (每日 18:30), postclose 转移的新授权
-    合约信息次日接上 (正股成员 postclose 已即时进组)。
+    刷新节奏 = pipeline briefing + postclose, 且排在 reminders / today_group **之前**
+    (只进 briefing 且排在效果层之后时, 收盘后首档不重锚、收破止跌低的信号多留一天,
+    券商侧抄底线停在上一份计划的价位)。
     """
     from quant.core.io_json import atomic_write_json
     from quant.core.paths import OPTION_PLANS_PATH

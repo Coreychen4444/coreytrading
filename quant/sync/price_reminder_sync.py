@@ -62,7 +62,7 @@ reminders < brief 被测试钉死(brief 必须最后) → 画线用上一轮 gua
 
 所有权边界(关键): 判别 = 词表本身（备注空间给信息不给标记，
 旧 "cc:" 前缀只认不写；上限 40 半宽单位，见 NOTE_WIDTH_MAX）
-— note 恰为 stop/trim/gate/z1/g01 或 "stop:"/"z1:"/"cc:"(legacy, 认旧不写旧) 开头
+— note 恰为 stop/trim/gate/z1/g01 或 "stop:"/"z1:"/"抄底首档:"/"cc:"(legacy, 认旧不写旧) 开头
 = 系统的, 可增删; 并入形态 "a/b" **每段**都须是系统词 (_owned_note);
 其他备注(空/自定义文字) = 用户手动，永不触碰；
 手动提醒与期望值完全相同(code+type+价位)时也不重复添加。裸 "stop" 是旧词，
@@ -108,6 +108,9 @@ from quant.sync.today_group_sync import (# noqa: E402  (同层复用: Today 白�
     desired_members, grant_actual_cap)
 
 LEGACY_PREFIX = "cc:"                       #  前的所有权前缀 — 认旧不写旧, 一轮换血迁移
+# 抄底正股首档线备注前缀 — 写线与认领同读这一个常量。只写不认领会让首档每次重锚都
+# ADD 新线、旧线被当手动永不 DEL (同票残留多条抄底线)。
+BOTTOM_NOTE_PREFIX = "抄底首档:"
 KINDS = ("stop", "trim", "gate", "z1", "nochase", "g01", "oz1")   # oz1 = 期权选约首档限价 ()
 MAX_PER_TICKER = 6
 # nochase 排在 z1 之后: z1 是带预算的可执行线, nochase 是同 regime 的参与上界。
@@ -134,13 +137,14 @@ def _note_width(s: str) -> int:
 
 def _owned_note(note: str) -> bool:
     """所有权判别 = 词表本身: note 恰为 kind 或 "stop:"(binding 来源)/"z1:"(带预算)/
-    "gate:"(cur|next 常驻线)/"cc:"(legacy) 开头 = 系统的;
+    "gate:"(cur|next 常驻线)/"抄底首档:"(抄底正股首档)/"cc:"(legacy) 开头 = 系统的;
     其他(空/自定义文字) = 用户手动, 永不触碰。
     并入形态 "a/b" 的每一段都须是系统词；"trim/nochase" 是，
     "trim/我的备注" 不是。边界只向「系统词的并入」扩, 手动线的误伤面不变。"""
     def seg_owned(s: str) -> bool:
         return (s in KINDS or s.startswith("stop:") or s.startswith("z1:")
                 or s.startswith("gate:") or s.startswith("oz1:")
+                or s.startswith(BOTTOM_NOTE_PREFIX)
                 or s.startswith(LEGACY_PREFIX))
     return bool(note) and all(seg_owned(s) for s in note.split("/"))
 
@@ -463,7 +467,7 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
             st = plan.get("stock") or {}
             if st.get("tiers") and st["tiers"][0].get("price"):
                 d = _line(und, "z1", "PRICE_DOWN", st["tiers"][0]["price"])
-                d["note"] = f"抄底首档:{st['tiers'][0].get('shares') or '?'}股 止损{plan.get('support')}"
+                d["note"] = f"{BOTTOM_NOTE_PREFIX}{st['tiers'][0].get('shares') or '?'}股 止损{plan.get('support')}"
                 lines.append(d)
             if not code or not t0.get("premium"):
                 continue

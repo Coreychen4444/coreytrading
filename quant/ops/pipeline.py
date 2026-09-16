@@ -16,7 +16,8 @@
 差异化只保留两条 (其余全共享):
     · cadence      heartbeat 触发式 / briefing 每日全量
     · 收盘依赖     kline_cache / regime_transition / iv_logger / nav_snapshot /
-                  skhy_premium / entry_guard 需要上一交易日的完整收盘 → 只进 briefing
+                  skhy_premium / entry_guard 需要上一交易日的完整收盘 → 不进 heartbeat
+                  (briefing / postclose 各按需; entry 两者都跑)
 
 盘中运行的两道闸 (ET 13:56 事故):
     整个收盘依赖层都把 kline 的 rows[-1] 读作"昨收", 而此前唯一的保护是
@@ -90,7 +91,8 @@ class Stage:
 #
 # 依赖链: broker 真值 → 事件/订单落库 → watchlist 对账与迁移 → 收盘数据层
 #        → NAV(预算分母) → portfolio_brief(消费以上全部) → regime(转移)
-#        → entry_guard(消费 brief+NAV+转移后授权)
+#        → entry_guard(消费 brief+NAV+转移后授权, 落 option_plans.json)
+#        → 效果层 reminders / today_group(纯读 option_plans.json → 必须排在 entry 之后)
 # portfolio_brief 必须在**全部采集步之后**跑 —— 排在采集中间就是在读半成品。
 # Exit evaluation runs before regime transitions because a demotion may replace the
 # breached stop. Reminder and group effectors run after both the brief and transition.
@@ -179,6 +181,17 @@ STAGES: List[Stage] = [
           (BRIEFING, POSTCLOSE),
           "领域工作流和受控复核写卡；退出评估与机械转移之后、提醒线和入场计划之前。",
           parse_json=True, needs_opend=False, timeout_s=10800),
+    # ↓ 入场计划: 效果层的**上游**。reminders (抄底首档线 / oz1) 与 today_group (抄底正股 + 合约进组)
+    #   都纯读 entry --log 落的 option_plans.json —— 排在它们之后 = 同一轮画的是上一份计划。
+    #   抄底首档按规则随收盘下移 (reversal.ladder: 首档 = min(信号收盘, 最新收盘)); 若 entry 只进
+    #   briefing 且排在效果层之后, 收盘到线刷新隔 ~20h、跨进下一个交易日盘中, 券商侧线还挂着旧锚;
+    #   同一条滞后也让收破止跌低 (信号作废) 的计划在 Today 组与授权盖章里多留一整天。
+    Stage("entry", ["quant/decision/entry_guard.py", "--log"], (BRIEFING, POSTCLOSE),
+          "入场执行计划 (PLAN 变动才落 decisions.jsonl) + option_plans.json (抄底 / 期权选约的授权与首档)。"
+          "须在 brief / nav / regime / agents 之后 (消费转移后世界与写卡后状态)、reminders / today_group "
+          "之前 (它们纯读 option_plans.json)。postclose 同跑 = 当日收盘即重锚首档、撤掉作废信号; "
+          "briefing 的输出为**渲染文本**, 原样进简报",
+          needs_opend=False),
     # ↓ 效果层: 只写外部副作用 (moomoo 画线/分组), brief 不消费它们的任何输出。
     #    定序: 告警先出门 —— 画线/白名单的 OpenD 调用一旦变慢或
     #   挂住 (STAGE_TIMEOUT 上限), 排在 brief 之前就是在堵告警; 排在之后, 告警
@@ -194,9 +207,6 @@ STAGES: List[Stage] = [
     Stage("today_group", ["quant/sync/today_group_sync.py", "--json"], ALL_MODES,
           "reconcile the optional entry-authorization group from post-transition state",
           parse_json=True),
-    Stage("entry", ["quant/decision/entry_guard.py", "--log"], (BRIEFING,),
-          "入场执行计划 (PLAN 变动才落 decisions.jsonl); 输出为**渲染文本**, 原样进简报",
-          needs_opend=False),
 ]
 
 # Cache-only preview is an allowlist: new collectors/effectors are skipped until

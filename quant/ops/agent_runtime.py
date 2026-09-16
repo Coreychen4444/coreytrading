@@ -42,7 +42,10 @@ _METHODS = {
     # decision stack) was sent on every technical/risk call; the operative
     # painting rules are zone-maintenance / position-tiers. The host session
     # contract file is likewise not worker policy.
-    "technical": (),
+    # The fundamental-frame spec is the only basis for writing thesis.frame (workers
+    # have no file tools); it is an optional method and degrades to
+    # optional_methods_missing when not configured.
+    "technical": ("agents/methods/fundamental-frame.md",),
     "risk": (),
     "valuation": ("agents/methods/news-valuation-overlay.md", "quant/valuation/README.md"),
 }
@@ -214,10 +217,11 @@ def policy_context(role: str) -> dict:
         # the submit boundary enforces, instead of asking it to guess CLI flags.
         from quant.ops.agent_submit import (FLAG_ARITY, FLAG_CHOICES, GATE_KEYS,
                                             NEXT_KEYS, ZONE_KEYS)
+        from quant.core.thesis_frame import FRAME_KEYS
         policy["technical_proposal_contract"] = {
             "flag_arity": FLAG_ARITY,
             "flag_choices": {flag: sorted(choices) for flag, choices in FLAG_CHOICES.items()},
-            "nested_json_flags": ["--reclaim-gates", "--next-regime"],
+            "nested_json_flags": ["--reclaim-gates", "--next-regime", "--thesis-frame"],
             "gate_fields": sorted(GATE_KEYS), "next_regime_fields": sorted(NEXT_KEYS),
             "nested_zone_fields": sorted(ZONE_KEYS),
             "next_regime_required_fields": ["name", "entry_gate"],
@@ -228,6 +232,8 @@ def policy_context(role: str) -> dict:
             "repair_anchor_rule": "When redrawing, also examine existing last_regime.repair_gate. If its anchor is older than the completed session, reverify the existing line against frozen bars and provide --repair-gate-anchor-basis with actual evidence. Do not merely restamp an unverified line; report insufficient evidence explicitly.",
             "format": "Flat list of flag/value strings. JSON values must each be one string. No shell, duplicate flags or abbreviations.",
             "state_policy": "Keep current authorization and exit constraints. Describe future regimes only through next-regime; omit any value unsupported by evidence.",
+            "thesis_frame_fields": list(FRAME_KEYS),
+            "thesis_frame_rule": "FYI judgement layer with zero authority, specified in agents/methods/fundamental-frame.md when configured. Use --thesis-frame instead of --thesis (never both; --thesis is rejected once the card has a frame). Provide it after an earnings print or major company event, and when repainting price bands on a card that has no frame yet; write 待核实 for any slot without frozen evidence. Fundamental falsifiers go to bear_case.falsifier, never --invalid-if. If the existing frame's catalyst.date is on or before today (ET), the new frame must include review covering every prior watch item verbatim; when those results are not in the snapshot, omit --thesis-frame.",
         }
     return policy
 

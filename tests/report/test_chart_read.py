@@ -370,8 +370,8 @@ def test_digest_never_silently_drops_a_ticker(report):
 
 def test_digest_bottom_row_says_signal_stop_bounce_lh_and_verdict(report):
     row = CR.bottom_row(_with(report, ticker="NB", bottom=_bottom("formed", probe="🔁探针R1·09-09")))
-    assert row.startswith("| **NB** | ✓止跌 09-02 次日未新低(下影62%) · 收上止跌日高 | 194 (-13.2%/1.6N) | +15.3% · 高 254.74 · 回踩低 223.64 | 228.5 (+1.8%/0.2N) | 反弹（未越前高）")
-    assert "周线级上涨·观察③" in row and "🔁探针R1·09-09" in row and row.count(" | ") == 5
+    assert row.startswith("| **NB** | ✓止跌 09-02 次日未新低(下影62%) · 收上止跌日高 | 194 (-13.2%/1.6N) | +15.3% · 高 254.74 · 回踩低 223.64 | 228.5 (+1.8%/0.2N) | — | 反弹（未越前高）")
+    assert "周线级上涨·观察③" in row and "🔁探针R1·09-09" in row and row.count(" | ") == 6
     hl = CR.bottom_row(_with(report, ticker="NB", bottom=_bottom("formed", higher_low=True, higher_low_date="2026-09-12")))
     assert "回踩低 223.64↑09-12" in hl and "反转候选（回踩更高低点" in hl
     dead = CR.bottom_row(_with(report, ticker="NB", bottom=_bottom("dead", close=188.0)))
@@ -739,3 +739,46 @@ def test_motto_footer_is_appended_by_the_cli_not_the_report(report):
     """座右铭由 tg_notify 尾行附加，判读输出本身不写第二遍。"""
     out = CR.digest([report])
     assert tg.MOTTO_LINE not in out if hasattr(tg, "MOTTO_LINE") else True
+
+
+# ── 底部确认概率（判读列, 零授权; 随机游走位置几何）──
+
+def test_confirm_block_only_for_formed_frames_with_a_prior_high():
+    bars = _bars(_walk(320))
+    ok = CR.confirm_block(_bottom("formed"), bars)
+    assert ok["state"] == "open" and 0.0 < ok["p"] < 1.0 and ok["cn"] == f"{ok['p']:.0%}"
+    assert CR.confirm_block(_bottom("formed", above_lh=True, close=230.0), bars) == \
+        {"state": "above", "p": None, "cn": "已越前高"}
+    for b in (_bottom("watch"), _bottom("dead"), _bottom("formed", lh=None), _bottom("formed", lh=190.0)):
+        assert CR.confirm_block(b, bars) is None
+    near_stop = CR.confirm_block(_bottom("formed", close=196.0), bars)["p"]
+    near_lh = CR.confirm_block(_bottom("formed", close=227.0), bars)["p"]
+    assert near_stop < ok["p"] < near_lh                       # 位置几何: 离止损越近越低, 离前高越近越高
+
+
+def test_digest_bottom_row_carries_the_confirmation_column_and_the_legend_says_not_a_ranking(report):
+    b = _bottom("formed", confirm_p={"state": "open", "p": 0.42, "cn": "42%"})
+    row = CR.bottom_row(_with(report, ticker="NB", bottom=b))
+    assert "| 228.5 (+1.8%/0.2N) | 42% | 反弹（未越前高）" in row
+    above = CR.bottom_row(_with(report, ticker="NB",
+                                bottom=_bottom("formed", confirm_p={"state": "above", "p": None, "cn": "已越前高"})))
+    assert "| 已越前高 |" in above
+    out = CR.digest([_with(report, bottom=b, trend=_trend())])
+    assert "| 确认 |" in out and "不是排序键" in out.splitlines()[1]
+
+
+def test_confirmation_probability_does_not_reorder_the_bottom_table(report):
+    """概率与赔率是同一件几何: 按它排 = 系统性挑赔率差的笔 → 表序只看阶段 / 信号龄 / 票名。"""
+    none = {"state": None, "gate": None}
+    rs = [_with(report, ticker="ZHI", trend=none,
+                bottom=_bottom("formed", bars_since_signal=3, confirm_p={"state": "open", "p": 0.95, "cn": "95%"})),
+          _with(report, ticker="ALO", trend=none,
+                bottom=_bottom("formed", bars_since_signal=3, confirm_p={"state": "open", "p": 0.05, "cn": "5%"}))]
+    order = [re.search(r"\*\*(\w+)\*\*", r).group(1) for r in _table_rows(CR.digest(rs))]
+    assert order == ["ALO", "ZHI"]
+
+
+def test_detail_page_spells_out_what_the_confirmation_probability_means(report):
+    b = _bottom("formed", confirm_p={"state": "open", "p": 0.42, "cn": "42%"})
+    txt = "\n".join(CR.setups_lines(_with(report, bottom=b, trend=_trend())))
+    assert "底部确认：42%（20 根内先收盘越前高 228.5、后才收破止跌低 194 的概率" in txt and "不是排序键" in txt

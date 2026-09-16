@@ -172,7 +172,8 @@ def test_complete_runs_the_writer_candidate_check_before_accepting(environment, 
     item = desktop.claim("claude", root=root)
     payload = deepcopy(record["result"])
     payload["proposal"]["zone_update_args"] += [
-        "--next-regime", json.dumps({"name": "R_next", "entry_gate": {"level": 115, "days": 1, "volume_ratio_min": 1.2}})]
+        "--next-regime", json.dumps({"name": "R_next", "cap_pct_nav": 0.4,
+                                     "entry_gate": {"level": 115, "days": 1, "volume_ratio_min": 1.2}})]
     with pytest.raises(ValueError, match="proposal blocked: .*relax existing gate confirmation"):
         desktop.complete(rid, item["claim_token"], "claude", payload, root=root)
     assert read_json(desktop._path(root, rid))["status"] == "claimed"

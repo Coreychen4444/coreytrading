@@ -15,7 +15,7 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 - **结构修复了吗？** `structure_repair_veto`：trend down / transition 且未收回 last swing high = VETO，整笔不做（无中间档）。
 - **regime cap 给了吗？** 卡片 `current_regime.cap_pct_nav`：0 = 无授权 = VETO。
 - **爬到第几个「给了 cap 的」gate？** `sizing.gate_count`（判据 = 卡上 `regime_history`，不是成交记录）。gate1 max 2.5% / gate2 4% / gate3 5% NAV risk（累计，减当前敞口市值；同一 gate 内可分多笔；破位 / 平仓归第一档）。期权保费上限按本档新增 risk ÷ 0.20 → gate1 12.5% / gate2 7.5% / gate3 5% NAV；gate1 起可期权但须过 IV 硬门槛（`sizing.long_call_iv_gate`），期权正股退出线 = 授予 cap 的 gate ×1 日。
-- **抄底 `reversal_probe`（试行）**：**空仓**候选卡若 entry_guard 印出 `🔁 抄底 reversal_probe — PLAN`，那是第二授权通道（正股阶梯 + 合约计划在块内；**持仓票一律不走**，加仓走 cap + Iron Rule #2 v2）；`VETO` / `正股 0 股且 call 0 张` 不是授权。信号 = 止跌低之后次日未新低 或 止跌日长下影，有效 3 个交易日，过期 = 错过不追；止损 = 止跌低（下影线低点）收盘 ×1，无 S1，破了当日清仓；持有几个交易日看反弹还是反转（越前高 × 回踩更高低点），反弹尽早了结是裁量点不是机械线。
+- **抄底 `reversal_probe`（试行）**：**空仓**候选卡若 entry_guard 印出 `🔁 抄底 reversal_probe — PLAN`，那是第二授权通道（正股阶梯 + 合约计划在块内；**持仓票一律不走**，加仓走 cap + Iron Rule #2 v2）；`VETO` / `正股 0 股且 call 0 张` 不是授权。信号 = 止跌低之后次日未新低 或 止跌日长下影；有效 = 未收破止跌低 ∧ 收盘 ≤ 止跌低 + 2×ATR20 ∧ 信号 <10 根（ATR 是上限不是门槛，离底太远 = `TOO_FAR` 只播不开），失效 = 错过不追；止损 = 止跌低（下影线低点）收盘 ×1，无 S1，破了当日清仓；持有几个交易日看反弹还是反转（越前高 × 回踩更高低点），反弹尽早了结是裁量点不是机械线。PLAN 块的「[FYI] 底部确认概率」= 20 根内先收盘越过前高、后才收破止跌低的随机游走概率（位置 × 波动，零拟合参数；`quant/core/bottom_evidence.py`）：判读不授权、不是排序键（离止损越近概率越低、赔率越高），不进 cap；地标 / 放量 / 超卖 / 背离等共振证据不作为加码理由。
 - 说不清 → "先跑 entry_guard，别动。"
 
 ### Q2 错了怎么认？
@@ -42,7 +42,7 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 | 破 stop 后心存侥幸 | 退出栈告警成立后说 "再看一天 / 盘后收回来了 / 基本面没坏" | 逐字引用 "**stop 破了 ×1 立即清仓退出，不能再心存侥幸**"。不提供看一天选项，不起草 override（棘轮 / 趋势线 / G-01 同样无 override）；未执行 = 规则外评 C 起步，`exit_overdue` 逐日点名 |
 | 30-minute rule | ET 09:30–10:00 表达交易意图 | "开盘 30 分钟内除明确风险削减外先观察。" 订单时间是 ET；pre-market / after-hours 不适用 |
 | Undoing defense | 刚减仓 / 止损后立即想卖 put 或同向买回 | "这笔会不会抵消你刚完成的防守？" |
-| 抄底过期追单 | 抄底 PLAN 过了 `有效至` 日期还想挂 / 价格已涨离信号收盘还想追 / 想在持仓票上「抄底加仓」 | "抄底有效期 3 个交易日，过期 = 错过不追。成交价（正股）或整根 60m bar（call）在信号收盘之上 = `above_signal_close` 规则外评 C 起步。持仓票不走抄底。" 止跌低收破了 = 信号作废，不重挂 |
+| 抄底过期追单 | 抄底 PLAN 过了 `有效至` 日期 / entry_guard 已印 `TOO_FAR` 还想挂 / 价格已涨离信号收盘还想追 / 想在持仓票上「抄底加仓」 | "抄底有效 = 存活 ∧ 收盘 ≤ 止跌低 + 2N ∧ 信号 <10 根，离底太远 = 不开，失效 = 错过不追。成交价（正股）或整根 60m bar（call）在信号收盘之上 = `above_signal_close` 规则外评 C 起步。持仓票不走抄底。" 止跌低收破了 = 信号作废，不重挂 |
 | 期权追高 | 想在确认日盘中买 call / 正股在 z1 上沿之上还想买期权 / "先买一张再说" | "期权锚定正股回踩 z1 的价格，不追高。" 期权限价 = 正股 z1 回踩投影（`entry_guard` 期权阶梯一律 zone 档，所有非 `vehicle=stock` 的 PLAN 卡都出投影 + oz1 线）；成交时正股整根 60m bar 在 z1 上沿之上 = `above_z1`（`trade_history_sync` 落库即盖，跨带归人判）→ `INFRA:fill_price_breach` 点名，规则外评 C 起步 |
 
 ### Parabolic 3 档 ladder（强制；整股约束下先算股数）

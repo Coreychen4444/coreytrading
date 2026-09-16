@@ -6,8 +6,9 @@ Turn analysis into executable price zones instead of vague opinions.
 Execution zones are not static notes. They are the quantified output of:
 - event context
 - K-line structure
-- thesis / fundamental comfort
 - sentiment positioning
+
+Thesis / fundamentals do **not** move zone boundaries (技术面优先 v3). They live in `agent.thesis.frame` — shape discriminator `quant/core/thesis_frame.py`; the writing method lives under `agents/methods/` (若配置).
 
 ## Four-layer model
 
@@ -52,13 +53,10 @@ Zone mapping from K-line:
 - `trim_zone` → daily/weekly resistance / prior high / extension area
 - `no_chase_above` → near or above resistance without fresh confirmation
 
-Do not fake indicators. If K-line data is insufficient, mark 待核实 and use event/thesis layers only.
+Do not fake indicators. If K-line data is insufficient, mark 待核实; thesis alone never produces zones.
 
-### 3) Thesis / fundamental comfort layer
-Ask:
-- At what price would you still be happy to own more if the thesis is right?
-- At what price is the market already pricing too much good news?
-- What price still leaves room for thesis error?
+### 3) Thesis / fundamental layer — [FYI], not a zone input
+Retired as a zone input by 技术面优先 v3: "the price I'd be happy to own more at" is a valuation opinion, not market structure. Write the fundamental view as `agent.thesis.frame` (written with `--thesis-frame`): it answers "is the thesis right, and what would prove it wrong" — never "where to buy".
 
 ### 4) Sentiment / positioning layer
 Ask:
@@ -107,10 +105,12 @@ Usually comes from:
 
 ### invalid_if
 Must be concrete, not poetic.
-Good examples:
+Good examples (price structure only):
 - loses 42-44 support on closing basis
-- event catalyst fails / customer order credibility weakens
-- earnings changes the margin/backlog story materially
+- 2 closes below the reclaimed gate (e.g. 100.0)
+- closes below the post-earnings gap low (e.g. 92.5)
+
+Fundamental falsifiers ("customer order credibility weakens", "earnings change the margin/backlog story") belong in `thesis.frame.bear_case.falsifier`, not in `invalid_if`.
 
 Bad examples:
 - if vibes change

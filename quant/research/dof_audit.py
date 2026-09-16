@@ -90,6 +90,7 @@ NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统�
     "options/option_plan:risk_free",                # 无风险利率 = 市场输入，不是系统可调选择
     "report/portfolio_brief:_cached_closes(n=)",
     "core/technical:_find_local_lows(window=)",     # 内部辅助, 由调用方口径决定
+    "core/bottom_evidence:_EPS",                    # 级数截断精度 = 数值, 不是旋钮
 }
 
 
@@ -213,15 +214,25 @@ CLASSIFY: dict[str, str] = {
     "core/reversal:newlow_lookback": "fiat",               # 20 日低 = 止跌低窗 (setups.LOW_LOOKBACK 同源)
     "core/reversal:high_lookback": "fiat",                 # 60 日高 (setups.HIGH_LOOKBACK 同源)
     "core/reversal:drawdown_min": "fiat",                  # ≥10% 才「跌到足够便宜」
-    "core/reversal:valid_days": "fiat",                    # 「不能等待过多」的操作化: 3 个交易日
+    "core/reversal:valid_days": "ruled",                   # 10 (= setups.RECENT_SIGNAL_BARS): 位置受控后年龄无效
+    "core/reversal:max_dist_atr": "ruled",                 # 2.0N 上限 (防离底太远、不上不下; 语义上限不是筛子)
     "core/reversal:LADDER_FRACS": "convention",            # 2/3 / 1/3 止跌低之上的二三档 (阶梯形状, 与 50/30/20 切法同源)
-    "core/setups:RECENT_SIGNAL_BARS": "convention",        # ✓止跌 10 根内算刚形成 (判读列表窗, 与 valid_days 3 分开)
+    "core/setups:RECENT_SIGNAL_BARS": "convention",        # ✓止跌 10 根内算刚形成 (判读列表窗; valid_days 与之对齐, 测试钉 ≤)
     "core/setups:DEEP_RETEST_FRAC": "definition",          # 2/3 = Rhea 次级折返带 (dow.RETRACE_BANDS 同源)
     "core/setups:NEAR_GATE_ATR": "convention",             # gate 之下 1N = 「即将形成」(判读)
     "core/setups:LH_LOOKBACK": "convention",               # 前高回看 = 60 日框架同窗
     "core/setups:SWING_WING": "convention",                # 5 根分形 (technical.swing_points 缺省)
     "core/setups:MIN_BARS": "convention",                  # 65 = 60 日框架 + 余量
     "core/sizing:REVERSAL_PROBE_RISK_GATE": "fiat",        # 保费风险预算 = gate1 本档 2.5%
+    # ── 底部确认概率 (判读件, 不在 MONEY_LAYERS: entry_guard 只印 [FYI] 行, verdict / cap 与它无关由测试钉) ──
+    "core/bottom_evidence:BGK_BETA": "definition",         # −ζ(1/2)/√(2π) Broadie–Glasserman–Kou 离散监控修正
+    "core/bottom_evidence:ANCHOR_TOL_ATR": "convention",   # 0.25N = interaction_census 同口径
+    "core/bottom_evidence:CLUSTER_TOL_ATR14": "convention",  # 0.35×ATR14 = level_map.build_map 同值
+    "core/bottom_evidence:PIVOT_LOOKBACK": "convention",   # 250 = interaction_census 同值
+    "core/bottom_evidence:PROFILE_BARS": "convention",     # 60 = level_map profile_days 同值
+    "core/bottom_evidence:HVN_TOP_N": "convention",        # 5 = level_map hvn_n 同值
+    "core/bottom_evidence:MIN_TOUCHES": "convention",      # 簇 ≥2 触碰
+    "core/technical:top_hvn(n=)": "convention",            # 自 decision/level_map 下沉, 同值 5
     "decision/entry_guard:RP_TARGET_DTE": "ruled",         # = LEAPS DTE 下限 270 (synthetic_longcall B1)
     # IV 分位代理 (HV20 的 252 日分位, 「要看 IVP」): 窗与可信线 = 口径约定
     # (iv_logger.percentile 同款 252; 120 = research 回测同口径), 阈值本身仍是 LONG_CALL_IV_PCT_MAX

@@ -160,8 +160,10 @@ def run_card(ticker: str, bucket: str, *, apply=False, routes=None, run_dir=None
         if market.get("status") != "current":
             job.update(status="needs_review", reason="completed_bars_not_current")
             return job
-        task = ("为此单卡完成技术重画提案；每条线带完整收盘数据证据。保持当前授权与已有退出约束，"
-                "财报后须同时更新thesis（只读情报归档、标FYI）。证据不足则明确弃权，"
+        task = ("为此单卡完成技术重画提案；每条线带完整收盘数据证据。保持当前授权与已有退出约束。"
+                "thesis一律走--thesis-frame（写法见policy里的fundamental-frame规格，判断层零授权）："
+                "财报后须重写并逐条对账上一版看点；卡上尚无frame而本次重画价位带时一并迁入，"
+                "冻结证据不足的槽写「待核实」。情报只读冻结归档、标FYI。价位证据不足则明确弃权，"
                 "不要仅为写入而重述旧卡。proposal只能包含受控writer白名单参数。")
         record = (run_role_fn or run_role)("technical", task, snapshot, routes=routes,
                                            run_dir=root, control_dir=control,

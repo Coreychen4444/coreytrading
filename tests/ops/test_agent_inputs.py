@@ -70,7 +70,10 @@ def test_selected_research_keeps_complete_book_and_canonical_calculators(source)
                                 atr_of=lambda t: bundle["market"][t]["atr20"])
     assert data["portfolio_risk_receipts"]["usage"]["values"] == expected
     assert expected["used_gross"] == pytest.approx(.15)
-    assert out["summary"]["source_status_counts"]["missing"] == 5
+    # response_events / response_queries 判 absent_optional (未启用的可选
+    # overlay 输入, 不是缺口) —— 不计入 missing。
+    assert out["summary"]["source_status_counts"]["missing"] == 3
+    assert out["summary"]["source_status_counts"]["absent_optional"] == 2
     for snapshot in [out["snapshot"], *out["snapshots"].values()]:
         validate_snapshot(snapshot, now=NOW)
 
@@ -512,3 +515,105 @@ def test_holding_exit_evidence_preserves_missing_facts_and_live_underlying_membe
     assert "exit_guard_receipt_missing" in held[option_ticker]["unknowns"]
     assert "broker_avg_cost_missing_or_invalid" in held[option_ticker]["unknowns"]
     assert "avg_cost" not in held[option_ticker]["card"]["broker"]
+
+
+def test_sidecar_files_in_the_snapshot_directory_are_not_reported_as_invalid(source):
+    """采集流程在快照目录旁写补价表 / 审计 / 投递回执 —— 它们不是快照, 也不是坏数据。
+
+    若按扩展名收集, 这些旁挂文件全被当快照读, 一律拿不到 capture_time ⇒
+    每轮固定若干条 `macro_snapshot:*:invalid` 挂在风控收据的未知项里。「invalid」在
+    那张清单上读作数据损坏, 而它们完全健康。永不消失又无从消除的告警会把整张清单
+    训练成背景噪音。判据改成形状后, 它们连源都不登记。
+    """
+    write(source.macro_snapshots / "macro-20260904T140430Z-post-intraday.json",
+          {"QQQ": 1.0, "SMH": 2.0, "HYG": 3.0, "TLT": 4.0})
+    write(source.macro_snapshots / "macro-20260911T125047Z-post_event-receipt.json",
+          {"run_id": "r", "retrieved_at": SOURCE, "archive": "a", "delivery": {}})
+    write(source.macro_snapshots / "sample.json",
+          {"generated_at_utc": SOURCE, "metrics": {"US2Y": {"value": 4, "unit": "percent"}}})
+    out = capture(source)
+    catalog = out["snapshot"]["data"]["evidence_catalog"]
+    assert "macro_snapshot:sample" in catalog
+    assert not [ref for ref in catalog if "post-intraday" in ref or "receipt" in ref]
+    assert not [w for w in out["snapshot"]["data"]["capture_warnings"]
+                if w.startswith("macro_snapshot:")]
+
+
+def test_a_real_snapshot_without_a_capture_time_is_still_invalid(source):
+    """真告警不许跟着一起被消音: 有 metrics 却报不出采集时刻 = 数据有问题。"""
+    write(source.macro_snapshots / "sample-broken.json",
+          {"snapshot_version": 1, "metrics": {"US2Y": {"value": 4}}})   # 无 generated_at_utc
+    out = capture(source)
+    assert "macro_snapshot:sample-broken:invalid" in out["snapshot"]["data"]["capture_warnings"]
+
+
+def test_gate_anchor_desync_enters_the_repaint_queue(source):
+    """同锚破裂要有恢复路径 —— 只在 brief 点名而队列不收 = 天天喊、永远没人修。
+
+    若 brief 每日报 `INFRA:gate_anchor_desync`, 派发队列却只看 missing_card / pending_repaint / provisional / zone_mech_stale /
+    财报。告警没有消费者 = 把整张清单训练成背景噪音。
+    """
+    doc = json.loads(source.watchlist.read_text())
+    zones = doc["tickers"]["SYN"]["agent"]["zones"]
+    zones["anchored_on"] = {"date": "2026-09-04", "basis": "synthetic"}
+    doc["tickers"]["SYN"]["agent"]["next_regime"] = {
+        "name": "R_up", "cap_pct_nav": 0.4,
+        "entry_gate": {"level": 999.0, "days": 2, "volume_ratio_min": 1.1,
+                       "anchored_on": {"date": "2026-08-20", "basis": "半个月前的证据"}}}
+    write(source.watchlist, doc)
+    targets = {t["ticker"]: t for t in capture(source)["snapshot"]["data"]["repaint_targets"]}
+    assert "SYN" in targets
+    assert any(r.startswith("gate_anchor_desync:") for r in targets["SYN"]["reasons"])
+
+
+def test_an_in_session_quote_tick_is_current_not_stale(source):
+    """报价的时效下限是**开盘**, 不是收盘 —— 盘中最后一跳当然属于这个交易日。
+
+    快照报价可能盖在收盘前几毫秒; 若判据要求 `>= session_close`, 最后一跳落在
+    16:00:00.000 之前的票会每天固定出现在风控收据的未知项, 而落在之后的票干净。
+    差别纯属抖动。
+    """
+    doc = json.loads(source.watchlist.read_text())
+    broker = doc["tickers"]["SYN"].setdefault("broker", {})
+    broker.update(quote_source="moomoo_after:AFTER_HOURS_BEGIN",
+                  quote_time_basis="opend_data_date_time")
+    for stamp, expected in (("2026-09-04T15:59:59.900000-04:00", "current"),
+                            ("2026-09-04T16:00:00.500000-04:00", "current")):
+        broker["as_of"] = stamp
+        write(source.watchlist, doc)
+        out = capture(source)["snapshot"]["data"]
+        assert out["freshness"]["quotes"]["SYN"]["status"] == expected, stamp
+        assert "quote_time_unknown:SYN" not in out["capture_warnings"]
+
+
+def test_a_quote_from_an_earlier_session_is_still_stale(source):
+    doc = json.loads(source.watchlist.read_text())
+    broker = doc["tickers"]["SYN"].setdefault("broker", {})
+    broker.update(quote_source="moomoo_after:AFTER_HOURS_BEGIN",
+                  quote_time_basis="opend_data_date_time",
+                  as_of="2026-01-02T15:59:59.900000-05:00")
+    write(source.watchlist, doc)
+    out = capture(source)["snapshot"]["data"]
+    assert out["freshness"]["quotes"]["SYN"]["status"] == "stale"
+    assert "quote_time_unknown:SYN" in out["capture_warnings"]
+
+
+def test_an_unused_optional_input_is_not_reported_as_a_gap(source):
+    """未启用的可选输入 ≠ 依赖的文件不见了。
+
+    `response_events` / `response_queries` 只有 `.example` 版本, 至今无写入方 —— 每轮
+    固定两条 `:missing` 挂在未知项里, 没有任何动作能让它们消失。告警没有恢复路径 =
+    把整张清单训练成背景噪音。
+    """
+    warnings = capture(source)["snapshot"]["data"]["capture_warnings"]
+    assert not [w for w in warnings if w.startswith(("response_events", "response_queries"))]
+    catalog = capture(source)["snapshot"]["data"]["evidence_catalog"]
+    assert catalog["response_events"]["status"] == "absent_optional"
+
+
+def test_an_optional_input_that_exists_but_is_corrupt_is_still_invalid(source):
+    """「可选」只豁免缺席, 不豁免坏数据。"""
+    source.response_queries.parent.mkdir(parents=True, exist_ok=True)
+    source.response_queries.write_text("{ not json", encoding="utf-8")
+    warnings = capture(source)["snapshot"]["data"]["capture_warnings"]
+    assert "response_queries:invalid" in warnings

@@ -941,15 +941,17 @@ def _rp_bar(t, o, h, l, c):
     return {"time": t, "open": o, "high": h, "low": l, "close": c}
 
 
-def _rp_rows(bottom=102.0, rev_close=107.0) -> list:
-    """升到 120.5 → 单边跌到 bottom (每日新低) → 反转阳线吃掉前 5 日最高 (同 tests/core/test_reversal)。"""
+def _rp_rows(bottom=102.0, rev_close=107.0, wick=3.5) -> list:
+    """升到 120.5 → 单边跌到 bottom (每日新低) → 反转阳线吃掉前 5 日最高 (同 tests/core/test_reversal)。
+    下跌段上影 `wick` 定 ATR20 (Wilder, 拖着上升段的窄 TR): 缺省 3.5 → ATR≈3.05, 反转收 107 距止跌低 101.5
+    = 1.8N (在 2N 上限内); 传 0.5 = 窄夹具 (ATR≈1.47, 3.7N = 离底太远 TOO_FAR)。"""
     rows = []
     for i in range(41):
         c = 100 + i * 0.5
         rows.append(_rp_bar(f"2026-06-{i:03d}", c - 0.2, c + 0.5, c - 0.5, c))
     for k in range(1, 21):
         c = 120 - (120 - bottom) * k / 20
-        rows.append(_rp_bar(f"2026-08-{k:03d}", c + 0.3, c + 0.5, c - 0.5, c))
+        rows.append(_rp_bar(f"2026-08-{k:03d}", c + 0.3, c + wick, c - 0.5, c))
     rows.append(_rp_bar("2026-09-10", bottom + 0.5, rev_close + 0.5, bottom + 0.2, rev_close))
     return rows
 
@@ -1038,7 +1040,7 @@ def test_reversal_probe_plans_on_a_cap0_card_with_back_computed_cap(monkeypatch,
 
 def test_reversal_probe_deep_drawdown_is_in_domain_and_shallow_never_signals(monkeypatch):
     """域 = R0: −31% 也开 (定价 R2 更好); 回撤不足 10% 在 setups 人群门就没有信号 (不是域外, 是没底)。"""
-    eg = _rp_setup(monkeypatch, _rp_rows(bottom=84.0, rev_close=92.5))
+    eg = _rp_setup(monkeypatch, _rp_rows(bottom=84.0, rev_close=88.0))   # 收 88 距止跌低 83.5 = 1.5N (2N 上限内)
     r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
     rp = r["reversal_probe"]
     assert rp["verdict"] == "PLAN" and rp["signal"]["domain"] == "R0" and rp["signal"]["drawdown"] < -0.25
@@ -1094,3 +1096,50 @@ def test_reversal_probe_is_silent_when_there_is_no_signal(monkeypatch):
     eg = _rp_setup(monkeypatch, rows)
     r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
     assert r["verdict"] == "VETO" and "reversal_probe" not in r
+
+
+def test_reversal_probe_too_far_from_the_low_is_reported_not_planned(monkeypatch, tmp_path):
+    """有效期第二条件 (离底太远的入场不上不下): 收盘距止跌低 > 2×ATR20 →
+    TOO_FAR 只播不授权 (option_plans 不落, 一览不带 🔁), 信号本身仍在块里可见。"""
+    eg = _rp_setup(monkeypatch, _rp_rows(wick=0.5))                  # 窄夹具: ATR≈1.5, 距 5.5 ≈ 3.7N
+    r = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)
+    rp = r["reversal_probe"]
+    assert rp["verdict"] == "TOO_FAR" and rp["signal"]["too_far"] is True
+    assert rp["signal"]["dist_n"] > 2.0 and rp["stock_plan"] is None and rp["option_plan_data"] is None
+    assert any("离底太远不开" in x for x in rp["reasons"])
+    txt = eg.render([r], 22000.0, "2026-09-10")
+    assert "🔁 抄底 reversal_probe — TOO_FAR" in txt and "收盘距止跌低" in txt
+    _, verdict, tail = eg._summary_cells(r)
+    assert verdict == "VETO" and "🔁" not in (tail or "")           # 一览不带抄底尾巴 = 没给计划
+    from quant.core import paths
+    monkeypatch.setattr(paths, "OPTION_PLANS_PATH", tmp_path / "option_plans.json")
+    assert eg.write_option_plans([r], "2026-09-10") == 0
+
+
+def test_reversal_probe_prints_bottom_confirmation_probability_without_touching_authorization(monkeypatch):
+    """🔁 PLAN 块多一行 [FYI] 底部确认概率 (quant/core/bottom_evidence 随机游走位置几何)。
+    它是判读 —— 把概率钉到 1% 或 99%, verdict / cap / 阶梯 / 止损 / 正股腿一字不变。"""
+    eg = _rp_setup(monkeypatch, _rp_rows())
+    rp = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)["reversal_probe"]
+    line = [x for x in rp["lines"] if "底部确认" in x]
+    assert line and line[0].startswith("[FYI] 底部确认概率 ") and "不进 cap" in line[0]
+
+    def snap(x):
+        sp = x.get("stock_plan") or {}
+        return (x["verdict"], x.get("cap"), x["ladder"], x["stop"], sp.get("cap"),
+                [t["shares"] for t in sp.get("tiers") or []])
+    base = snap(rp)
+    for forced in (0.01, 0.99):
+        monkeypatch.setattr(eg.bottom_evidence, "confirm_prob_rw", lambda *a, _f=forced, **k: _f)
+        rp2 = eg.evaluate_ticker("TST", _rp_card(), "2026-09-10", nav=22000.0)["reversal_probe"]
+        assert snap(rp2) == base
+        assert any(f"底部确认概率 {forced:.0%}" in x for x in rp2["lines"])
+
+
+def test_confirm_line_edge_cases():
+    eg = entry_guard
+    assert eg.confirm_line([{"close": 130.0}], {"lower_high": 122.6, "support": 101.5}) == \
+        "[FYI] 底部确认: 收盘 130 已越前高 122.6"
+    assert eg.confirm_line([{"close": 110.0}], {"lower_high": None, "support": 101.5}) is None
+    assert eg.confirm_line([{"close": 110.0}], {"lower_high": 100.0, "support": 101.5}) is None
+    assert eg.confirm_line([], {"lower_high": 122.6, "support": 101.5}) is None

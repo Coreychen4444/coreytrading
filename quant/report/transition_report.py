@@ -130,13 +130,30 @@ def build(regime: Dict) -> str:
     """`stages.regime.data` → 原文推送用的转移收据。零转移日仍出一行 (dead-man)。"""
     transitions = regime.get("transitions") or []
     lines = [f"{HEADER} {regime.get('date') or ''}".rstrip(), "", LEGEND, ""]
+    # 🚨 阶段失败 ≠ 零转移。regime 阶段 rc≠0 时这里拿不到 `data`, `transitions` 为空,
+    # dead-man 那行会照常印出「盘后：无 regime 转移」—— 而真相可能是有卡达标、一笔未落。
+    # **空结果与零结果必须长得不一样**, 否则最该喊的那天最安静。
+    failure = regime.get("stage_failure")
+    if failure:
+        lines += [f"🚨 **regime 阶段本轮失败 (rc={failure.get('rc')})** — "
+                  f"下面不是「零转移」, 是**没有结果**。",
+                  "", "```", str(failure.get("error") or "").strip()[:800], "```", ""]
     if not transitions:
-        lines.append("盘后：无 regime 转移。")
+        lines.append("盘后：无 regime 转移。" if not failure
+                     else "转移收据渲染不出来 —— 本轮没有判定产物, 不代表市场没达标。")
     else:
         for i, tr in enumerate(transitions):
             if i:
                 lines.append("")
             lines.extend(render_one(tr))
+    for rj in (regime.get("rejected") or []):
+        lines += ["", f"⛔ **{rj.get('ticker')}** 达标但**未落卡** — {rj.get('error')}",
+                  f"- 达标条件: {rj.get('reason') or '—'}",
+                  "- 卡片状态未变 (cap / zones 维持原样); 修卡后由转移机重跑。"]
+    stale = regime.get("preexisting_card_errors") or []
+    if stale:
+        lines += ["", "🩹 挡住本轮落库的**既存**卡片错误 (与本轮转移无关, 先修这些):"]
+        lines += [f"- {e}" for e in stale[:8]]
     pending = regime.get("pending_repaint") or []
     if pending:
         names = ", ".join(sorted(str(p.get("ticker") if isinstance(p, dict) else p) for p in pending))
@@ -148,11 +165,22 @@ def build(regime: Dict) -> str:
 
 
 def regime_data(doc: Dict) -> Dict:
-    """接受 pipeline 完整 JSON 或 regime 段本身, 两种都不再让调用方手剥。"""
+    """接受 pipeline 完整 JSON 或 regime 段本身, 两种都不再让调用方手剥。
+
+    阶段失败时 `stage.data` 根本不存在 —— 以前那会静默退化成 `{}`, 与「真的零
+    转移」完全同形。现在把失败本身带出来 (`stage_failure`), 由 build 渲染成告警。
+    """
     if "transitions" in doc:
         return doc
     stage = ((doc.get("stages") or {}).get("regime") or {})
-    return (stage.get("data") or {}) if isinstance(stage, dict) else {}
+    if not isinstance(stage, dict):
+        return {}
+    data = dict(stage.get("data") or {})
+    if stage.get("ok") is False or (stage.get("rc") or 0) != 0:
+        data["stage_failure"] = {"rc": stage.get("rc"),
+                                 "error": (stage.get("stderr") or stage.get("error")
+                                           or "stage reported failure without stderr")}
+    return data
 
 
 def main(argv=None) -> int:

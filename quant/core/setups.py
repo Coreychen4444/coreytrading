@@ -257,7 +257,9 @@ def probe_marker(bars: List[dict], atr20: Optional[float]) -> Optional[str]:
     sig = reversal.detect(bars, atr20)
     if not sig:
         return None
-    return f"🔁探针{sig['domain']}" + ("" if sig["in_domain"] else "域外") + f"·{sig['date'][5:]}"
+    return (f"🔁探针{sig['domain']}" + ("" if sig["in_domain"] else "域外")
+            + (f"·远{sig['dist_n']:g}N" if sig.get("too_far") else "")     # 离底太远 (ATR 上限) 也只播
+            + f"·{sig['date'][5:]}")
 
 
 # ── 模式 2 的纯数字部分 ────────────────────────────────────────────

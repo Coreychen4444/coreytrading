@@ -778,7 +778,25 @@ def test_bottom_stock_first_rung_line_is_drawn_with_the_stop_in_the_note():
     lines, _ = prs.desired_lines(POS, WL, TODAY, budgets={}, option_plans=plan)
     z1 = [d for d in lines if d["ticker"] == "NBIS" and d["kind"] == "z1"]
     assert [(d["value"], d["note"]) for d in z1] == [(84.0, "抄底首档:5股 止损78.4")]
+    assert all(prs._owned_note(d["note"]) for d in z1)       # 写出的备注必须能被认领, 否则重锚留孤儿线
     plan["NBIS"]["valid_until"] = "2000-01-01"
     lines, notes = prs.desired_lines(POS, WL, TODAY, budgets={}, option_plans=plan)
     assert not [d for d in lines if d["ticker"] == "NBIS" and d["kind"] == "z1"]
     assert any("信号已过期" in n for n in notes)
+
+
+def test_bottom_first_rung_line_is_owned_so_reanchor_replaces_it():
+    """抄底首档备注必须在所有权词表内: 写 `抄底首档:` 却不认领 →
+    首档随收盘重锚时新线 ADD、旧线被当手动永不 DEL, 残线越积越多。"""
+    note = "抄底首档:9股 止损342.3305"
+    assert prs._owned_note(note)
+    for manual in ("抄底", "抄底首档", "我的抄底首档:1股", "抄底首档:9股/我的备注"):
+        assert not prs._owned_note(manual), manual
+    rows = [{"code": "US.SYN", "reminder_type": "PRICE_UP", "value": 357.89, "note": note}]
+    desired = [{"code": "US.SYN", "type": "PRICE_DOWN", "value": 344.72, "note": note}]
+    adds, dels, _, kept_manual = prs.plan_ops(desired, rows)
+    assert [d["value"] for d in adds] == [344.72] and [r["value"] for r in dels] == [357.89]
+    assert kept_manual == 0
+    # 计划整张消失 (信号过期 / 票不再入选) → 残线同样收走
+    adds, dels, _, _ = prs.plan_ops([], rows)
+    assert not adds and [r["value"] for r in dels] == [357.89]

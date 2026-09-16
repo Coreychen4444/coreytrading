@@ -52,18 +52,57 @@ def read_positions(*, allow_missing: bool = False) -> dict[str, Any]:
     return read_json(POSITIONS_PATH)
 
 
+# ── 写闸的归责口径 ──────────────────────────
+#
+# 「整份文件必须干净」听起来严, 实际效果是**一张早就不合规的卡把这个文件的所有
+# 写路径一起焊死** —— 一张卡的空 cap 就能让 watchlist 当晚零转移, 连带同日达标的
+# 其他卡也落不了库, 而报告那头渲染成「无 regime 转移」。
+# 逼人先修旧账的那点好处, 抵不上「别人的坏卡冻结我的合法写入」的代价。
+#
+# 新判据 = **这次写入有没有把文件弄坏**, 两条都拦:
+#   ① 新出现的错误 (盘面上原本没有的) —— 任何一条都拒;
+#   ② 落在**本次改动过的 ticker** 上的错误 —— 哪怕是旧错, 你既然动了这张卡,
+#      就不许把它留在坏状态里 (否则「不改就不用修」会变成绕过校验的后门)。
+# 只有「我没碰、且本来就坏」的卡才放行, 并照常打印。文件级 (非 ticker 归属) 的
+# 错误一律拦 —— 那是整本的结构, 不归任何单卡。
+def _blocking_errors(errors: list[str], previous: dict[str, Any] | None,
+                     doc: dict[str, Any], prior: set) -> list[str]:
+    if previous is None:
+        return errors                      # 新文件 / 读不出旧版 → 回到严格口径
+    old_t = _object(previous.get("tickers"))
+    new_t = _object(doc.get("tickers"))
+    touched = {t for t in set(old_t) | set(new_t) if old_t.get(t) != new_t.get(t)}
+    out = []
+    for err in errors:
+        if err not in prior:
+            out.append(err)                # ① 本次新造的
+            continue
+        owner = _error_ticker(err)
+        if owner is None or owner in touched:
+            out.append(err)                # ② 文件级, 或落在本次动过的卡上
+    return out
+
+
+def _error_ticker(err: str) -> str | None:
+    """`tickers[SYNA].agent...` / `watchlist[SYNB].agent...` → 'SYNA' / 'SYNB'。"""
+    lo = err.find("[")
+    hi = err.find("]", lo + 1)
+    return err[lo + 1:hi] if 0 < lo < hi else None
+
+
+def _object(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def write_positions(doc: dict[str, Any]) -> None:
     """Validate + atomically write positions.json. Caller should hold state_lock
-    if this is part of a read-modify-write cycle."""
-    errors, warnings = _schema.validate_positions_doc(doc)
-    report = _schema.format_report(errors, warnings, label="positions.json")
-    if report:
-        print(report, file=sys.stderr)
-    if errors:
-        raise RuntimeError(
-            f"positions.json failed schema validation ({len(errors)} errors) — write aborted"
-)
-    atomic_write_json(POSITIONS_PATH, doc)
+    if this is part of a read-modify-write cycle.
+
+    归责口径见 `_blocking_errors`: 本次写入新造的错误、以及落在本次动过的 ticker
+    上的错误都拒; 「没碰过、且盘面上本来就坏」的卡不阻断本次写入 (照常打印)。
+    """
+    _write(doc, POSITIONS_PATH, _schema.validate_positions_doc, "positions.json",
+           read_previous=lambda: read_positions(allow_missing=True))
 
 
 def read_watchlist(*, allow_missing: bool = False) -> dict[str, Any]:
@@ -82,14 +121,31 @@ def read_watchlist(*, allow_missing: bool = False) -> dict[str, Any]:
 def write_watchlist(doc: dict[str, Any]) -> None:
     """Validate + atomically write watchlist.json (镜像 write_positions, 但用
     watchlist 形状校验器 —— positions 校验器会把合法的 watching 卡拦成 75 错)。"""
-    errors, warnings = _schema.validate_watchlist_doc(doc)
-    report = _schema.format_report(errors, warnings, label="watchlist.json")
+    _write(doc, WATCHLIST_PATH, _schema.validate_watchlist_doc, "watchlist.json",
+           read_previous=lambda: read_watchlist(allow_missing=True))
+
+
+def _write(doc, path, validate, label, *, read_previous) -> None:
+    errors, warnings = validate(doc)
+    report = _schema.format_report(errors, warnings, label=label)
     if report:
         print(report, file=sys.stderr)
-    if errors:
+    if not errors:
+        atomic_write_json(path, doc)
+        return
+    try:
+        previous = read_previous()
+    except Exception:                                   # noqa: BLE001  读不出旧版 → 严格口径
+        previous = None
+    prior = set(validate(previous)[0]) if previous is not None else set()
+    blocking = _blocking_errors(errors, previous, doc, prior)
+    if blocking:
         raise RuntimeError(
-            f"watchlist.json failed schema validation ({len(errors)} errors) — write aborted")
-    atomic_write_json(WATCHLIST_PATH, doc)
+            f"{label} failed schema validation ({len(blocking)} blocking errors) — write aborted")
+    print(f"[schema:WARN] {label}: {len(errors)} 条既存错误未被本次写入触及 "
+          f"(本次未动这些卡, 不阻断; 仍需修): "
+          + "; ".join(sorted(errors)[:4]), file=sys.stderr)
+    atomic_write_json(path, doc)
 
 
 def update_broker_blocks(

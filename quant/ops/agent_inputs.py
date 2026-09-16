@@ -22,7 +22,7 @@ import re
 from quant.core import book, earnings, paths as p, sizing, structure, technical
 from quant.core.agent_contracts import canonical_hash, card_revision
 from quant.core.holdings import cardless_tickers, coverage_universe, is_managed, live_tickers
-from quant.core.market_sessions import MarketSessionError, latest_completed_session, session_close
+from quant.core.market_sessions import session_open, MarketSessionError, latest_completed_session, session_close
 from quant.core.macro_evidence import build_market_context, capture_time, context_evidence
 from quant.core.occ import parse_occ
 from quant.core.quote_times import opend_quote_time
@@ -113,10 +113,19 @@ class _Reader:
         self.sources = {}
         self.versions = {}
 
-    def read(self, path, ref, owner, *, jsonl=False, text=False):
+    def read(self, path, ref, owner, *, jsonl=False, text=False, optional=False):
+        """optional=True: 这份输入「没启用」也是合法状态, 缺文件不算缺口。
+
+        例: `response_events` / `response_queries` 未启用时只有 `.example` 版本、没有
+        写入方 —— 若按缺失报, 每轮固定两条 `:missing` 挂在风控收据的未知项里, 而没有任何
+        动作能让它们消失。「没启用的可选输入」与「依赖的文件不见了」是两件事, 前者
+        当后者报会把整张清单训练成背景噪音。文件真存在但坏了, 仍照常判 invalid。
+        """
         path = Path(path)
         meta = {"owner": owner, "path": str(path), "status": "missing", "content_hash": None,
                 "untrusted_content": True, "independent_evidence": False}
+        if optional and not path.exists():
+            meta["status"] = "absent_optional"
         self.sources[ref] = meta
         try:
             before = path.stat()
@@ -503,6 +512,12 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     reader = _Reader()
     expected = latest_completed_session(now)
     minimum = session_close(expected)
+    # 报价的时效下限 ≠ 完成日线的时效下限。完成日线合法地盖在收盘**之后**,
+    # 所以 `>= session_close` 对它成立; 但快照报价是盘中最后一跳, 盖在收盘**之前**。
+    # 同一批 OpenD 快照里, 谁的最后一跳落在 16:00:00.000 之前 (哪怕只差几毫秒) 谁就被判
+    # stale, 于是固定几个名字每天出现在风控收据的未知项里。判据问的是「这条报价
+    # 属不属于最新完整交易日」, 盘中最后一跳当然属于 —— 下限取该日**开盘**。
+    quote_minimum = session_open(expected) or minimum
     # Read the intelligence prior first, respecting the repository's ownership.
     macro = reader.read(paths.macro, "macro", "intelligence")
     macro_error = None
@@ -536,19 +551,33 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
     valuation_rows = reader.read(paths.valuations, "valuations", "valuation", jsonl=True) or []
     valuation_inputs = reader.read(paths.valuation_inputs, "valuation_inputs", "valuation") or {}
     valuation_overlays = reader.read(paths.valuation_overlays, "valuation_overlays", "intelligence", jsonl=True) or []
-    response_events = reader.read(paths.response_events, "response_events", "valuation", jsonl=True) or []
-    response_queries = reader.read(paths.response_queries, "response_queries", "valuation") or {}
+    # 估值层的可选 overlay 输入 (新闻→EPS/PE 契约): 至今无写入方, 缺席 = 未启用, 不是缺口。
+    response_events = reader.read(paths.response_events, "response_events", "valuation",
+                                  jsonl=True, optional=True) or []
+    response_queries = reader.read(paths.response_queries, "response_queries", "valuation",
+                                   optional=True) or {}
     company_models = reader.read(paths.company_models, "company_models", "valuation") or {}
     market_snapshots, macro_captures = [], []
+    # 快照目录里躺着的不只有快照: 采集流程会在同一目录写补价表 / 市场审计 / 投递回执
+    # (`*-supplement` / `*-market-audit` / `*-intraday` / `*-receipt`)。按扩展名收集
+    # 会把它们全当快照读, 一律拿不到 capture_time ⇒ 每轮固定产出 3 条 `:invalid`
+    # ——「invalid」在收据里读作数据损坏, 而它们完全健康, 只是不是快照。永不消失又
+    # 无从消除的告警会把整张未知项清单训练成背景噪音。
+    # 判据改成**形状**: 快照自报 `snapshot_version`, 且/或带本通道要消费的 `metrics`。
+    # 两者皆无 = 旁挂文件, 根本不登记为源 (丢了 metrics 的真快照仍会走 invalid)。
     for path in sorted(Path(paths.macro_snapshots).rglob("*.json"))[-30:]:
-        document = reader.read(path, "macro_snapshot:" + path.stem, "intelligence")
+        ref = "macro_snapshot:" + path.stem
+        document = reader.read(path, ref, "intelligence")
+        if isinstance(document, dict) and not ({"snapshot_version", "metrics"} & set(document)):
+            reader.sources.pop(ref, None)        # 旁挂文件, 不是这条通道要的东西
+            continue
         if isinstance(document, dict):
-            ref = "macro_snapshot:" + path.stem
             macro_captures.append({"ref": ref, "document": document})
             stamp = capture_time(document)
             if stamp is not None and stamp <= now:
                 market_snapshots.append(document)
             else:
+                # 真快照却报不出采集时刻 (或时刻在未来) —— 这条 invalid 保留, 它是真告警。
                 reader.sources[ref]["status"] = "invalid"
     macro_context = build_market_context(macro_captures, as_of=now.isoformat())
     for ref, observation in context_evidence(macro_context).items():
@@ -676,7 +705,7 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         entries[ticker] = {"card": _sizing_card(card), "price": price, "binding_stop": stop,
                            "stop_basis": stop_basis + "; quant.core.sizing.binding_stop; entry card stop",
                            "event_shrink": ev["shrink"] if cal_status == "current" else None}
-        freshness["quotes"][ticker] = _quote_freshness(card, now, minimum)
+        freshness["quotes"][ticker] = _quote_freshness(card, now, quote_minimum)
         analysis = technical.analyze(bars) if len(bars) >= 60 else None
         if analysis:
             # OHLCV already appears once; latest/pattern/divergence outputs
@@ -717,6 +746,10 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
         if _object(agent.get("zones")).get("provisional") or _object(agent.get("current_regime")).get("provisional"):
             reasons.append("provisional_structure")
         reasons += structure.zone_mech_stale(agent.get("zones"), agent.get("thesis"), captured["completed_bars"], today)
+        # 同锚破裂进重画队列。若 `INFRA:gate_anchor_desync` 只在 brief 里逐日点名、
+        # 派发队列不看它, 同一张卡会天天被喊、天天没人修。告警没有恢复路径 =
+        # 训练人忽略整张清单。
+        reasons += [f"gate_anchor_desync: {r}" for r in structure.gate_anchor_desync(agent)]
         # 派发口径 = 最新完整会话, 不是日历今天 (earnings: 「反应日当天就报, 但重画要等
         # 那天收盘」)。例: 盘后财报 → 次日反应日, 盘前 briefing 若按
         # 日历派发, 模型只有财报日收盘 → 弃权 → needs_review + job_partial。brief 的
@@ -728,7 +761,8 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
                             "card_revision": captured["card_revision"],
                             "latest_completed_session": captured["latest_completed_session"],
                             "bars_current": freshness["market"][ticker]["status"] == "current"})
-    gaps = [ref + ":" + m["status"] for ref, m in reader.sources.items() if m["status"] != "read"]
+    gaps = [ref + ":" + m["status"] for ref, m in reader.sources.items()
+            if m["status"] not in ("read", "absent_optional")]
     gaps += ([macro_error] if macro_error else []) + (["event_ledger_unavailable"] if event_invalid else [])
     gaps += [key + ":" + freshness[key]["status"] for key in ("positions", "nav", "earnings")
              if freshness[key]["status"] != "current"]
@@ -803,7 +837,8 @@ def capture_inputs(*, tickers=None, scope="portfolio", now=None, paths=None, ttl
             "summary": {"scope": scope, "selected_count": len(selected), "coverage_count": len(universe),
                         "source_count": len(reader.sources), "latest_completed_session": expected.isoformat(),
                         "captured_at": now.isoformat(), "warnings_count": len(set(gaps)),
-                        "source_status_counts": {s: sum(m["status"] == s for m in reader.sources.values()) for s in ("read", "missing", "invalid")},
+                        "source_status_counts": {s: sum(m["status"] == s for m in reader.sources.values())
+                                                 for s in ("read", "missing", "invalid", "absent_optional")},
                         "receipt_usage_status": receipts["usage"]["status"],
                         "entry_receipt_counts": {s: sum(v["status"] == s for v in receipts["entries"].values()) for s in ("computed", "unknown")},
                         "payload_bytes": len(json.dumps(shared, ensure_ascii=False, separators=(",", ":")).encode()),

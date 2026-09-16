@@ -472,6 +472,51 @@ def value_area(profile: List[dict], frac: float = VALUE_AREA_FRAC) -> Optional[D
     }
 
 
+# ── 价位簇 / HVN 带（自 decision/level_map 下沉, 函数体一字未改）──
+# 消费者: level_map (gate 画线, 同名转出) / core.bottom_evidence (抄底锚收敛) / chart_read / research。
+
+def top_hvn(profile: list[dict], n: int = 5) -> list[dict]:
+    """Top-n buckets merged into contiguous HVN bands, strongest first."""
+    if not profile:
+        return []
+    top = sorted(sorted(profile, key=lambda x: -x["turnover"])[:n], key=lambda x: x["lo"])
+    bands: list[dict] = []
+    for b in top:
+        if bands and abs(b["lo"] - bands[-1]["hi"]) < 1e-6:
+            bands[-1]["hi"] = b["hi"]
+            bands[-1]["turnover"] += b["turnover"]
+            bands[-1]["share_pct"] = round(bands[-1]["share_pct"] + b["share_pct"], 1)
+        else:
+            bands.append(dict(b))
+    return sorted(bands, key=lambda x: -x["turnover"])
+
+
+def cluster_pivots(pivots: list[dict], tol: float) -> list[dict]:
+    """Merge swing pivots within `tol` of running cluster mean into bands.
+    pivots: [{price, date, kind('high'|'low')}]. Multi-touch + mixed-kind
+    (support-turned-resistance) bands are the strong ones."""
+    if not pivots:
+        return []
+    pts = sorted(pivots, key=lambda p: p["price"])
+    clusters: list[dict] = []
+    for p in pts:
+        if clusters and abs(p["price"] - clusters[-1]["_mean"]) <= tol:
+            c = clusters[-1]
+            c["prices"].append(p["price"])
+            c["dates"].append(p["date"])
+            c["kinds"].add(p["kind"])
+            c["_mean"] = sum(c["prices"]) / len(c["prices"])
+        else:
+            clusters.append({"prices": [p["price"]], "dates": [p["date"]],
+                             "kinds": {p["kind"]}, "_mean": p["price"]})
+    return [
+        {"lo": round(min(c["prices"]), 2), "hi": round(max(c["prices"]), 2),
+         "center": round(c["_mean"], 2), "touches": len(c["prices"]),
+         "kinds": "+".join(sorted(c["kinds"])), "last_touch": max(c["dates"])}
+        for c in clusters
+    ]
+
+
 def swing_points(klines: List[dict], wing: int = 2) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """5-bar fractal pivots (wing=2): swing high = 高点两侧各 wing 根都更低。
     返回 ([(idx, swing_high)], [(idx, swing_low)])。
@@ -489,7 +534,7 @@ def swing_points(klines: List[dict], wing: int = 2) -> Tuple[List[Tuple[int, flo
         本函数 → swing_structure → trend → 结构修复 VETO 判别式（**改判别式 = 改授权**）
                                          → core/structure.structure_repair_veto
                                          → exit_guard 结构标签 / gate_ladder_report / gate_audit
-               → level_map.cluster_pivots（**pivot 簇 = gate 画在哪条线上**）
+               → cluster_pivots（本模块, level_map 同名转出; **pivot 簇 = gate 画在哪条线上**）
                → regime_transition 破位后自动生成的 z1/z2/stop
                → 私人研究必须 import 本函数，不能复制 pivot 语义
     修改前必须先锁定私人研究协议、运行相应验证并通过 production tests。

@@ -117,3 +117,48 @@ def test_cli_reads_stdin_and_can_emit_json(capsys, monkeypatch):
                                                             "transitions": [_up()]})))
     assert tp.main(["--json"]) == 0
     assert "RelVR 1.68" in json.loads(capsys.readouterr().out)["text"]
+
+
+# ── 阶段失败 ≠ 零转移 ─────────────────────────────────────────────
+#
+# 失败形状: 盘后 regime 阶段 rc=1 (一张卡的空 cap 拒了整本 watchlist 的写入)。
+# 阶段失败时 `stages.regime` 里根本没有 `data`, 若 `regime_data` 静默退化成 {},
+# dead-man 那行照常印出「盘后：无 regime 转移」—— 而真相可能是多张卡
+# 达标、一笔未落卡。**最该喊的那天最安静**, 这一条把它钉死。
+
+def _failed_stage(**kw):
+    stage = {"key": "regime", "ok": False, "rc": 1, "stdout": "",
+             "stderr": "RuntimeError: watchlist.json failed schema validation", **kw}
+    return {"stages": {"regime": stage}}
+
+
+def test_a_failed_stage_is_never_rendered_as_a_zero_transition_day():
+    out = tp.build(tp.regime_data(_failed_stage()))
+    assert "regime 阶段本轮失败 (rc=1)" in out
+    assert "盘后：无 regime 转移。" not in out
+    assert "不代表市场没达标" in out
+    assert "failed schema validation" in out
+
+
+def test_a_genuine_zero_transition_day_keeps_the_dead_man_line():
+    ok = {"stages": {"regime": {"ok": True, "rc": 0,
+                                "data": {"date": "2026-09-09", "transitions": []}}}}
+    out = tp.build(tp.regime_data(ok))
+    assert "盘后：无 regime 转移。" in out and "阶段本轮失败" not in out
+
+
+def test_rejected_cards_are_named_with_what_they_had_qualified_on():
+    out = _build(rejected=[{"ticker": "SYN", "direction": "up", "level": 219.35,
+                            "reason": "收盘 242.49 > gate 219.35 连续 2 日; 量比 1.68",
+                            "error": "next_regime.cap_pct_nav 不是数字 (None)"}])
+    assert "**SYN** 达标但**未落卡**" in out
+    assert "cap_pct_nav 不是数字" in out
+    assert "收盘 242.49 > gate 219.35" in out
+    assert "cap / zones 维持原样" in out
+
+
+def test_preexisting_card_errors_are_listed_as_what_to_fix_first():
+    out = _build(_up(), preexisting_card_errors=[
+        "watchlist[SYNB].agent.next_regime.cap_pct_nav must be numeric in [0, 0.4]"])
+    assert "挡住本轮落库的**既存**卡片错误" in out
+    assert "watchlist[SYNB]" in out

@@ -26,6 +26,7 @@ from quant.core.num import coerce_float
 from quant.core.paths import ZONE_WRITER_PATH
 from quant.core.sizing import NOTIONAL_CAP
 from quant.core.structure import gate_coherence
+from quant.core.thesis_frame import frame_errors as thesis_frame_errors
 from quant.core.timeutil import ET
 
 
@@ -42,7 +43,7 @@ class SubmitError(ValueError):
 FLAG_ARITY = {
     "--zone1": 2, "--zone2": 2, "--trim": 2,
     **dict.fromkeys(("--no-chase-above", "--stop-level", "--stop-level-days",
-                     "--thesis", "--key-risk", "--invalid-if", "--notes",
+                     "--thesis", "--thesis-frame", "--key-risk", "--invalid-if", "--notes",
                      "--timeframe", "--methodology", "--reclaim-gates", "--valid-until",
                      "--anchored-on", "--anchor-basis", "--repair-gate-anchor-basis",
                      "--update-trigger", "--reasoning-summary", "--conviction", "--thesis-status",
@@ -207,6 +208,13 @@ def _parse_worker_args(argv):
         elif flag == "--reclaim-gates":
             value = _json(value, flag)
             _gates(value, flag)
+        elif flag == "--thesis-frame":
+            # 判断层 (零授权): 形状与 schema / writer 同一判别式。替换规则 (到期看点必须对账) 需要
+            # 旧卡与 ET 今天, 在 writer merge 里判 —— preview 的 _check_candidate 会走到。
+            value = _json(value, flag)
+            errors = thesis_frame_errors(value, flag)
+            if errors:
+                raise SubmitError("; ".join(errors))
         elif flag == "--next-regime":
             value = _json(value, flag)
             _keys(value, NEXT_KEYS, flag, ("name", "entry_gate"))

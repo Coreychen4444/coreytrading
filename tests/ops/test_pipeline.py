@@ -76,10 +76,19 @@ def test_nav_lands_before_brief():
     assert k.index("nav") < k.index("brief")
 
 
-def test_entry_guard_is_last_in_briefing():
-    """entry_guard 消费 brief + 今日 NAV, briefing 里必须垫底。"""
-    k = keys(pipeline.BRIEFING)
-    assert k[-1] == "entry"
+def test_entry_plans_land_before_their_consumers():
+    """entry_guard 消费 brief + 今日 NAV + 转移 / 写卡后的卡 → 排在 brief / nav / regime / agents 之后;
+    它落的 option_plans.json 被 reminders (抄底首档线 / oz1) 与 today_group (抄底进组) 纯读 →
+    必须排在它们之前, briefing 与 postclose 都是。
+
+    若 entry 只进 briefing 且垫底, 抄底首档随收盘下移后, 提醒线仍挂着前几日收盘锚的旧价,
+    要等次日 briefing 写计划、再下一轮 heartbeat 才画上去 (跨进下一个盘中)。"""
+    for mode in (pipeline.BRIEFING, pipeline.POSTCLOSE):
+        k = keys(mode)
+        for upstream in ("brief", "nav", "regime", "agents"):
+            assert k.index(upstream) < k.index("entry"), (mode, upstream)
+        for consumer in ("reminders", "today_group"):
+            assert k.index("entry") < k.index(consumer), (mode, consumer)
 
 
 def test_watchlist_sync_before_kline_cache():
@@ -129,10 +138,13 @@ def test_push_brief_alerts_bolds_card_head_only(monkeypatch):
 
 
 def test_postclose_is_lean_close_layer_only():
-    """The close-dependent chain evaluates exits before applying transitions."""
+    """The close-dependent chain evaluates exits before applying transitions.
+
+    Entry plans re-anchor on the day's close (stale bottom signals drop out)
+    before the reminder / today-group effect layer renders."""
     kp = keys(pipeline.POSTCLOSE)
     assert kp == ["positions", "klines", "nav", "brief", "regime", "agents",
-                  "reminders", "today_group"]
+                  "entry", "reminders", "today_group"]
     assert set(kp) <= set(keys(pipeline.BRIEFING))
 
 

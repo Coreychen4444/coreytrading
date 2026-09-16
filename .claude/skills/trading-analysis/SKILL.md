@@ -45,7 +45,7 @@ Before analysis:
 2. Read the private pre-trade checklist if the user is preparing to trade.
 3. Read the private entry rules if the analysis may lead to an entry/add decision.
 4. Refresh quotes: 港股优先 moomoo OpenAPI；美股 `python3 quant/sync/stock_fetch.py`（写 broker block 到 state/positions.json，底层按账户传 `--currency USD`）。
-5. Read `trade/portfolio/state/positions.json` 的 `tickers["<TICKER>"]`：取 `broker`（行情）+ `agent.zones / thesis / lots / pending_orders`。如果 ticker 不在 positions 里，看 `state/watchlist.json` 是否有候选 entry。
+5. Read `trade/portfolio/state/positions.json` 的 `tickers["<TICKER>"]`：取 `broker`（行情）+ `agent.zones` / `thesis`（有 `frame` 先读 frame）/ `lots` / `pending_orders`。如果 ticker 不在 positions 里，看 `state/watchlist.json` 是否有候选 entry。
 6. Determine whether the ticker belongs to:
    - `current` = real active holding（在 positions.json 且 broker.qty != 0）
    - `watchlist` = intended entry but not yet held（在 watchlist.json，或 positions.json 里 broker == null / qty == 0）
@@ -89,7 +89,7 @@ Staleness 检测已代码化（heartbeat 的 portfolio_brief 自动报 `⚠ ZONE
 
 ### Hard rules for zone generation
 - Do **not** create fake precision. If evidence only supports rough bands, use rough bands.
-- Zones must be tied to actual context: support/resistance, post-event range, prior gap, valuation comfort, event window, or sentiment washout/repricing.
+- Zones must be tied to actual price context: support/resistance, post-event range, prior gap, event window, or sentiment washout/repricing. Valuation / thesis never moves a zone boundary（技术面优先 v3；基本面只进 `thesis.frame`）.
 - Zone 2 must not replace zone 1. It exists only as the deeper-weakness tranche.
 - Dynamic does **not** mean emotional. Do not rewrite zones intraday just because price moved. Rewrite only when the analysis basis changed.
 
@@ -133,14 +133,14 @@ python3 .claude/skills/trading-analysis/scripts/update_position_zones.py \
   --no-chase-above {PRICE} \
   --stop-level {PRICE} \
   --stop-level-basis {underlying|option_price} \
-  --invalid-if "{condition}" \
+  --invalid-if "{价格结构失效条件}" \
   --timeframe {swing_2w|swing_4w|event_window|post_earnings} \
   --methodology {normal|parabolic_mode_spirit} \
   --valid-until {YYYY-MM-DD} \
   --update-trigger "{trigger text}" \
   --reasoning-summary "{short basis}" \
-  --thesis "{optional short thesis}" \
-  --key-risk "{optional key risk}" \
+  --thesis-frame '{Step 1 框架 JSON — 形状见 quant/core/thesis_frame.py}' \
+  --key-risk "{结构 / 执行风险；基本面风险在 frame.bear_case}" \
   --notes "{optional notes — 幂等，重复跑会替换不会堆叠}"
 # --remove-from-other 仅在 watchlist→current 迁移时加
 # 写入带 schema 校验 + 跨进程锁；broker/lots/pending_orders 完整保留
@@ -152,6 +152,8 @@ If writing back:
 - set `last_updated` using current UTC time
 - set `valid_until` explicitly when possible
 - set `zone_reasoning_summary` to a short 1-3 bullet style string or concise sentence
+- thesis 只走 `--thesis-frame`（`--thesis` 只给还没迁的旧散文卡，卡上有 frame 后 writer 拒绝）。存量散文卡不专门迁，重画价位带时一并迁入（writer 会 ⚠️ 提醒，不拦截）
+- `--invalid-if` 只写价格结构失效条件；基本面证伪条件写 frame 的 `bear_case.falsifier`
 
 If the ticker migrated from watchlist to current because a real position was opened (note: `quant/sync/watchlist_migrate.py` automates this when broker.qty != 0):
 - update it via `--bucket current` (writes positions.json)
@@ -169,48 +171,55 @@ Follow all five steps in order. Do not skip. Do not give the final trade recomme
 
 ---
 
-## Step 1 — 基本面分析师
+## Step 1 — 基本面框架（[FYI] 判断层，零授权）
 
-Analyze:
-- revenue / profit trend
-- valuation context (PE/PB/PS if available; otherwise mark 待核实)
-- balance sheet / cash flow quality if available
-- business model / moat
-- recent major events: earnings, guidance, customer/order updates, management changes, policy
-- compare against prior thesis or memory when relevant
+写法规格 = 方法文件 `agents/methods/`（若配置）；形状判别式 `quant/core/thesis_frame.py`（定时重画的 technical 角色读同一份）。本 step 按它产出，落卡走 `--thesis-frame`。
 
-Allowed evidence:
-- user-provided numbers（用户贴的研报 / 财报数字——用户提供 ≠ 本 skill 拉取）
-- **卡片 `agent.company_profile`**（商业模式 + 资产负债表 + TTM 资本强度）——先读它；机器区数字带 as_of/source 直接引用
-- **OpenD 结构化财报**（自有量化数据，非情报层）：`quant/sync/company_profile_sync.py --tickers <T>`
-  重拉机器区；底层 `get_financials_statements.py` 可查明细
-- **卡片 `agent.valuation`**（估值层摘要：判定 / 公允 vs 现价 / 反向隐含 CAGR / 置信 / 生效新闻数，
-  `valuation_sync` 从 `valuations.jsonl` 镜像）——thesis 里引用它的数字而不是散文；要最新的跑
-  `python3 quant/valuation/valuate.py --tickers <T> [--refresh]`（`--path` 看逐年路径）。
-  **判断层零授权**：估值不改 zone/gate/cap，低估不是入场理由，高估不是退出理由；低置信票引用「要求 CAGR」不引用公允价
-- 情报归档条目（若配置）
-- known workspace thesis files
-- **不自行 web_search**（情报层归 operator 的情报工作区）；if hard numbers are missing, say so explicitly and mark 待核实
+骨架：**假设 → 驱动 → 空头与证伪 → 估值交叉验证 → 下一催化剂预案**。三件不取：评级与「好的入场点」（入场只看价格结构，v3）、目标价、「强劲 / 一般 / 偏弱」式评级词。
 
-Company profile 维护（本 step 顺手做，尤其财报重画 SLA 触发的重画）:
-- 机器区过期（`balance_sheet.as_of` 早于最新 print 的报告期）→ 跑
-  `company_profile_sync.py --tickers <T>` 刷新
-- 商业模式 / 融资结构有实质变化（新可转债 / ATM / 大额发债 / 资本结构重组）→ 用
-  `--ticker <T> --business-model "..."` / `--financing-notes "..."` 更新人工区
-  （唯一 sanctioned 写法，直接编辑 JSON 禁止；机器区永不手改）
+### 做法（按顺序）
+1. **先读上一版**：卡上已有 `agent.thesis.frame` 且 `catalyst.date` ≤ 今天（ET）→ 第一件事是逐条对账它的 `watch`（实际 vs 预注册），产出 `review`；结果拿不到写「待核实（原因）」，不删看点。卡上是旧散文 thesis → 仍成立的基本面论点迁入对应槽，结构注记不迁，旧 `invalid_if` / `key_risk` 里的基本面证伪条件与风险移进 `bear_case`。
+2. **假设**：一句话，增长或利润由哪一两个驱动决定。说不出来 = 基本面还没读完。
+3. **驱动（1–3 条）**：机制（怎么变成收入或利润）→ 证据（事实 + 出处）→ KPI（下次披露读得到的指标）。
+4. **空头**：写最强版本 → 反驳（带出处，没有就写「待核实」）→ **证伪条件**（可观测，出现即 `thesis.status=broken`）。
+5. **估值**：价格要求什么（`agent.valuation` 的要求 CAGR / 目标利润率，带 as_of，标「诊断口径」），与驱动是否相容；可加透明的自上而下校验（份额 × 市场规模）。低估不是入场理由，高估不是退出理由。
+6. **价格与基本面**（只写报告，不落卡）：近期价格与基本面交付背离时，判断市场在定价空头主张（回到第 4 条）还是板块 / 宏观 / 流动性（按 `.claude/rules/macro-context-check.md` 归因）。这是归因，不是入场信号。
+7. **下一催化剂**：事件 + 事件日（财报取 `trade/market/earnings_calendar.json` 的 `pub_day`）+ 基线（上次指引 / 长期模型 / 一致预期）+ 看点 1–5 条（来自 KPI 与证伪条件）。看点在事件前写下，这就是预注册。
+8. **thesis.status**：证伪出现 → `broken`；KPI 恶化未证伪 → `weakening`；关键看点「待核实」→ `needs_reverification`；其余 `intact`（[FYI] 播报）。
+
+### 证据（只读，零自行拉取）
+- 卡片 `agent.company_profile`（商业模式 + 资产负债表 + TTM 资本强度）——先读，机器区数字带 as_of / source 直接引用。
+  - 机器区过期（`balance_sheet.as_of` 早于最新 print 的报告期）→ `python3 quant/sync/company_profile_sync.py --tickers <T>`
+  - 商业模式 / 融资结构有实质变化（新可转债 / ATM / 大额发债 / 资本结构重组）→ `--ticker <T> --business-model "..."` / `--financing-notes "..."`（唯一 sanctioned 写法；直接编辑 JSON 禁止，机器区永不手改）
+- 卡片 `agent.valuation`（估值镜像；as_of 早于最新财报期 = 过期，写「待核实」）；诊断重算 `python3 quant/valuation/valuate.py --tickers <T> [--refresh]`。估值层零授权：不改 zone / gate / cap。
+- 情报归档条目（若配置，`trade/intelligence/reports/`；文件名作出处）
+- `trade/market/earnings_calendar.json`（`pub_day` / `next_reaction_day`）
+- 用户在对话里贴的研报 / 财报（用户提供 ≠ 本 skill 拉取；出处写提供者 + 日期）
+- **不自行 web_search / 社媒**（情报层归 operator 的情报工作区）；拿不到的数字写「待核实」
 
 Output format:
 
-【基本面报告】
-评级：强劲 / 一般 / 偏弱
-关键结论：
-- ...
-- ...
-- ...
+【基本面框架 [FYI · 零授权]】as_of YYYY-MM-DD
+假设：…
+驱动：
+- ① <名>：<机制> → 证据 <…>（出处）→ KPI <…>
+- ② …
+空头：<最强版本>
+- 反驳：…（出处 / 待核实）
+- 证伪：<可观测条件>
+估值：<价格要求什么（as_of，诊断口径）> → 与驱动 <相容 / 冲突 / 待核实>
+价格与基本面：<是否背离；市场在定价什么>（不落卡，不是入场理由）
+下一催化剂：<事件> <事件日>
+- 基线：…
+- 看点：① … ② … ③ …
+上次看点对账：<仅上一版 catalyst 已到事件日> ① <看点> → <结果> …
+thesis.status：<intact / weakening / needs_reverification / broken>（依据：…）
 数据说明：
-- 用户提供：...
-- 已核实：...
-- 待核实：...
+- 用户提供：…
+- 已核实：…
+- 待核实：…
+
+落卡映射：假设 / 驱动 / 空头 / 估值 / 下一催化剂 / 上次看点对账 / 数据出处 → `--thesis-frame` JSON 的 `hypothesis` / `drivers` / `bear_case` / `valuation` / `catalyst` / `review` / `sources`（`as_of` 同表头）；「价格与基本面」只留在报告里。
 
 ---
 
@@ -289,8 +298,7 @@ When producing execution zones later in Step 5, the K-line derived levels feed d
 Output format:
 
 【技术报告】
-评级：买入信号 / 中性 / 卖出信号
-信号强度：强 / 中 / 弱
+形态（两种模式，`chart_read.py --tickers <T>` 口径；不出买入 / 卖出信号评级）：🔁 抄底 <✓止跌 / ⏳今日新低 / 无> · 🚀 趋势确认 <✓已转移 / ✅站稳·量腿未过 / ⏳计数中 m/n / ▫️逼近 / 无>
 关键价位：
 支撑：___
 压力：___
@@ -321,7 +329,13 @@ Output format:
 ## Step 4 — 多空辩论 + 交易决策
 
 First run a structured bull/bear debate using only evidence already established in steps 1-3.
+基本面侧论据直接引用 Step 1 框架（驱动 / 空头 / 证伪），不另起炉灶；它们是 [FYI]，裁定与操作建议仍以价格结构为准。
 Then translate the outcome into an action plan.
+
+**决策不是评级**：入场决策 = 系统 + agent（简报的当日挂单清单），执行 = operator 照清单人工挂单（不加不改不追），退出 = 系统的钟。所以本块不出 Buy / Overweight 评级、不出目标价、不出「占总仓位 %」——价位、股数上限、止损一律取机器输出原文：
+- 候选（watchlist）：`python3 quant/decision/entry_guard.py --tickers <T>`（不带 `--log`，session 内不落 decisions）
+- 持仓（current）：不走 entry_guard，也不走抄底。退出栈 `python3 quant/decision/exit_guard.py --read-only`；加仓授权 = 卡片 `current_regime.cap_pct_nav` + Iron Rule #2 v2，加仓阶梯与预算看 `python3 quant/report/portfolio_brief.py --read-only`
+- 形态判读（两种模式已形成 / 即将形成）：`python3 quant/report/chart_read.py --tickers <T>`（只读）
 
 Explicitly apply these standing rules when relevant:
 - verification before judgment
@@ -332,11 +346,11 @@ Explicitly apply these standing rules when relevant:
 - avoid turning the right macro concern into one uniform blunt action across all positions
 
 Quantitative tools to run when applicable（算过的必须用 `quant/journal/decision_log.py` 落库，否则永远无法校准）:
-- Sizing 上限：机械上限 = `quant/core/sizing.py` `entry_cap()` 六臂取小（entry_guard 输出已含）；判断层参考 `python3 quant/risk/kelly_size.py --p {后验} --b {赔率} --bankroll {X}`（真实 size = MIN(分数Kelly, entry_cap, ladder)）
+- Sizing 上限：机械上限 = `quant/core/sizing.py` `entry_cap()` 六臂取小（entry_guard 输出已含）；判断层参考 `python3 quant/risk/kelly_size.py --p {后验} --b {赔率} --bankroll {X}`（真实 size = MIN(分数Kelly, entry_cap, ladder)——只能压低股数，不能抬高）
 - 同层冗余：`python3 quant/risk/chain_layers.py`
 - 加仓 / 异动日 regime：`python3 quant/decision/regime_score.py {TICKER} --peers ...`（VIX 自动拉取）
 - Binary catalyst 48h 内的"现在买 vs 等"：跑 entry-timing EV 框架完整流程（`quant/options/implied_move.py` + ATR→P_fill 表），禁止直觉 target
-- 期权 vehicle 选择：先查 `quant/data/iv_logger.py --percentile {T}` 对照 IV 闸门表（`sizing.long_call_iv_gate` 是硬门槛）
+- 期权：IV 门以 entry_guard「若期权」行为准（`sizing.long_call_iv_gate`：IVP <40，序列不足用 HV20 分位代理，ATM IV <50% 末位兜底；抄底 call 不认绝对 IV 兜底），原始序列 `quant/data/iv_logger.py --percentile {T}`。限价锚 = 正股 z1 回踩投影（追高 = `above_z1` 规则外）；抄底合约取 entry_guard 🔁 块的合约计划
 
 Output format:
 
@@ -353,14 +367,17 @@ Output format:
 关键分歧：___
 
 【交易决策】
-评级：Buy / Overweight / Hold / Underweight / Sell
-操作建议：买入 / 持有观察 / 减仓 / 回避
-建议仓位：___%（占总仓位）
-入场区间：___ 至 ___
-止损位：___（理由：___）
-目标价：___（3个月视角）
-置信度：高 / 中 / 低
-决策逻辑摘要：...
+⚓ 宁可错过，不可失序；失去节奏，终会成为市场的猎物。
+第零问 · 节奏：今日挂单清单内 / 清单外（本分析即「先过 agent 一轮」，等不及 = NO）/ 持仓管理（非 BUY）
+入场模式：🔁 抄底（空仓 + ✓止跌）/ 🚀 趋势确认（gate 转移授予的 cap 内）/ 无（未形成 → 不做）
+Q1 授权（entry_guard 原文）：<PLAN(gateN) / VETO / STALE / NEEDS_CARD>；🔁 <PLAN / TOO_FAR / OUT_OF_DOMAIN / VETO / NEEDS_CHAIN / 无>；理由：…
+挂单：<阶梯原文 $价×股 / …>（价位不手改）；股数 <照阶梯 / 压低至 N 股（理由）>；size 上限 $<…>（binding=<臂>）
+工具：<正股 / call（IV 门 过 / 不过，basis …）>
+Q2 错了怎么认：<价> ×<N> 日（来源：卡 stop / 止跌低 / 棘轮地板 / 趋势死亡线）——成立即当日执行，没有「看一天」
+Q3 位置：<z1 / z2 / waiting / 超 no_chase / trim 区 / 破 z2 下沿 = 当日 BUY 冻结>；zone stale → 先重画再判断
+持仓（仅 current）：退出栈 <exit_guard 原文>；加仓 <cap 0 = 无授权 / cap 40% + Iron Rule #2 v2：averaging down / pyramiding up>
+操作：照阶梯挂单 / 等（写明等什么：gate 线 ×N + 量腿 / ✓止跌 / 回踩 z1）/ 持有（退出照钟）/ 减仓（trim 许可区 / 退出线成立）/ 不做
+决策逻辑摘要：<一两句，只引结构证据；基本面引 Step 1 并标 [FYI]>
 
 ### Mandatory execution-zone block
 After `【交易决策】`, produce:
@@ -372,7 +389,9 @@ After `【交易决策】`, produce:
 二档吸纳区：___ 至 ___ / 待核实
 减仓观察区：___ 至 ___ / 待核实
 不追价上限：___ / 待核实
-失效条件：...
+止损：___ ×N 日（来源）/ 待核实
+下一 gate：___ 收盘 ×N + RelVR ≥1.1（`next_regime.entry_gate`）/ 待核实
+失效条件（只写价格结构）：...
 有效期至：...
 触发重算条件：...
 区间依据摘要：
@@ -387,25 +406,26 @@ Notes:
 
 ## Step 5 — 风险审查
 
-Do an independent review of Step 4.
+Do an independent review of Step 4. 只能维持或压低，不能放大：阶梯价位、股数上限、止损是机器与卡片的输出，风险审查不改价、不加股、不放宽 stop；压低股数必须写理由。
 
 Must check:
-- concentration / correlation with current holdings
-- overlap with existing themes
-- maximum likely loss and whether it fits the proposed plan
+- 第零问与 Q1–Q3 都答了没有。VETO / STALE / NEEDS_CARD 的笔 → 裁定只能是「不做」或「先重画」；清单外的笔 → 本审查就是那一轮，GO 须 entry_guard PLAN 且 Q2 / Q3 全过，否则 NO
+- 行为模式：对照 `.claude/rules/trading-discipline.md` 行为模式表（FOMO / revenge / 改限价 / greedy-bid / 期权追高 `above_z1` / 抄底过期追单 `TOO_FAR` / 破 stop 心存侥幸 / 30 分钟规则）
+- concentration / correlation with current holdings：同层冗余（`quant/risk/chain_layers.py`）、主题重叠；size 上限的 binding 臂是不是组合层（gross / at-risk / 冲击预算）
+- maximum likely loss：股数 × (成交价 − stop)；stop 落在真空带 / LVN 里按跳空后更差的成交估；是否在本档 gate 风险预算内
+- 事件：48h 内财报 / FOMC / CPI（财报反应日 T+0 缩仓由 sizing 自动；binary catalyst 只算 EV，不拦截）
 - ignored tail risks
-- whether the recommendation is thesis-driven or emotion/FOMO-driven
-- 结构修复了吗（`structure_repair_veto`）/ regime cap 给了吗 / 第几个给 cap 的 gate（entry_guard 的 Q1 三问）
-- whether the plan respects current trading rules instead of chasing narrative elegance
-- whether the generated execution zones are still valid under the stated catalyst / macro scenario
+- 基本面 [FYI]：Step 1 的证伪条件是否临近——只提示，不改裁定
+- whether the generated execution zones are still valid under the stated catalyst / macro scenario（stale 判据见 `.claude/rules/zone-maintenance.md`）
 
 Output format:
 
 【风险审查】
+规则核对：第零问 <…> · Q1 <…> · Q2 <…> · Q3 <…>
 风险项：
 - ...
-最终裁定：批准 / 批准但建议降低仓位至___% / 否决
-否决或调整理由：...
+最大亏损：<N 股 × (价 − stop) = $… ≈ …% NAV>；跳空情景 <…>
+最终裁定：检查通过 · 照阶梯执行 / 压低至 <N> 股（理由：…）/ 等（条件：…）/ 不做（理由：…）/ 先重画
 
 ## Memory policy
 

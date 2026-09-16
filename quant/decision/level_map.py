@@ -59,20 +59,9 @@ make_profile = technical.volume_profile
 EDGE_WEIGHT = technical.EDGE_WEIGHT
 
 
-def top_hvn(profile: list[dict], n: int = 5) -> list[dict]:
-    """Top-n buckets merged into contiguous HVN bands, strongest first."""
-    if not profile:
-        return []
-    top = sorted(sorted(profile, key=lambda x: -x["turnover"])[:n], key=lambda x: x["lo"])
-    bands: list[dict] = []
-    for b in top:
-        if bands and abs(b["lo"] - bands[-1]["hi"]) < 1e-6:
-            bands[-1]["hi"] = b["hi"]
-            bands[-1]["turnover"] += b["turnover"]
-            bands[-1]["share_pct"] = round(bands[-1]["share_pct"] + b["share_pct"], 1)
-        else:
-            bands.append(dict(b))
-    return sorted(bands, key=lambda x: -x["turnover"])
+# 纯函数住 core/technical (下沉: core/bottom_evidence 的锚收敛要同一份簇/HVN 口径,
+# core 不能向上 import decision) —— 本模块同名转出, 行为一字未改
+top_hvn = technical.top_hvn
 
 
 def find_lvn(profile: list[dict], bucket: float, poc_frac: float = 0.25) -> list[dict]:
@@ -116,30 +105,9 @@ def find_lvn(profile: list[dict], bucket: float, poc_frac: float = 0.25) -> list
             if b["lo"] > lo_edge + 1e-6 and b["hi"] < hi_edge - 1e-6]
 
 
-def cluster_pivots(pivots: list[dict], tol: float) -> list[dict]:
-    """Merge swing pivots within `tol` of running cluster mean into bands.
-    pivots: [{price, date, kind('high'|'low')}]. Multi-touch + mixed-kind
-    (support-turned-resistance) bands are the strong ones."""
-    if not pivots:
-        return []
-    pts = sorted(pivots, key=lambda p: p["price"])
-    clusters: list[dict] = []
-    for p in pts:
-        if clusters and abs(p["price"] - clusters[-1]["_mean"]) <= tol:
-            c = clusters[-1]
-            c["prices"].append(p["price"])
-            c["dates"].append(p["date"])
-            c["kinds"].add(p["kind"])
-            c["_mean"] = sum(c["prices"]) / len(c["prices"])
-        else:
-            clusters.append({"prices": [p["price"]], "dates": [p["date"]],
-                             "kinds": {p["kind"]}, "_mean": p["price"]})
-    return [
-        {"lo": round(min(c["prices"]), 2), "hi": round(max(c["prices"]), 2),
-         "center": round(c["_mean"], 2), "touches": len(c["prices"]),
-         "kinds": "+".join(sorted(c["kinds"])), "last_touch": max(c["dates"])}
-        for c in clusters
-    ]
+# 纯函数住 core/technical (下沉: core/bottom_evidence 的锚收敛要同一份簇/HVN 口径,
+# core 不能向上 import decision) —— 本模块同名转出, 行为一字未改
+cluster_pivots = technical.cluster_pivots
 
 
 def level_interactions(bars: list[dict], level: float, near: float | None = None,

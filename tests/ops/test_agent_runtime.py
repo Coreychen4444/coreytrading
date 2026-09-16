@@ -575,6 +575,12 @@ def test_isolated_workers_receive_referenced_policy_and_actual_writer_contract()
     policy = runtime.policy_context("technical")
     assert policy["technical_proposal_contract"]["flag_arity"] == FLAG_ARITY
     assert "--ticker" not in policy["technical_proposal_contract"]["flag_arity"]
+    frame_method = "agents/methods/fundamental-frame.md"          # thesis.frame 规格
+    if (runtime.ROOT / frame_method).exists():
+        assert frame_method in policy
+    else:   # optional methods workspace absent: named, not fabricated
+        assert frame_method in policy["optional_methods_missing"] and frame_method not in policy
+    assert "--thesis-frame" in policy["technical_proposal_contract"]["nested_json_flags"]
 
 
 def test_freeze_uses_only_explicit_json_evidence(tmp_path, capsys):

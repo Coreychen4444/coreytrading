@@ -34,7 +34,12 @@ PARAMS = {
     "high_lookback": 60,      # 回撤参照 = 60 日高 (setups.HIGH_LOOKBACK)
     "drawdown_min": 0.10,     # 域下沿: 止跌低距 60 日高 ≥10% 才是「跌到足够便宜」
     "drawdown_max": None,     # 域上沿: None = 不封顶 (R0; 第一版 0.20 只开 R1 已退役)
-    "valid_days": 3,          # 信号有效期 (交易日): 「不能等待过多」的操作化
+    # 有效期: 存活 (信号后无收盘 < 止跌低) ∧ 收盘 ≤ 止跌低 + max_dist_atr × ATR20 ∧ age < valid_days。
+    #   位置受控后年龄本身不影响结果, 所以年龄上限 = setups.RECENT_SIGNAL_BARS (授权不比判读活得久, 测试钉);
+    #   ATR 距离是**上限不是门槛**: 防止离底部太远、进场距离不上不下; 贴着止跌低并不更好,
+    #   所以它只做语义上限, 不是筛子。
+    "valid_days": 10,         # 信号年龄上限 (交易日, age 0..9 可挂)
+    "max_dist_atr": 2.0,      # 收盘距止跌低 ≤ 2×ATR20 才「还在底部」; 超过 = 离底太远, 不出计划 (TOO_FAR)
 }
 LADDER_FRACS = (2.0 / 3.0, 1.0 / 3.0)   # 二/三档 = 止跌低 + 首档距的 2/3 / 1/3 (全在止跌低之上)
 
@@ -76,9 +81,14 @@ def signal_at(rows: List[dict], i: int, atr20: Optional[float] = None,
 def detect(rows: List[dict], atr20: Optional[float] = None,
            valid_days: Optional[int] = None, p: dict = PARAMS) -> Optional[dict]:
     """最近 valid_days 根里最新的一个 ✓止跌 形成日 (含 age = 距今根数); 信号之后任一收盘 < 止跌低
-    = 信号已作废 (反弹结束) → None。"""
+    = 信号已作废 (反弹结束) → None。
+
+    距离: `dist_n` = (最新收盘 − 止跌低) / ATR20; `too_far` = dist_n > max_dist_atr
+    (离底太远 = 不上不下, 授权层不出计划但要播「看见了没开」, 所以**不返回 None**; ATR 缺 → dist_n None,
+    too_far None = 判不了, 调用方 fail-closed)。"""
     n = len(rows)
     vd = int(valid_days if valid_days is not None else p["valid_days"])
+    a = coerce_float(atr20)
     for k in range(0, vd):
         i = n - 1 - k
         if i < 0:
@@ -89,6 +99,14 @@ def detect(rows: List[dict], atr20: Optional[float] = None,
         if any(_f(x, "close") < sig["support"] for x in rows[i + 1:]):
             return None                                 # 止跌低已收破: 反弹结束, 不复活
         sig["age"] = k
+        last_close = _f(rows[-1], "close")
+        sig["last_close"] = last_close
+        if a and a > 0:
+            d = (last_close - sig["support"]) / a
+            sig["dist_n"] = round(d, 2)
+            sig["too_far"] = bool(d > float(p["max_dist_atr"]))
+        else:
+            sig["dist_n"], sig["too_far"] = None, None
         return sig
     return None
 
