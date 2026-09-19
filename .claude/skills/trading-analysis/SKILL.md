@@ -31,7 +31,7 @@ Use in this order:
 - 用户在对话里贴的研报 / 新闻可以用（用户提供 ≠ 本 skill 拉取）
 
 ### Rules / behavior context
-CLAUDE.md 与 `.claude/rules/` 已自动加载；额外读 operator 的私有策略规则（由 `trade/strategy/*.example.md` 派生，先看该目录 README）：
+AGENTS.md 与 `.claude/rules/` 已自动加载；额外读 operator 的私有策略规则（由 `trade/strategy/*.example.md` 派生，先看该目录 README）：
 - trading-rules（master index = 全决策栈入口）
 - pre-trade-checklist
 - 两阶段入场规则（若 operator 维护）

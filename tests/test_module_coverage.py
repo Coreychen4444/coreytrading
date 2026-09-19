@@ -63,7 +63,7 @@ UNTESTED: dict[str, str] = {
                                    "事件判别式要搬进 decision/ 层并在那里补测试",
     "research/escape_velocity_backtest": "离线预注册回测；world_value/_boot_metric 被 earnings_gate 复用",
     "research/entry_ladder_backtest": "离线入场结构回测；尚缺独立构造级覆盖",
-    "research/structure_downgrade_backtest": "**真缺口**: CLAUDE.md 规定「改 entry_guard "
+    "research/structure_downgrade_backtest": "**真缺口**: AGENTS.md 规定「改 entry_guard "
                                              "降级条件前必跑」，判据来源却没测",
 }
 

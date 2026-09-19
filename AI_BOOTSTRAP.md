@@ -2,7 +2,7 @@
 
 [中文版](AI_BOOTSTRAP_CN.md)
 
-This document is the execution guide for a coding agent taking a fresh clone from source to a verified local workspace. It covers project infrastructure, the private trading workspace, the optional broker connection and the optional operations layer (notifications, scheduled tasks, domain-agent runtimes). It does not replace the behavioral, architectural or trading rules in `CLAUDE.md`.
+This document is the execution guide for a coding agent taking a fresh clone from source to a verified local workspace. It covers project infrastructure, the private trading workspace, the optional broker connection and the optional operations layer (notifications, scheduled tasks, domain-agent runtimes). It does not replace the behavioral, architectural or trading rules in `AGENTS.md`.
 
 The safe default is an offline, synthetic-data environment. Broker connectivity, real account state, notifications, scheduled tasks, model runtimes and live execution are separate opt-in capabilities.
 
@@ -20,23 +20,24 @@ A completed bootstrap has all of the following properties:
 
 Bootstrap is not complete merely because dependencies install. The agent must run the verification gate and produce the handoff report defined below.
 
-## Agent instruction files: do not rename `CLAUDE.md`
+## Agent instruction files: `AGENTS.md` is the contract, `CLAUDE.md` is an import shim
 
-There is no universal project-instruction filename across coding agents. Renaming `CLAUDE.md` to `AGENTS.md` would make the project less compatible, not more compatible.
+The complete project contract lives in `AGENTS.md`. OpenAI Codex and Claude Code ≥ 2.1.277 read that file natively. `CLAUDE.md` is committed as a single line, `@AGENTS.md`, so that older Claude Code runtimes (which do not discover `AGENTS.md`) import the same contract. Do not write anything else into `CLAUDE.md`: under Claude Code's default mode a `CLAUDE.md` with its own content shadows `AGENTS.md` completely, and the two files drift. Delete the shim only after every Claude Code runtime in use is ≥ 2.1.277.
 
 | Agent/runtime | Default project instruction | Repository policy |
 |---|---|---|
-| Claude Code | `CLAUDE.md` | Read the complete root file directly. Keep it in place. |
-| OpenAI Codex | `AGENTS.md` | Use the committed `AGENTS.md` entry point, then read `CLAUDE.md` in full. |
-| Gemini CLI | `GEMINI.md` | Configure its context filename or create a small uncommitted adapter that imports `CLAUDE.md`; do not rename the original. |
+| Claude Code ≥ 2.1.277 | `AGENTS.md` (or `CLAUDE.md` when present) | Reads the contract through the `@AGENTS.md` shim; nothing is loaded twice. |
+| Claude Code < 2.1.277 | `CLAUDE.md` | Imports `AGENTS.md` through the shim. Keep the shim while such a runtime is in use. |
+| OpenAI Codex | `AGENTS.md` | Reads the complete contract directly. Keep it under the 32 KiB auto-load limit. |
+| Gemini CLI | `GEMINI.md` | Configure its context filename or create a small uncommitted adapter that imports `AGENTS.md`. |
 | GitHub Copilot | Depends on the Copilot surface; several recognize `AGENTS.md`, `CLAUDE.md` or both | Inspect the active instruction list and avoid duplicated or conflicting rules. |
-| Unknown agent | Vendor-specific | Check the agent's instruction-discovery documentation, create a small adapter if required, and point it to `CLAUDE.md`. |
+| Unknown agent | Vendor-specific | Check the agent's instruction-discovery documentation, create a small adapter if required, and point it to `AGENTS.md`. |
 
 ### Single-source policy
 
-- `CLAUDE.md` is the complete, authoritative project contract. It is compact and pointer-style; the method files it points to (`quant/README.md`, `agents/README.md`, `tasks/README.md`, `.claude/rules/`, `trade/README.md`) are the sources of truth for their subjects.
-- `AGENTS.md` is a short compatibility entry point. It must direct the agent to read `CLAUDE.md`; it must not contain a copied contract.
-- Tool-specific adapters must remain small and must not redefine architecture, formulas, privacy rules or trading behavior. If an adapter and `CLAUDE.md` disagree, stop and repair the adapter.
+- `AGENTS.md` is the complete, authoritative project contract. It is compact and pointer-style; the method files it points to (`quant/README.md`, `agents/README.md`, `tasks/README.md`, `.claude/rules/`, `trade/README.md`) are the sources of truth for their subjects.
+- `CLAUDE.md` is exactly one line, `@AGENTS.md`. It must not contain a copied or summarized contract; `tests/test_agents_md_contract.py` pins this.
+- Tool-specific adapters must remain small and must not redefine architecture, formulas, privacy rules or trading behavior. If an adapter and `AGENTS.md` disagree, stop and repair the adapter.
 - The same contract applies to every model and runtime, including the domain-agent workers described in `agents/README.md`; a worker's research result never grants a permission the contract withholds.
 
 ## Required reading order
@@ -44,7 +45,7 @@ There is no universal project-instruction filename across coding agents. Renamin
 Before writing files or running a mutating command, the agent must read:
 
 1. the instruction file automatically selected by the active agent;
-2. root `CLAUDE.md` in full;
+2. root `AGENTS.md` in full;
 3. this file;
 4. `quant/README.md` for package layering and dependency direction;
 5. `trade/README.md` plus relevant descendant READMEs before creating private state;
@@ -290,8 +291,8 @@ Report private file paths only; do not paste their contents. If setup stopped at
 
 For a standard fresh-clone request with no broker requirement:
 
-1. read `AGENTS.md` or the native agent entry point;
-2. read `CLAUDE.md` in full, then this file and `quant/README.md`;
+1. read `AGENTS.md` in full (older Claude Code runtimes reach it through the `CLAUDE.md` shim);
+2. read this file and `quant/README.md`;
 3. inspect Git state and Python availability;
 4. create or reuse an isolated environment;
 5. install `.[dev]` from `pyproject.toml`;
@@ -303,13 +304,13 @@ That baseline is useful on its own. Expand into private, broker-connected or ope
 
 ## Common questions and answers
 
-### Do I need to rename `CLAUDE.md` when I am not using Claude Code?
+### Why is `CLAUDE.md` a single line?
 
-No. Keep `CLAUDE.md` because it is the complete project contract and Claude Code depends on that filename. Use the committed `AGENTS.md` for Codex, or create a small runtime-specific adapter that directs the agent to read `CLAUDE.md` in full. Never maintain two copied contracts.
+`AGENTS.md` is the complete project contract and is read natively by Codex and Claude Code ≥ 2.1.277. `CLAUDE.md` contains only `@AGENTS.md` so that older Claude Code runtimes import the same file. Anything else written into `CLAUDE.md` would shadow `AGENTS.md` under Claude Code's default mode. Never maintain two copied contracts.
 
 ### Which file should an AI read first?
 
-Start with the file automatically discovered by the active agent: Codex starts from `AGENTS.md`, Claude Code from `CLAUDE.md`. In every case, read the complete `CLAUDE.md` before acting. For setup work continue with this file; for private data continue with `trade/README.md`; for model runtimes continue with `agents/README.md`.
+`AGENTS.md`. Codex and Claude Code ≥ 2.1.277 discover it directly; older Claude Code runtimes reach it through the `CLAUDE.md` shim. In every case, read the complete `AGENTS.md` before acting. For setup work continue with this file; for private data continue with `trade/README.md`; for model runtimes continue with `agents/README.md`.
 
 ### Must this project be used with Claude Code?
 

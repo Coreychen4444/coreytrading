@@ -90,7 +90,7 @@ def main() -> int:
     # 定时任务在 SGT 18:30 跑, 那一刻 SGT 日 == ET 日, 所以三个月来每次都碰巧对;
     # 一旦在别的时点跑 (人工预览 / pipeline --read-only), SGT 已经是明天 →
     # 写出比 ET 交易日晚一天的 date key, 且幂等检查 `date == today` 同时失效 →
-    # 同一个 ET 交易日被写两行。IV 序列不可重拉 (CLAUDE.md), 污染是永久的。
+    # 同一个 ET 交易日被写两行。IV 序列不可重拉 (AGENTS.md), 污染是永久的。
     # 口径见 lib/timeutil.et_today() docstring。
     today = et_today()
     rows = list(iter_jsonl(NAV_HISTORY_PATH))

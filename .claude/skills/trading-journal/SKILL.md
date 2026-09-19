@@ -43,7 +43,7 @@ Decide which of these it is (a single lesson may need more than one destination)
     [--tier {base|position}] [--auth-cap 0.4 --auth-gate N] \
     [--score {A|A-|B|C|D} --phase {entry|exit|episode} --score-notes "..."]
   ```
-  写入 `events/<YYYY-MM>/trades.jsonl`（schema 校验强制）+ `journals/scores.jsonl`。`--auth-cap/--auth-gate` 只给「推不出→留空归人判」判完后的写回；分类轴（confirmed/probe/early_risky）已退役，不再有 `--classification`。**只注解规则外成交**（判据见 CLAUDE.md 常设裁决 9）。
+  写入 `events/<YYYY-MM>/trades.jsonl`（schema 校验强制）+ `journals/scores.jsonl`。`--auth-cap/--auth-gate` 只给「推不出→留空归人判」判完后的写回；分类轴（confirmed/probe/early_risky）已退役，不再有 `--classification`。**只注解规则外成交**（判据见 AGENTS.md 常设裁决 9）。
 - **评分标准**：process 通过 + 结果好 / 坏 = A，process 错 + 结果好 = D 🚨，process 错 + 结果坏 = C（canonical 在 operator 的私有 post-trade scoring 规则）。结构性退出由 `quant/journal/exit_score.py` 机械评分（只评时延与完整度）。
 - **决策 worksheet**（如果复盘涉及 EV / Kelly 计算）：`quant/journal/decision_log.py` 落 `events/decisions.jsonl`。
 - 统计验证：`python3 quant/report/perf_report.py` 应能看到这条记录。
@@ -63,7 +63,7 @@ Layering convention（`trade/strategy/README.md`）：**methodology → 私有�
 ### 5) Memory（agent 侧持久化）
 - 用当前 Agent 提供的持久记忆机制，按主题归档（交易教训 / 入场执行 / 期权选择 / 持仓管理 / 行为校准），而不是日记式流水。
 - methodology 类只留**指针**指向私有规则（不复制正文）；behavioral / 校准类才放全文。
-- repo 已记录的东西（代码结构 / git 历史 / CLAUDE.md 已有内容）不进 memory。
+- repo 已记录的东西（代码结构 / git 历史 / AGENTS.md 已有内容）不进 memory。
 
 ### 6) Public mirrors（若 operator 维护公开知识库）
 - 永不把 journals、holdings、fills、NAV 历史、个人校准同步到公开仓。

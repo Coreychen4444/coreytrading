@@ -313,7 +313,7 @@ def untagged_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
     core/holdings;  起盖 `auth` 不再盖 classification), 所以正常情况下
     这条不该响。它响 = **推导返回了 None**, 而 None 不是"算不出来", 是一个判断:
     regime cap 0 / 无 current_regime = 这笔成交没有系统授权的形状 —— 按规则外
-    处理, 归人判 (CLAUDE.md §Trading Discipline 的注解清单正是这一类)。
+    处理, 归人判 (AGENTS.md §Trading Discipline 的注解清单正是这一类)。
 
     没有这条告警, "推不出来"就退化成一个空字段: 卡片预算行降级、注解清单里少一
     笔, 谁也不会发现。空字段不会自己举手 (data_discipline: 会驱动动作的缺失必须
@@ -671,7 +671,7 @@ def enrich_with_zone_context(item: Dict, current_zones: Dict[str, dict],
 def _observation_zone_line(ticker: str, cfg: Dict, zone1, zone2) -> Optional[str]:
     """cap 0 候选卡的「Watchlist plans」行 —— 观察带, 不是买带。
 
-    词汇故意与仓位层不互借 (CLAUDE.md 语义分层): 首档/二档/减仓/不追价 是仓位层
+    词汇故意与仓位层不互借 (AGENTS.md 语义分层): 首档/二档/减仓/不追价 是仓位层
     词汇, 只有拿到 cap 的卡配得上; cap 0 的卡回答的是「价格下去大概到哪」, 所以
     用 落点①/②/图作废/解除。有效期也不印 —— 一张不授权的图没有「有效期至」可言,
     它的过期出口在 Watchlist stale 那一节。

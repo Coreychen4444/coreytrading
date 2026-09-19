@@ -4,7 +4,7 @@ A US-equity trading operations system built around **domain agents, interchangea
 
 [中文版](README_CN.md) · [Agent operations](agents/README.md) · [Code architecture](quant/README.md) · [Scheduled tasks](tasks/README.md) · [Trading data](trade/README.md) · [AI bootstrap](AI_BOOTSTRAP.md)
 
-The project contract for every model is [CLAUDE.md](CLAUDE.md); coding agents that do not discover that file enter through [AGENTS.md](AGENTS.md).
+The project contract for every model is [AGENTS.md](AGENTS.md) (read natively by Codex and Claude Code ≥ 2.1.277); [CLAUDE.md](CLAUDE.md) is a one-line `@AGENTS.md` import shim for older Claude Code runtimes.
 
 Trading covers US equities and the existing US equity-options workflow. Cross-asset macro data supplies context and research inputs only; it never becomes an additional trading market.
 
@@ -137,7 +137,7 @@ Risk agents interpret mechanical receipts rather than inventing another sizing f
 
 | Location | Contents |
 |---|---|
-| [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md) | Project contract for every model / compatibility entry point |
+| [AGENTS.md](AGENTS.md) | Project contract for every model; [CLAUDE.md](CLAUDE.md) is a one-line `@AGENTS.md` import shim |
 | [AI_BOOTSTRAP.md](AI_BOOTSTRAP.md) / [AI_BOOTSTRAP_CN.md](AI_BOOTSTRAP_CN.md) | Fresh-clone setup guide for a coding agent |
 | [agents/](agents/) | Domain methods, role contracts, routing and operating manual |
 | [quant/](quant/) | Host controllers, data/sync, mechanical decisions, valuation and reports |
@@ -218,7 +218,7 @@ To change the system:
 - **Change a domain method:** update the role definition and its evidence contract without duplicating mechanical rules in prompts.
 - **Add a provider:** implement its runner and routing validation, then verify the same contracts and isolation boundaries.
 - **Add a role or permission:** update the explicit role schema, workflow and tests; a new Markdown file alone does not register a role.
-- **Change trading mechanics:** follow [CLAUDE.md](CLAUDE.md) and the applicable research validation requirements.
+- **Change trading mechanics:** follow [AGENTS.md](AGENTS.md) and the applicable research validation requirements.
 
 ## Disclaimer
 

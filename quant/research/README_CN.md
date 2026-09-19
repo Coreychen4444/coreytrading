@@ -97,7 +97,7 @@ Puller 和窗口型回测的日期范围通过 CLI 提供，并同步记录在�
 
 ## AI 搭建流程
 
-1. 创建任何文件前，读取 `CLAUDE.md`、本文和 `trade/knowledge/research/README.md`。
+1. 创建任何文件前，读取 `AGENTS.md`、本文和 `trade/knowledge/research/README.md`。
 2. 把研究问题改写成针对一个 production behavior 的单一、可证伪假设。
 3. 将 `study.example.md` 复制到被 Git 忽略的私人工作区，并从私人文件名中移除 `.example`。
 4. 向用户确认所有未决选择：population、observation unit、metric、horizon、threshold、missing-data behavior、fallback branch 和 promotion rule。不能从公开示例猜测。

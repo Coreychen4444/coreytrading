@@ -4,7 +4,7 @@
 
 [English](README.md) · [Agent 运行手册](agents/README.md) · [代码架构](quant/README.md) · [定时任务](tasks/README.md) · [业务资料](trade/README.md) · [AI 搭建指南](AI_BOOTSTRAP_CN.md)
 
-所有模型共用的项目合同是 [CLAUDE.md](CLAUDE.md)；不会自动发现该文件的编码 Agent 从 [AGENTS.md](AGENTS.md) 进入。
+所有模型共用的项目合同是 [AGENTS.md](AGENTS.md)（Codex 与 Claude Code ≥ 2.1.277 原生读取）；[CLAUDE.md](CLAUDE.md) 只是一行 `@AGENTS.md` 导入垫片，给旧版 Claude Code 运行时。
 
 交易范围为美股与现有美股期权流程。跨资产宏观数据只用于环境观测与研究输入，不因此成为额外的交易市场。
 
@@ -137,7 +137,7 @@ flowchart TD
 
 | 位置 | 内容 |
 |---|---|
-| [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md) | 对所有模型生效的项目合同／兼容入口 |
+| [AGENTS.md](AGENTS.md) | 对所有模型生效的项目合同；[CLAUDE.md](CLAUDE.md) 只是一行 `@AGENTS.md` 导入垫片 |
 | [AI_BOOTSTRAP.md](AI_BOOTSTRAP.md) / [AI_BOOTSTRAP_CN.md](AI_BOOTSTRAP_CN.md) | 编码 Agent 的 fresh clone 搭建指南 |
 | [agents/](agents/) | 领域方法、角色契约、路由和运行手册 |
 | [quant/](quant/) | 宿主控制器、数据同步、机械决策、估值和报告 |
@@ -218,7 +218,7 @@ python -m pytest --collect-only -q
 - **调整领域方法：** 修改角色定义及证据契约，保持机械规则的代码真源。
 - **接入新 provider：** 实现运行器和路由校验，验证同一套契约与隔离边界。
 - **增加角色或权限：** 修改显式角色 schema、workflow 和测试；新增 Markdown 文件本身不会注册角色。
-- **修改交易机制：** 遵循 [CLAUDE.md](CLAUDE.md) 与相应研究验证要求。
+- **修改交易机制：** 遵循 [AGENTS.md](AGENTS.md) 与相应研究验证要求。
 
 ## 免责声明
 

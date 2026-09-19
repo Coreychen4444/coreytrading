@@ -2,7 +2,7 @@
 
 [English](AI_BOOTSTRAP.md)
 
-本文档供编码 Agent 将一个刚 clone 的仓库搭建为经过验证的本地工作区，覆盖项目基础设施、私有交易工作区、可选的券商连接和可选的运营层（通知、定时任务、领域 Agent 运行器）。它不取代 `CLAUDE.md` 中的行为、架构和交易规则。
+本文档供编码 Agent 将一个刚 clone 的仓库搭建为经过验证的本地工作区，覆盖项目基础设施、私有交易工作区、可选的券商连接和可选的运营层（通知、定时任务、领域 Agent 运行器）。它不取代 `AGENTS.md` 中的行为、架构和交易规则。
 
 安全默认模式是离线环境加合成数据。Broker 连接、真实账户状态、通知、定时任务、模型运行器和 live execution 都是相互独立的可选能力。
 
@@ -20,23 +20,24 @@
 
 依赖安装成功不等于搭建完成。Agent 还必须执行本文的验证门槛并输出规定的交接报告。
 
-## Agent 指令文件：不要重命名 `CLAUDE.md`
+## Agent 指令文件：`AGENTS.md` 是契约，`CLAUDE.md` 是导入垫片
 
-不同编码 Agent 没有统一的项目指令文件名。把 `CLAUDE.md` 重命名为 `AGENTS.md` 会降低兼容性，而不是提高兼容性。
+完整项目契约住在 `AGENTS.md`。OpenAI Codex 与 Claude Code ≥ 2.1.277 都原生读取该文件。`CLAUDE.md` 只提交一行 `@AGENTS.md`，让还不认 `AGENTS.md` 的旧版 Claude Code 运行时导入同一份契约。不要往 `CLAUDE.md` 里写任何别的内容：Claude Code 默认模式下，一份有自己内容的 `CLAUDE.md` 会整份遮蔽 `AGENTS.md`，两份文件从此分叉。只有在用的所有 Claude Code 运行时都 ≥ 2.1.277 之后才删垫片。
 
 | Agent/runtime | 默认项目指令 | 本仓库策略 |
 |---|---|---|
-| Claude Code | `CLAUDE.md` | 直接完整读取根目录文件，并保留原文件。 |
-| OpenAI Codex | `AGENTS.md` | 先使用已提交的 `AGENTS.md` 入口，再完整读取 `CLAUDE.md`。 |
-| Gemini CLI | `GEMINI.md` | 配置 context filename，或创建导入 `CLAUDE.md` 的小型未提交适配文件；不能重命名原文件。 |
+| Claude Code ≥ 2.1.277 | `AGENTS.md`（存在 `CLAUDE.md` 时读它） | 经 `@AGENTS.md` 垫片读到契约；不会重复加载。 |
+| Claude Code < 2.1.277 | `CLAUDE.md` | 经垫片导入 `AGENTS.md`。还在用这类运行时就保留垫片。 |
+| OpenAI Codex | `AGENTS.md` | 直接读取完整契约。保持在 32 KiB 自动加载上限内。 |
+| Gemini CLI | `GEMINI.md` | 配置 context filename，或创建导入 `AGENTS.md` 的小型未提交适配文件。 |
 | GitHub Copilot | 取决于 Copilot 运行界面，部分界面识别 `AGENTS.md`、`CLAUDE.md` 或两者 | 检查当前生效的指令清单，避免重复或互相冲突。 |
-| 未知 Agent | 取决于厂商 | 先查该 Agent 的指令发现规则；需要时创建小型适配文件并指向 `CLAUDE.md`。 |
+| 未知 Agent | 取决于厂商 | 先查该 Agent 的指令发现规则；需要时创建小型适配文件并指向 `AGENTS.md`。 |
 
 ### 单一真源策略
 
-- `CLAUDE.md` 是完整且权威的项目契约。它是指针式的紧凑文件；它指向的方法文件（`quant/README.md`、`agents/README.md`、`tasks/README.md`、`.claude/rules/`、`trade/README.md`）各自是所属主题的真源。
-- `AGENTS.md` 是轻量兼容入口。它必须要求 Agent 完整读取 `CLAUDE.md`，不能复制一份契约内容。
-- 工具专属适配文件必须保持精简，不能重新定义架构、公式、隐私规则或交易行为。适配文件与 `CLAUDE.md` 冲突时，停止并修复适配文件。
+- `AGENTS.md` 是完整且权威的项目契约。它是指针式的紧凑文件；它指向的方法文件（`quant/README.md`、`agents/README.md`、`tasks/README.md`、`.claude/rules/`、`trade/README.md`）各自是所属主题的真源。
+- `CLAUDE.md` 只有一行 `@AGENTS.md`，不能放复制或摘要的契约；由 `tests/test_agents_md_contract.py` 钉住。
+- 工具专属适配文件必须保持精简，不能重新定义架构、公式、隐私规则或交易行为。适配文件与 `AGENTS.md` 冲突时，停止并修复适配文件。
 - 同一份契约对所有模型和运行器生效，包括 `agents/README.md` 描述的领域 Agent worker；worker 的研究结果永远不会授予契约未给出的权限。
 
 ## 必读顺序
@@ -44,7 +45,7 @@
 写文件或运行会改变状态的命令之前，Agent 必须依次读取：
 
 1. 当前 Agent 自动选择的指令文件；
-2. 根目录 `CLAUDE.md` 全文；
+2. 根目录 `AGENTS.md` 全文；
 3. 本文档；
 4. `quant/README.md`，了解 package 分层和依赖方向；
 5. 创建私有状态前，读取 `trade/README.md` 及相关后代目录的 README；
@@ -290,8 +291,8 @@ Notifications/tasks/MCP/模型运行器状态：
 
 对于不需要 broker 的标准 fresh-clone 请求：
 
-1. 读取 `AGENTS.md` 或当前 Agent 的原生入口；
-2. 完整读取 `CLAUDE.md`，然后读取本文档和 `quant/README.md`；
+1. 完整读取 `AGENTS.md`（旧版 Claude Code 运行时经 `CLAUDE.md` 垫片读到它）；
+2. 读取本文档和 `quant/README.md`；
 3. 检查 Git 状态和 Python 可用性；
 4. 创建或复用隔离环境；
 5. 从 `pyproject.toml` 安装 `.[dev]`；
@@ -303,13 +304,13 @@ Notifications/tasks/MCP/模型运行器状态：
 
 ## 常见问题与回答
 
-### 不使用 Claude Code 时，需要把 `CLAUDE.md` 重命名吗？
+### 为什么 `CLAUDE.md` 只有一行？
 
-不需要。必须保留 `CLAUDE.md`，因为它是完整项目契约，而且 Claude Code 依赖该文件名。Codex 使用已提交的 `AGENTS.md`；其他 Agent 可创建小型适配文件，要求其完整读取 `CLAUDE.md`。绝不能同时维护两份复制的契约。
+`AGENTS.md` 是完整项目契约，Codex 与 Claude Code ≥ 2.1.277 原生读取。`CLAUDE.md` 只放 `@AGENTS.md`，让旧版 Claude Code 运行时导入同一份文件。往 `CLAUDE.md` 写任何别的内容都会在 Claude Code 默认模式下遮蔽 `AGENTS.md`。绝不能同时维护两份复制的契约。
 
 ### AI 应该先读哪个文件？
 
-先读当前 Agent 自动发现的文件：Codex 从 `AGENTS.md` 开始，Claude Code 从 `CLAUDE.md` 开始。无论使用什么 Agent，行动前都必须完整读取 `CLAUDE.md`。Setup 任务接着读本文档；私有数据任务继续读 `trade/README.md`；模型运行器任务继续读 `agents/README.md`。
+`AGENTS.md`。Codex 与 Claude Code ≥ 2.1.277 直接发现它；旧版 Claude Code 运行时经 `CLAUDE.md` 垫片读到它。无论使用什么 Agent，行动前都必须完整读取 `AGENTS.md`。Setup 任务接着读本文档；私有数据任务继续读 `trade/README.md`；模型运行器任务继续读 `agents/README.md`。
 
 ### 这个项目必须使用 Claude Code 吗？
 

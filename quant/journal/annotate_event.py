@@ -4,7 +4,7 @@
 闭环 overnight-briefing step 9: 新成交检测 → 本工具写回 events JSONL
 (+ 可选 scores.jsonl 评分行)。替代过去 prose-only 注解。
 
-**起注解只给规则外成交**(用户 定, 判据见 CLAUDE.md §Trading Discipline);
+**起注解只给规则外成交**(用户 定, 判据见 AGENTS.md §Trading Discipline);
 计划内成交不注解 —— 事件流 + decisions worksheet + 当时 regime/cap 已完整描述它。
 
 tier / auth 两个字段**不再问人, 默认机械推导**(用户):

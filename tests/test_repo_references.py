@@ -39,7 +39,7 @@ SCAN = [
     *(ROOT / ".claude" / "rules").glob("*.md"),
     *ROOT.glob("README*.md"),
     ROOT / "quant" / "README.md",
-    ROOT / "CLAUDE.md",
+    ROOT / "AGENTS.md",
 ]
 
 # 指向仓库内代码/测试的 token。只收后缀明确的，避免把散文里的目录名当路径。

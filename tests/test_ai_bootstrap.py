@@ -9,17 +9,17 @@ BOOTSTRAP = ROOT / "AI_BOOTSTRAP.md"
 BOOTSTRAP_CN = ROOT / "AI_BOOTSTRAP_CN.md"
 
 
-def test_non_claude_entry_preserves_the_complete_contract():
+def test_agents_md_is_the_complete_contract_and_names_the_shim():
     text = AGENT_ENTRY.read_text(encoding="utf-8")
-    assert "read `CLAUDE.md` in full" in text
-    assert "Do not rename, delete, summarize, or duplicate `CLAUDE.md`" in text
+    assert text.startswith("# coreytrading")
+    assert "`@AGENTS.md`" in text
     assert "AI_BOOTSTRAP.md" in text
 
 
-def test_bootstrap_rejects_instruction_file_renaming():
+def test_bootstrap_documents_the_single_contract_and_shim():
     text = BOOTSTRAP.read_text(encoding="utf-8")
-    assert "do not rename `CLAUDE.md`" in text
-    assert "`CLAUDE.md` is the complete, authoritative project contract" in text
+    assert "`AGENTS.md` is the contract, `CLAUDE.md` is an import shim" in text
+    assert "`AGENTS.md` is the complete, authoritative project contract" in text
     for runtime in ("Claude Code", "OpenAI Codex", "Gemini CLI", "GitHub Copilot"):
         assert runtime in text
 
@@ -50,7 +50,7 @@ def test_bootstrap_covers_required_infrastructure_and_safety_domains():
         ".mcp.json.example",
         "never unlock trading through the SDK",
         "Never register all tasks automatically",
-        "Do I need to rename `CLAUDE.md`",
+        "Why is `CLAUDE.md` a single line?",
         "What if a private workspace already exists?",
         "Can setup place a paper-trading order",
         "May the AI commit or push",
@@ -78,7 +78,7 @@ def test_chinese_bootstrap_preserves_structure_and_operational_anchors():
     assert english.count("\n### ") == chinese.count("\n### ")
 
     required_sections = (
-        "## Agent 指令文件：不要重命名 `CLAUDE.md`",
+        "## Agent 指令文件：`AGENTS.md` 是契约，`CLAUDE.md` 是导入垫片",
         "## 阶段 0 — Preflight 与范围确认",
         "## 阶段 1 — Python 基础设施",
         "## 阶段 2 — 离线验证基线",

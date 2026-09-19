@@ -137,7 +137,7 @@ def log_today(tickers: list[str]) -> list[dict]:
     # 那一刻 SGT 日 == ET 日, 所以三个月来每次都碰巧对; 换个时点跑 (人工预览 /
     # pipeline --read-only) SGT 已是明天 → date key 比 ET 交易日晚一天, 且幂等
     # 检查 `date == today` 同时失效 → 同一 ET 交易日写两行。
-    # **IV 序列不可重拉 (CLAUDE.md), 污染永久**。口径见 lib/timeutil.et_today()。
+    # **IV 序列不可重拉 (AGENTS.md), 污染永久**。口径见 lib/timeutil.et_today()。
     today = et_today()
     rows = []
     for t in tickers:

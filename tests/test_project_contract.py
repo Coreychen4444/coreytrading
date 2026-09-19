@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT = ROOT / "CLAUDE.md"
+CONTRACT = ROOT / "AGENTS.md"
 
 
 def test_claude_contract_is_not_replaced_by_a_summary():
@@ -33,7 +33,7 @@ def test_claude_contract_covers_project_operating_domains():
 def test_claude_contract_names_critical_single_sources_of_truth():
     text = CONTRACT.read_text(encoding="utf-8")
     required_anchors = (
-        "AGENTS.md",
+        "CLAUDE.md",
         "AI_BOOTSTRAP.md",
         "AI_BOOTSTRAP_CN.md",
         "trade/README.md",

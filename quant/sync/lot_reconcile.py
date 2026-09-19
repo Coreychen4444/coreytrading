@@ -8,7 +8,7 @@
     fill 事件里, 计划字段 (stop / target) 全都已经在卡片 agent.zones 里。
     没有任何需要判断的东西 —— 却没有任何模块负责。
 
-    于是它是 close_reconcile 的镜像病例, 同一个形状 (CLAUDE.md 记了三次):
+    于是它是 close_reconcile 的镜像病例, 同一个形状 (AGENTS.md 记了三次):
        INTC   残留 lot
        NBIS   平仓后卡片带 1 股 lot 过了一整天
        AAOI (2@123) + INTC (2@98.7 + 2@97.8) 各漏一天
