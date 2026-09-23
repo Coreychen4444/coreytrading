@@ -18,6 +18,8 @@ CODEX_AUTO_LOAD_LIMIT = 32 * 1024
 def test_agents_md_is_the_full_contract_not_a_pointer():
     text = AGENTS.read_text(encoding="utf-8")
     assert text.startswith("# coreytrading"), "AGENTS.md must open with the contract title, not a pointer"
+    assert "Standing directives" in text and "## Session Behavior" in text, (
+        "AGENTS.md must carry the contract body itself, not only a title")
     assert "read `CLAUDE.md` in full" not in text
 
 

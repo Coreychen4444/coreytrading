@@ -909,8 +909,13 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
 
         defaults = vars(parse_args(["--ticker", ticker, "--bucket", args.bucket]))
         changed = {key for key, value in vars(args).items() if value != defaults[key]}
-        cleanup_only = bool(changed & {"constraint_from", "constraint_until"}) and changed <= {
-            "constraint_from", "constraint_until", "expected_revision", "print_json"}
+        # 纯删除约束 = 不是重画 (只放行清日期时, 删 vehicle 等键要走整卡重画、被迫重传 zones/stop,
+        # 过期的约束删不掉)。判据: 本次只动约束键且值全为 none。
+        constraint_keys = {"constraint_from", "constraint_until", "constraint_reason",
+                           "vehicle", "touch_protocol", "max_classification"}
+        cleanup_only = (bool(changed & constraint_keys)
+                        and changed <= constraint_keys | {"expected_revision", "print_json"}
+                        and all(getattr(args, k) == "none" for k in changed & constraint_keys))
         if cleanup_only:
             if ticker not in target["tickers"]:
                 raise ValueError("constraint cleanup requires an existing card")

@@ -14,6 +14,20 @@ def _price(value):
     return f"${value:,.2f}" if finite(value) else "未知"
 
 
+def coverage_summary(receipt: dict) -> dict:
+    """Count each company's research lane without promoting diagnostic prices."""
+    rows = (receipt.get("tickers") or {}).values()
+    rows = list(rows)
+    operating = sum(r.get("estimability", {}).get("operating_value") == "conditional_research" for r in rows)
+    path_unestimable = sum(r.get("estimability", {}).get("operating_value") == "unestimable" for r in rows)
+    expired = sum(r.get("estimability", {}).get("operating_value") == "input_expired" for r in rows)
+    return {"total": len(rows), "publishable": 0,
+            "company_research": sum(r.get("status") == "company_research" for r in rows),
+            "computed": sum(r.get("status") == "computed" for r in rows),
+            "conditional_operating": operating, "operating_path_unestimable": path_unestimable,
+            "expired_inputs": expired, "unestimable": path_unestimable + expired}
+
+
 def fyi_map(receipt: dict) -> dict[str, str]:
     """A missing current result must not silently fall back to an older target."""
     if (not isinstance(receipt, dict) or receipt.get("authority") != "analysis_only"
@@ -27,16 +41,27 @@ def fyi_map(receipt: dict) -> dict[str, str]:
         # A hash proves integrity, not acceptance of the underlying methodology.
         policy = publication_policy()
         if policy["status"] == "withheld":
-            parts.append("模型待重建：公允价值及12个月目标暂不发布（方法未通过验收）")
+            parts.append("该股每股公允价值及12个月目标暂不发布（尚未逐公司验收）")
             research = row.get("company_research")
             if research:
                 parts.append(f"公司模型 {research['model_version']}；披露勾稽 {research['observed']['status']}；"
-                             f"研究情景 {len(research['scenarios'])} 个；仅供经营、盈利与资金缺口诊断")
+                             f"研究情景 {len(research['scenarios'])} 个")
+                estimability = research.get("estimability") or {}
+                operating = (research.get("scenarios") or {}).get("base", {}).get("operating_value") or {}
+                if (estimability.get("operating_value") == "conditional_research"
+                        and operating.get("status") == "research_sensitivity"
+                        and finite(operating.get("operating_value"))):
+                    parts.append(f"基准条件经营价值 ${operating['operating_value']/1000:,.2f} 十亿美元"
+                                 f"（价值日 {operating['date']}；不是普通股每股价值；预测未验收）")
+                elif estimability.get("operating_value") == "unestimable":
+                    parts.append("长期经营价值不可估：" + str(estimability.get("reason") or "缺少有效路径"))
+                else:
+                    parts.append("长期经营价值未知：" + str(estimability.get("reason") or "缺少有效路径"))
             if finite(base.get("price")):
                 parts.append(f"参考价 {_price(base['price'])}（{base.get('price_time')}）")
             if row.get("status") == "computed":
                 parts.append("原始DCF、同路径EPS/PE及曲线敏感度仅存审计收据；不是可用估值或独立市场目标")
-            else:
+            elif not research:
                 parts.append("本轮估值未知：" + "; ".join(row.get("missing") or ["缺少有效计算"]))
             short = row.get("short_term") or {}
             parts.append("短期研究尚未验证，详见独立收据" if short.get("status") == "research_estimate"

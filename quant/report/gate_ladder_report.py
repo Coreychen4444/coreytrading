@@ -14,7 +14,10 @@ entry_guard._gate_streak, 只数已完成收盘; 卡片 gate 写了 volume_ratio
 + zone1 位置 + 约束/双闸提示 (🔒 走 sizing.constraint_lines canonical, from/until
 窗口三态 [窗口未开]/[已过期] 原样播报;  修 — 此前手搓渲染丢 from,
 把未开窗的 NBIS 财报 clamp 播成了 binding)
-+ **gate 距离双单位 %(N) + ⚡ 快车道读数**(用户 要求, 见 §gate 距离)。
++ **gate 距离双单位 %(N) + ⚡ 快车道读数**(见 §gate 距离)。
++ **🔭 远端行**: 卡片阶梯顶之上的机械地标
+(`core.future_gates.for_card` —— 与 `price_reminder_sync` 画到 moomoo 的 `gate:+N` **同一份**
+候选、同一个编号、同一句收据)。确认列恒 `—`: 它们不是转移轴, 不计数、无量腿、无快车道。
 
 线名 = gate 的**结构身份**四分类 (换掉旧的 trend/lsh 两档启发式 —— 旧规则
 让 9 张卡里 8 张标成修复/收复线, 用户:「永远只有修复路径一个语义」)。判别式真源
@@ -40,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 import json
 from typing import List, Optional, Tuple
 
-from quant.core import technical  # noqa: E402
+from quant.core import future_gates, technical  # noqa: E402  future_gates = 远端 gate 候选, 与 moomoo 画线同一份
 from quant.core.episodes import (# noqa: E402  gate 结构身份: 与回测同一份判别式
     DELTA_ATR, MIN_BARS, breakdown_in_window, episodes_of, gate_path, merge_bars_by_date)
 from quant.core.holdings import is_managed, is_traded, live_tickers  # noqa: E402
@@ -236,7 +239,10 @@ def ladder_of(agent: dict) -> List[dict]:
     if lvl is not None:
         rows[lvl] = {"level": lvl, "days": int(pv.get("days") or 2),
                      "tag": "修复线", "kind": "preview", "label": "",
-                     "vol_min": coerce_float(pv.get("volume_ratio_min"))}
+                     "vol_min": coerce_float(pv.get("volume_ratio_min")),
+                     # 降级时搬运的旧上行阶梯 (「价位已失效待重画」) —— moomoo 不画这条,
+                     # 表里留着它就得说出口, 不然读起来像一道活的 0/2
+                     "stale": bool(pv.get("stale"))}
     return [rows[k] for k in sorted(rows)]
 
 
@@ -337,6 +343,7 @@ def fastlane_lines(fl: Optional[dict], g: dict, need: int, streak: List[str],
 
 
 LADDER_TABLE_HEADER = ("| 线 | 名 | 确认 | 距离 · 备注 |", "|---|---|:-:|---|")
+FAR_MARK = "🔭"     # 远端行的状态位 —— 故意不用 ✅/⏳/▫️: 那三个是转移计数的词, 远端线不计数
 
 
 def _cell(x) -> str:
@@ -346,6 +353,37 @@ def _cell(x) -> str:
 
 def _row(status: str, tag: str, confirm: str, note: str) -> str:
     return "| " + " | ".join(_cell(c) for c in (status, tag, confirm, note)) + " |"
+
+
+def far_gate_rows(agent: dict, bars: List[dict], close: Optional[float],
+                  atr: Optional[float], folded: Tuple[float, ...] = ()) -> List[str]:
+    """🔭 远端行 = moomoo 上 `gate:+N` 机械线的镜像 (同一个 `future_gates.for_card`)。
+
+    卡上的 preview (gate+2) 不在这里出 —— 它已经是 `ladder_of` 的一行。名列写编号
+    `远端 +N` = 手机备注 `gate:+N` 的那个 N, 两边能对上号; 备注列 = 距离 + 同一句收据。
+    ⚠️ `窗高` 是 250 根窗口的最高价, **不是 ATH** (常规缓存只有 ~1 年, 见 deep_bars) —— 名字照实叫。
+    `folded` = 已经并进卡片行备注的价位 (与 stale preview 同价, 见 `far_fold`) —— 一个价位只占一行。"""
+    return [_row(f"{FAR_MARK} {c['level']:g}", f"远端 +{c['n']}", "—",
+                 " · ".join(x for x in (gate_distance(close, atr, c["level"]),
+                                        future_gates.evidence_tag(c)) if x))
+            for c in future_gates.for_card(agent, bars)
+            if round(c["level"], 2) not in folded]
+
+
+def far_fold(g: dict, far: List[dict]) -> Tuple[str, Optional[float]]:
+    """卡片行的远端后缀 → (备注后缀, 被并入的价位|None)。
+
+    机械候选恒在**未 stale** 的阶梯顶之上, 所以它只可能撞上一种卡片行: stale preview
+    (例: 旧阶梯价位恰好 == 某个 pivot 簇上沿)。同价两行读起来像两条线, 而 moomoo
+    上只有一条 `gate:+2 簇×N 拒M` —— 并进同一行, 编号与收据原样留着。"""
+    out, hit = "", None
+    if g.get("stale"):
+        out += " · ⚠️ 旧阶梯 stale 待重画"          # moomoo 不把它画成 gate:+2 (同价的机械线另说, 见下)
+    for c in far:
+        if round(c["level"], 2) == round(g["level"], 2):
+            out += f" · {FAR_MARK} 远端 +{c['n']} {future_gates.evidence_tag(c)}"
+            hit = round(c["level"], 2)
+    return out, hit
 
 
 def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
@@ -428,7 +466,12 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
         elif deep_note:
             L.append(f"⚠️ 线名按现有序列判: {deep_note} (n={len(deep)})")
     rows: List[str] = []
+    far = future_gates.for_card(agent, bars)
+    folded: List[float] = []
     for g in ladder_of(agent):
+        far_sfx, hit = far_fold(g, far)
+        if hit is not None:
+            folded.append(hit)
         cls = gate_path_of(g["level"], deep, st.get("trend"), atr)
         g = retag(g, cls, lsh, uptrend=st.get("trend") == "up")
         streak = _gate_streak(bars, g["level"])
@@ -450,7 +493,7 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
                 c = fl.get("domain")
                 note += (" · ⚡域不可判 — ×%d 恒定" % need if c is None
                          else f" · ⚡域外({PATH_TAGS.get(c, c)}) — ×{need} 恒定")
-            rows.append(_row(f"▫️ {g['level']:g}", g["tag"], f"0/{need}", note))
+            rows.append(_row(f"▫️ {g['level']:g}", g["tag"], f"0/{need}", note + far_sfx))
         elif n >= need:
             confirm = f"{min(n, need)}/{need} 成立" + (f" 自 {streak[0][5:]}" if streak else "")
             note = dist
@@ -472,12 +515,13 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
                     note += f" · ⚠️ {vnote} < {vm:g} 量能闸未过"
                 elif vnote and "streak第" in vnote:
                     note += f" · 量腿 ✓ {vnote}"
-            rows.append(_row(f"✅ {g['level']:g}", g["tag"], confirm, note))
+            rows.append(_row(f"✅ {g['level']:g}", g["tag"], confirm, note + far_sfx))
         else:
             # ⏳ 的两行展开 进同一格: 卡在哪一条 + 还剩什么路
             extra = " · ".join(x.strip() for x in fastlane_lines(fl, g, need, streak, close))
             rows.append(_row(f"⏳ {g['level']:g}", g["tag"], f"{n}/{need}",
-                             dist + (f" · {extra}" if extra else "")))
+                             dist + (f" · {extra}" if extra else "") + far_sfx))
+    rows.extend(far_gate_rows(agent, bars, close, atr, folded=tuple(folded)))
     if rows:
         L.extend(LADDER_TABLE_HEADER)
         L.extend(rows)
@@ -555,6 +599,8 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
     wl_blocks = _blocks({tk: c for tk, c in active.items() if tk not in held})
     asof = max(dates) if dates else "?"
     head = (f"📐 Gate 阶梯收盘报 — 截至 {asof} 收盘 (完成 bar)\n"
+            f"{FAR_MARK}=远端地标 (阶梯顶之上的 pivot 簇上沿 / 窗高, = moomoo 的 gate:+N 线; "
+            f"机械、零授权、不计数)\n"
             f"✅=站稳成立 ⏳=计数中 ▫️=未触及 | 量比⚡=绝对≥{VOL_GATE} 今日 tape 读数 (**不是**量腿); "
             f"量腿 = streak 内任一日 RelVR ≥{RECLAIM_VOL_RATIO_MIN}\n"
             f"距离双单位 %(N): 同一个 % 在不同票上差好几倍, N 才可比\n"

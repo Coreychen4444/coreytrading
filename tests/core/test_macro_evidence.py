@@ -122,3 +122,18 @@ def test_empty_feed_has_explicit_gaps_and_no_default_direction():
     assert not context["observations"] and not context["sample_changes"]
     assert context["coverage"]["yen"]["missing_or_unusable"] == ["USDJPY", "DXY"]
     assert all(not item["mechanism_identified"] for item in context["coverage"].values())
+
+
+def test_calendar_keeps_capture_provenance_and_cannot_leak_from_future():
+    old = capture("calendar-old", {})
+    old["document"]["market_structure_calendar"] = {"events": [{"event_id": "expiry"}]}
+    future = deepcopy(old)
+    future["ref"] = "future"
+    future["document"]["generated_at_utc"] = "2026-09-06T12:00:00Z"
+    context = build(old, future)
+    calendars = context["market_structure_calendars"]
+    assert len(calendars) == 1
+    assert calendars[0]["source_ref"] == "calendar-old"
+    assert context["observations"] == {}
+    calendars[0]["calendar"]["events"].clear()
+    assert old["document"]["market_structure_calendar"]["events"]

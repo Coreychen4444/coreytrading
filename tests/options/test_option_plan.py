@@ -254,3 +254,12 @@ def test_build_hard_gate_uses_the_hv_proxy_when_iv_series_is_unreliable(monkeypa
     p = op.build("NVDA", [100.0, 98.0], 1500.0, target_dte=270, stop=90.0, hv_pct=85.0)
     assert "IV 硬门槛 VETO" in p["error"] and p["hard_gate"]["basis"] == "hv_pct"
     assert calls == [1]
+
+
+def test_render_zero_contracts_is_leg_off_not_a_written_exception():
+    """期权没有「买 1 张 + 书面例外」(position-tiers: 未定义即不存在) → 渲染 0 张 / 期权腿关。"""
+    from quant.core.sizing import share_ladder
+    size = share_ladder(2233.0, [58.0], [1.0], multiplier=100, unit="张")
+    assert size["exception"]
+    txt = op.render(_plan_stub(size=size))
+    assert "0 张, 期权腿关" in txt and "书面例外 (position-tiers" not in txt and "× 1 张" in txt

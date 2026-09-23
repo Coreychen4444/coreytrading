@@ -83,11 +83,57 @@ def _derived_snapshot(source: dict, records: list[dict], *, requests: list[dict]
 def _with_valuation(source: dict, receipt: dict) -> dict:
     result = deepcopy(source)
     result["data"].setdefault("valuation_source_snapshot_id", source["snapshot_id"])
-    result["data"]["valuation_calculations"] = deepcopy(receipt)
+    result["data"]["valuation_calculations"] = _valuation_worker_receipt(receipt)
     result["evidence_refs"].append("valuation_calculation:" + receipt["receipt_hash"])
     result["input_hash"] = canonical_hash(result["data"])
     result["snapshot_id"] = canonical_hash({"parent": source["snapshot_id"], "data": result["input_hash"]})
     return validate_snapshot(result)
+
+
+def _valuation_worker_receipt(receipt: dict) -> dict:
+    """Give research roles key diagnostics while archiving the full host receipt."""
+    keep = lambda value, keys: {k: deepcopy(value[k]) for k in keys if k in value}
+    view = keep(receipt, ("as_of", "model_version", "status", "reason", "market",
+                          "authority", "publication", "macro_research_status"))
+    view.update(receipt_view="worker_summary", full_receipt_hash=receipt["receipt_hash"], tickers={})
+    for ticker, row in (receipt.get("tickers") or {}).items():
+        item = keep(row, ("status", "missing", "estimability"))
+        item["data_readiness"] = keep(row.get("data_readiness") or {}, ("status", "missing", "bridge_missing"))
+        item["short_term"] = keep(row.get("short_term") or {}, ("status", "reason", "windows"))
+        if row.get("baseline"):
+            item["baseline"] = keep(row["baseline"], ("fair_value", "market_target_12m",
+                                                      "price", "price_time", "confidence", "flags"))
+        item["macro_scenarios"] = [keep(case, ("status", "scenario_id", "fair_value",
+                                                     "market_target_12m", "missing", "reason"))
+                                   for case in row.get("macro_scenarios") or []]
+        research = row.get("company_research")
+        if research:
+            company = keep(research, ("ticker", "status", "model_version", "accuracy",
+                                       "publication", "estimability"))
+            company["observed"] = keep(research.get("observed") or {}, ("status", "reason"))
+            company["opening_balance"] = keep(research.get("opening_balance") or {}, ("status", "reason"))
+            company["scenarios"] = {}
+            for name, case in (research.get("scenarios") or {}).items():
+                company["scenarios"][name] = {
+                    "basis": case.get("basis"), "quarter_count": len(case.get("quarters") or []),
+                    "earnings_windows": {label: keep(window, ("start", "end", "earnings_basis", "eps",
+                                                               "revenue", "status", "validated"))
+                                         for label, window in (case.get("earnings_windows") or {}).items()},
+                    "maximum_funding_gap": case.get("maximum_funding_gap"),
+                    "operating_value": keep(case.get("operating_value") or {},
+                                            ("status", "reason", "date", "operating_value",
+                                             "terminal_share_of_value")),
+                    "business_equity": keep(case.get("business_equity") or {},
+                                            ("status", "reason", "date", "per_share")),
+                    "target_12m": keep(case.get("target_12m") or {},
+                                       ("status", "reason", "price", "target_date")),
+                    "intrinsic": keep(case.get("intrinsic") or {},
+                                      ("status", "reason", "per_share", "date")),
+                }
+            item["company_research"] = company
+        view["tickers"][ticker] = item
+    view["view_hash"] = canonical_hash(view)
+    return view
 
 
 def _valuation_receipt(source: dict, *, macro_scenarios=None, evidence_refs=None) -> dict:

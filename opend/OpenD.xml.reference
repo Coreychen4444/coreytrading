@@ -14,7 +14,8 @@
 		<login_account>FILL_ME_LOGIN_ACCOUNT</login_account>
 		<!-- 登录密码32位MD5加密16进制 -->
 		<!-- Login password, 32-bit MD5 encrypted hexadecimal -->
-		<login_pwd_md5>FILL_ME_32_HEX_MD5</login_pwd_md5>
+		<!-- From OpenD 10.10 the password in this file is no longer used for login. Log in once in the console and choose to remember the password; afterwards opend/start.sh starts OpenD with -login_account=<account> -login_by_remember=1. Do not configure a password here: when a password parameter is present, login_by_remember is ignored. -->
+		<login_by_remember>1</login_by_remember>
 		<!-- 登录密码明文，密码密文存在情况下只使用密文 -->
 		<!-- Plain text of login password. When cypher text exists, the cypher text will be used. -->
 		<!-- <login_pwd></login_pwd> -->

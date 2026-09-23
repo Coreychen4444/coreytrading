@@ -249,6 +249,18 @@ def _semantic_errors(doc: dict) -> list[str]:
         if len(metric_names) != len(set(metric_names)):
             errors.append("$.next_event.metrics: duplicate metric name")
         scenarios = event.get("scenarios") or []
+        late = event.get("review_mode") == "late_without_plan"
+        if late:
+            if doc.get("run_kind") != "fixed" or event.get("status") == "upcoming":
+                errors.append("$.next_event: late_without_plan requires fixed released event")
+            if scenarios or event.get("pre_event_run_id") is not None or event.get("selected_scenario_id") is not None:
+                errors.append("$.next_event: late_without_plan cannot invent a plan or scenarios")
+            if not any(m.get("actual") is not None for m in event["metrics"]):
+                errors.append("$.next_event: late_without_plan requires at least one released actual")
+            if _parse_datetime(doc["generated_at"]["utc"]) < _parse_datetime(event["scheduled_at_et"]):
+                errors.append("$.next_event: late_without_plan cannot precede release")
+        elif len(scenarios) < 2:
+            errors.append("$.next_event.scenarios: requires at least two scenarios unless late_without_plan")
         scenario_ids = [x.get("id") for x in scenarios if isinstance(x, dict)]
         if len(scenario_ids) != len(set(scenario_ids)):
             errors.append("$.next_event.scenarios: duplicate scenario id")
@@ -426,7 +438,8 @@ def _event_target(doc: dict, events_dir: Path) -> tuple[Path, str] | None:
     safe_id = event["event_id"]
     if doc["run_kind"] == "pre_event":
         return events_dir / f"{safe_id}-plan.json", "plan"
-    if doc["run_kind"] == "post_event":
+    if doc["run_kind"] == "post_event" or (
+            doc["run_kind"] == "fixed" and event.get("review_mode") == "late_without_plan"):
         return events_dir / f"{safe_id}-result.json", "result"
     return None
 
@@ -585,6 +598,10 @@ def commit_state(
 
         _check_event_link(doc, events_dir, schema_path)
         _check_playbook_link(doc, events_dir)
+        event = doc.get("next_event") or {}
+        if event.get("review_mode") == "late_without_plan" and (
+                events_dir / f"{event['event_id']}-plan.json").exists():
+            raise MacroStateError("late_without_plan cannot bypass an existing immutable plan")
         event_target = _event_target(doc, events_dir)
         if event_target:
             path, kind = event_target

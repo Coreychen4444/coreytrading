@@ -137,7 +137,7 @@ Risk agents interpret mechanical receipts rather than inventing another sizing f
 
 | Location | Contents |
 |---|---|
-| [AGENTS.md](AGENTS.md) | Project contract for every model; [CLAUDE.md](CLAUDE.md) is a one-line `@AGENTS.md` import shim |
+| [AGENTS.md](AGENTS.md) | Project contract for every model (Codex and Claude Code ≥ 2.1.277 read it natively); [CLAUDE.md](CLAUDE.md) is a one-line `@AGENTS.md` import shim kept for older Claude Code runtimes |
 | [AI_BOOTSTRAP.md](AI_BOOTSTRAP.md) / [AI_BOOTSTRAP_CN.md](AI_BOOTSTRAP_CN.md) | Fresh-clone setup guide for a coding agent |
 | [agents/](agents/) | Domain methods, role contracts, routing and operating manual |
 | [quant/](quant/) | Host controllers, data/sync, mechanical decisions, valuation and reports |

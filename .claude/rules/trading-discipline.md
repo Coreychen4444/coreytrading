@@ -15,7 +15,7 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 - **结构修复了吗？** `structure_repair_veto`：trend down / transition 且未收回 last swing high = VETO，整笔不做（无中间档）。
 - **regime cap 给了吗？** 卡片 `current_regime.cap_pct_nav`：0 = 无授权 = VETO。
 - **爬到第几个「给了 cap 的」gate？** `sizing.gate_count`（判据 = 卡上 `regime_history`，不是成交记录）。gate1 max 2.5% / gate2 4% / gate3 5% NAV risk（累计，减当前敞口市值；同一 gate 内可分多笔；破位 / 平仓归第一档）。期权保费上限按本档新增 risk ÷ 0.20 → gate1 12.5% / gate2 7.5% / gate3 5% NAV；gate1 起可期权但须过 IV 硬门槛（`sizing.long_call_iv_gate`），期权正股退出线 = 授予 cap 的 gate ×1 日。
-- **抄底 `reversal_probe`（试行）**：**空仓**候选卡若 entry_guard 印出 `🔁 抄底 reversal_probe — PLAN`，那是第二授权通道（正股阶梯 + 合约计划在块内；**持仓票一律不走**，加仓走 cap + Iron Rule #2 v2）；`VETO` / `正股 0 股且 call 0 张` 不是授权。信号 = 止跌低之后次日未新低 或 止跌日长下影；有效 = 未收破止跌低 ∧ 收盘 ≤ 止跌低 + 2×ATR20 ∧ 信号 <10 根（ATR 是上限不是门槛，离底太远 = `TOO_FAR` 只播不开），失效 = 错过不追；止损 = 止跌低（下影线低点）收盘 ×1，无 S1，破了当日清仓；持有几个交易日看反弹还是反转（越前高 × 回踩更高低点），反弹尽早了结是裁量点不是机械线。PLAN 块的「[FYI] 底部确认概率」= 20 根内先收盘越过前高、后才收破止跌低的随机游走概率（位置 × 波动，零拟合参数；`quant/core/bottom_evidence.py`）：判读不授权、不是排序键（离止损越近概率越低、赔率越高），不进 cap；地标 / 放量 / 超卖 / 背离等共振证据不作为加码理由。
+- **抄底 `reversal_probe`（试行）**：**空仓**候选卡若 entry_guard 印出 `🔁 抄底 reversal_probe — PLAN`，那是第二授权通道（正股阶梯 + 合约计划在块内；**持仓票一律不走**，加仓走 cap + Iron Rule #2 v2）；`VETO` / `正股 0 股且 call 0 张` 不是授权。信号 = 止跌低之后次日未新低 或 止跌日长下影，前提是从近 20 日顶跌下来 ≥2×ATR20（一段下跌；当日创 20 日新高的票不是底，chart-read 不标「今日新低」）；有效 = 未收破止跌低 ∧ 收盘 ≤ 止跌低 + 2×ATR20 ∧ 信号 <10 根（ATR 是上限不是门槛，离底太远 = `TOO_FAR` 只播不开），失效 = 错过不追；止损 = 止跌低（下影线低点）收盘 ×1，无 S1，破了当日清仓；持有几个交易日看反弹还是反转（越前高 × 回踩更高低点），反弹尽早了结是裁量点不是机械线。PLAN 块的「[FYI] 底部确认概率」= 20 根内先收盘越过前高、后才收破止跌低的随机游走概率（位置 × 波动，零拟合参数；`quant/core/bottom_evidence.py`）：判读不授权、不是排序键（离止损越近概率越低、赔率越高），不进 cap；地标 / 放量 / 超卖 / 背离等共振证据不作为加码理由。
 - 说不清 → "先跑 entry_guard，别动。"
 
 ### Q2 错了怎么认？

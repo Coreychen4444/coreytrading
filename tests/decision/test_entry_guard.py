@@ -558,6 +558,23 @@ def test_write_option_plans_only_plan_with_sized_contracts(tmp_path, monkeypatch
     assert p["tiers"][0] == {"premium": 55.0, "contracts": 1}
 
 
+
+def test_write_option_plans_skips_zero_contract_exception(tmp_path, monkeypatch):
+    """1 张就超保费上限 (share_ladder exception) = 0 张 = 期权腿关, 不落 option_plans ——
+    否则 today_group 进组 + moomoo 画 oz1, 与文本「不是可执行计划」两个答案。"""
+    from quant.decision import entry_guard as eg
+    import quant.core.paths as paths
+    out = tmp_path / "option_plans.json"
+    monkeypatch.setattr(paths, "OPTION_PLANS_PATH", out)
+    r = {"ticker": "SYN", "verdict": "PLAN", "option_plan_data": {
+        "chosen": {"code": "US.SYN270716C950000", "strike": 950.0, "delta": 0.657},
+        "expiry": "2027-07-16", "dte": 297, "rungs": [{"premium_flat_iv": 249.66}],
+        "size": {"tiers": [{"shares": 1}], "exception": True, "n_shares": 0}}}
+    assert eg.write_option_plans([r], "2026-09-22") == 0
+    import json as _json
+    assert _json.loads(out.read_text())["plans"] == {}
+
+
 # ── 第⑤条 at-risk 天花板 (N1  接线,  复查补测 — 此前零覆盖) ──
 
 def test_at_risk_can_never_bind_on_the_entry_side_now():

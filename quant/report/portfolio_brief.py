@@ -1231,8 +1231,8 @@ def at_risk_breach_signal(item: Dict, cfg: Optional[Dict], guard: Optional[Dict]
 
     正股: at-risk = qty × (现价 − binding stop), binding = max(卡 stop, 吊灯 trail)
     多头取大 —— 与 stop_status / price_reminder 下方线同口径。
-    期权 (long): at-risk = 保费 mark × **OPTION_ATRISK_LOSS_FRAC (0.25)**—— S1 premium
-    硬 stop (-25%) 接线后的 loss/unit (用户  裁决放宽自保费全额; 系数与
+    期权 (long): at-risk = 保费 mark × **OPTION_ATRISK_LOSS_FRAC (= |S1|, 0.20)** —— S1 premium
+    硬 stop 接线后的 loss/unit (放宽自保费全额; 系数与
     exit_guard 的 opt_s1_stop 相等由 pins 测试钉)。标的 stop 仍不给期权折扣。
     入场侧的对称物 = entry_guard.size_caps 第⑤条 (同一常量, 那边几乎恒被 n_unit
     先咬 = 后备; 真咬点在这里)。无 stop 正股跳过 (v1; 无界 at-risk 归 zone/schema 层)。
@@ -1693,14 +1693,14 @@ def zone_staleness(ticker: str, cfg: Dict) -> List[str]:
                        "(当日口径 — 带内挂单语义已反转, 先重画再挂单)")
     # Use the same per-instrument volatility ruler as entry_guard. Missing ATR
     # data suppresses only this trigger and never creates a fixed fallback.
-    krows = [r for r in iter_jsonl(KLINE_CACHE_DIR / f"{ticker}.jsonl")][-(MOVE_ATR_PERIOD * 3):]
-    a14 = (atr(krows, MOVE_ATR_PERIOD) or [None])[-1] if krows else None
-    kcl = [normalize_num(r.get("close")) for r in krows[-2:]]
-    if a14 and len(kcl) == 2 and kcl[0] and kcl[1]:
-        chg, thr = abs(kcl[1] / kcl[0] - 1), STALE_VOL_ATR_MULT * a14 / kcl[0]
-        if chg > thr:
-            reasons.append(f"Volatility stale: 单日 {chg * 100:.1f}% > "
-                           f"{STALE_VOL_ATR_MULT:g}×ATR14 ({thr * 100:.1f}%)")
+    # Delegates to structure.vol_stale (single source of truth: full-series ATR,
+    # and bars on/before the zone anchor date are ignored so a card already
+    # repainted on that bar is not re-flagged every day).
+    krows = list(iter_jsonl(KLINE_CACHE_DIR / f"{ticker}.jsonl"))
+    vs = structure.vol_stale(krows, structure.zone_anchor(cfg))
+    if vs:
+        reasons.append(f"Volatility stale: 单日 {vs[0] * 100:.1f}% > "
+                       f"{STALE_VOL_ATR_MULT:g}×ATR14 ({vs[1] * 100:.1f}%)")
     return reasons
 
 

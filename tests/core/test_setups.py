@@ -4,6 +4,8 @@
 合成 bar 约定：每根 (high, low, close) 或 (high, low, close, open)，缺 open = close。
 """
 import datetime as dt
+import json
+from pathlib import Path
 
 import pytest
 
@@ -56,9 +58,10 @@ def test_shallow_dip_is_not_a_bottom():
 
 
 def test_new_low_today_without_hammer_is_watch():
-    """今日创 20 日新低且不是长下影 = ⏳ 即将形成：明日不再新低 = 止跌。"""
+    """今日低点是顶后新低（顶到它 ≥2N）且不是长下影 = ⏳ 即将形成：明日不再新低 = 止跌。"""
     b = S.bottom_setup(_path(TOP, DECLINE, NEWLOW))
-    assert b["stage"] == "watch" and b["cn"] == "⏳今日新低" and b["listed"] and not b["formed"]
+    assert b["stage"] == "watch" and b["cn"] == "⏳顶后新低" and b["listed"] and not b["formed"]
+    assert b["decline_n"] >= S.DECLINE_MIN_ATR and "顶后新低" in b["why"]
     assert b["low"] == 194 and b["held_days"] == 0 and not b["hammer"]
     assert b["lh"] == 258 and b["top"] == 281 and b["verdict"] is None
     assert b["shadow"]["upper_pct"] > b["shadow"]["lower_pct"]     # 事实一并带出
@@ -167,10 +170,71 @@ def test_formed_older_than_ten_bars_drops_off_the_list():
 
 
 def test_top_leaving_the_window_reanchors_to_the_new_top():
-    """顶滑出 20 日窗 → 新顶 = 窗内最高 high (反弹高), 底 = 它之后的最低 low。"""
+    """顶滑出 20 日窗 → 新顶 = 窗内最高 high (反弹高), 底 = 它之后的最低 low；从新顶再跌 ≥2N 才有框架。"""
+    later = [(230, 205, 228)] * 12 + [(222, 180, 184)] + [(192, 182, 190)] * 8
+    b = S.bottom_setup(_path(TOP, DECLINE, NEWLOW, HELD, RALLY, later))
+    assert b["top"] == 230 and b["low"] == 180 and b["stage"] == "formed" and b["signal"] == S.SIGNAL_HELD
+    assert b["decline_n"] >= S.DECLINE_MIN_ATR
+
+
+def test_shallow_dip_after_reanchor_is_not_a_bottom():
+    """重锚后的新顶 230 只回落到 203 (约 1.5N) = 上涨途中的晃动 → none，哪怕离 60 日高 −28%。"""
     later = [(230, 205, 228)] * 12 + [(226, 203, 210)] + [(215, 204, 212)] * 8
     b = S.bottom_setup(_path(TOP, DECLINE, NEWLOW, HELD, RALLY, later))
-    assert b["top"] == 230 and b["low"] == 203 and b["stage"] == "formed" and b["signal"] == S.SIGNAL_HELD
+    assert b["top"] == 230 and b["low"] == 203 and b["dd_at_low"] < -S.DD_MIN
+    assert b["stage"] == "none" and not b["listed"] and b["decline_n"] < S.DECLINE_MIN_ATR and "2N" in b["why"]
+
+
+# 误判形状: 从 60 日高跌下来、反弹、当日创 20 日新高。
+# 顶 = 当日 → 「顶之后的最低 low」= 当日自己的低点。离 60 日高 −12.5% 过得了旧门。
+FRESH_HIGH = [(252, 240, 245)] * 8 + [(262, 246, 258)]
+NEXT_HOLDS = [(261, 250, 260)]              # 次日: 高点没过顶 262, 低点没破 246
+
+
+def test_fresh_20d_high_day_is_not_a_new_low(monkeypatch):
+    """当日创 20 日新高 ≠ 今日新低：顶到「止跌低」只有当日振幅 1.5N → none。门槛拿掉 = 旧口径 ⏳（回归钉）。"""
+    bars = _path(TOP, DECLINE, NEWLOW, HELD, RALLY, FRESH_HIGH)
+    b = S.bottom_setup(bars)
+    assert b["top"] == 262 and b["low"] == 246 and b["top_date"] == b["low_date"]
+    assert b["dd_at_low"] < -S.DD_MIN                       # 60 日高门挡不住它
+    assert b["stage"] == "none" and not b["listed"] and b["decline_n"] < S.DECLINE_MIN_ATR
+    monkeypatch.setattr(S, "DECLINE_MIN_ATR", 0.0)
+    assert S.bottom_setup(bars)["stage"] == "watch"
+
+
+def test_day_after_fresh_high_does_not_form(monkeypatch):
+    """次日不创新高也不破前低：旧口径读成「次日未新低 = ✓止跌」→ 抄底授权；新口径仍 none。"""
+    bars = _path(TOP, DECLINE, NEWLOW, HELD, RALLY, FRESH_HIGH, NEXT_HOLDS)
+    b = S.bottom_setup(bars)
+    assert b["stage"] == "none" and b["top"] == 262 and b["low"] == 246
+    assert reversal.detect(bars, 12.0) is None                # 授权层同一份判别式, 不出信号
+    monkeypatch.setattr(S, "DECLINE_MIN_ATR", 0.0)
+    assert S.bottom_setup(bars)["stage"] == "formed"
+
+
+def test_decline_ruler_is_fixed_at_the_low():
+    """尺子 = 止跌低那根的 ATR20：之后波动放大不改顶跌 N，框架不因此来回翻。"""
+    b0 = S.bottom_setup(_path(TOP, DECLINE, NEWLOW, HELD))
+    b1 = S.bottom_setup(_path(TOP, DECLINE, NEWLOW, HELD, [(260, 200, 250), (262, 199, 205), (259, 198, 255)]))
+    assert b1["low"] == b0["low"] and b1["top"] == b0["top"]
+    assert b1["decline_n"] == b0["decline_n"] and b1["stage"] == "formed"
+    assert b0["atr_at_low"] == pytest.approx(S.atr20_at(_path(TOP, DECLINE, NEWLOW), -1))
+
+
+_CASES = json.loads((Path(__file__).parent / "fixtures" / "bottom_decline_cases.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _CASES["cases"], ids=lambda c: f"{c['series']}-{c['asof']}")
+def test_replay_cases_decline_gate(case):
+    """合成回放夹具：当日创 20 日新高及其次日 = none；顶后下跌 ≥2N 的例子在信号日仍是 ✓止跌。"""
+    bars = [{"time": f"{d} 00:00:00", "open": o, "high": h, "low": lo, "close": c, "volume": 1}
+            for d, o, h, lo, c in _CASES["series"][case["series"]] if d <= case["asof"]]
+    b = S.bottom_setup(bars)
+    assert b["stage"] == case["stage"], (case, b.get("why"), b.get("decline_n"))
+    if case["stage"] == "formed":
+        assert b["bars_since_signal"] == 0 and b["decline_n"] >= S.DECLINE_MIN_ATR
+    else:
+        assert b["decline_n"] < S.DECLINE_MIN_ATR
 
 
 def test_no_lookahead_and_stage_sequence():

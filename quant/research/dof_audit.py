@@ -63,6 +63,8 @@ MONEY_LAYERS = {
     "risk/kelly_size", "risk/chain_layers",
     "sync/today_group_sync",          # 白名单 = 夜盘能不能下单
     "sync/price_reminder_sync",       # 画线 = 手机响铃 → 直接导致人下单
+    "core/future_gates",              # 远端 gate 候选 → 同上那批线; 旋钮搬进 core 不等于免检
+    "core/key_levels",                # ⭐ 箱顶线 → 同上那批线; 窗口全是既有常量别名, 零新旋钮
 }
 
 # 明显不是决策旋钮的名字（格式 / IO / 协议 / 索引）
@@ -80,6 +82,11 @@ NOT_DOF_ARGNAMES = ("r", "timeout", "retries", "digits", "nd", "d", "delay",
 NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统可调选择
     "sync/price_reminder_sync:NOTE_WIDTH_MAX",   # 券商 note 服务端硬限 40 半宽单位 (实测定界)
     "sync/price_reminder_sync:MAX_PER_TICKER",
+    "sync/price_reminder_sync:SERVER_MAX_PER_TYPE",  # 券商服务端硬限 每票每类型 20 条 (实测定界)
+    "sync/price_reminder_sync:SERVER_SET_MAX_PER_WINDOW",  # 券商服务端写限速 60 次 / 30 秒 (撞限实测)
+    "sync/price_reminder_sync:SERVER_SET_WINDOW_S",
+    "core/future_gates:_MIN_BARS",                   # 簇判别的最少历史 = 数据充分性守卫, 不是阈值
+    "core/key_levels:_MIN_BARS",                     # 同上 (与 future_gates 同值同义)
     "decision/level_map:PROFILE_SESSIONS_PER_DAY",  # 一天几根 60m bar = 事实
     "report/portfolio_brief:TOP_MOVERS_COUNT",   # 显示条数
     "sync/trade_history_sync:fetch_history(days=)",
@@ -141,6 +148,9 @@ CLASSIFY: dict[str, str] = {
     "core/episodes:DELTA_ATR": "ruled",            # 0.5 决策点 A 锁定
     "report/portfolio_brief:MOVE_ATR_MULT": "ruled",   # 1×ATR14 scale
     "report/portfolio_brief:MOVE_ATR_PERIOD": "convention",
+    # 远端 gate 显示深度 —— 3 是显示约定: 只决定图上看得见多远, 零授权
+    # (转移机只扫 entry_gate, 远端线不进任何 cap / sizing / 转移判据)
+    "core/future_gates:FUTURE_GATES_MAX": "convention",
     "sync/price_reminder_sync:BUDGET_NOTE_MAX": "convention",  # 预算段的稳定显示上限
     # ── 定义 / 口径约定（不是选择） ──
     "core/technical:VALUE_AREA_FRAC": "definition",    # 70% 拍卖理论
@@ -223,6 +233,8 @@ CLASSIFY: dict[str, str] = {
     "core/setups:LH_LOOKBACK": "convention",               # 前高回看 = 60 日框架同窗
     "core/setups:SWING_WING": "convention",                # 5 根分形 (technical.swing_points 缺省)
     "core/setups:MIN_BARS": "convention",                  # 65 = 60 日框架 + 余量
+    "core/setups:DECLINE_MIN_ATR": "ruled",                # 2N 一段下跌门 (防止当日创 20 日新高被标成顶后新低; 回放定价)
+    "core/setups:ATR_TAIL_BARS": "convention",             # ATR20@止跌低 只算其前 120 根 (Wilder 种子影响 <1%; 回放不必每根全序列重算)
     "core/sizing:REVERSAL_PROBE_RISK_GATE": "fiat",        # 保费风险预算 = gate1 本档 2.5%
     # ── 底部确认概率 (判读件, 不在 MONEY_LAYERS: entry_guard 只印 [FYI] 行, verdict / cap 与它无关由测试钉) ──
     "core/bottom_evidence:BGK_BETA": "definition",         # −ζ(1/2)/√(2π) Broadie–Glasserman–Kou 离散监控修正

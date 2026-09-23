@@ -50,3 +50,21 @@ def test_volatility_stale_scaled_by_atr(kdir):
 
 def test_no_kline_no_false_triggers(kdir):
     assert pb.zone_staleness("GHOST", CFG) == []
+
+
+def test_volatility_stale_silent_once_card_redrawn_on_that_bar(kdir):
+    """卡的 anchored_on ≥ 那根大波动 K 线 = 已按它重画 → 不再判 stale (否则重画后次日
+    仍被同一根 K 判 stale、逐日重复派发)。简报与 structure 同一份判别式。"""
+    from quant.core import structure
+    calm = [_bar(f"2026-06-{i + 1:02d}", 100.0) for i in range(20)]
+    bars = calm + [_bar("2026-06-21", 92.0)]
+    kdir("VOL", bars)
+    assert any("Volatility" in r for r in pb.zone_staleness("VOL", {**CFG, "anchored_on": {"date": "2026-06-20"}}))
+    redrawn = {**CFG, "anchored_on": {"date": "2026-06-21"}}
+    assert not any("Volatility" in r for r in pb.zone_staleness("VOL", redrawn))
+    assert structure.vol_stale(bars, "2026-06-21") is None
+    assert structure.vol_stale(bars, "2026-06-20") is not None
+    zb = structure.zone_bands({"accumulation_zone_1": [95, 97], "accumulation_zone_2": [90, 93],
+                               "anchored_on": {"date": "2026-06-21"}})
+    assert zb["anchored_on"] == "2026-06-21"
+    assert not any("volatility" in r for r in structure.zone_mech_stale(zb, None, bars, "2026-06-22"))

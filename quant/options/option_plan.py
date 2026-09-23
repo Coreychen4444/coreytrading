@@ -464,10 +464,12 @@ def render(p: Dict) -> str:
     L.append(f"      ⚠️ 回调通常伴随 IV 上抬 —— 恒 IV 的限价系统性偏低, 照它挂大概率不成交。"
              f"方括号里是 IV+{PARAMS['dip_iv_bump_pts']:g}pt 情景, 挂那个更容易成但多付 vega")
     if size:
-        if size["note"]:
-            L.append(f"      {size['note']}")
         if size["exception"]:
-            L.append("      ⛔ 未落 decisions.jsonl 书面例外前, 这不是可执行计划")
+            # 期权没有「买 1 张 + 书面例外」(position-tiers: 未定义即不存在) → 0 张。
+            L.append(f"      ⛔ 1 张 = ${size['tiers'][0]['usd']:,.0f} = {size.get('cap_multiple')}× 保费上限 "
+                     f"→ 0 张, 期权腿关, 本档走正股或不做 (不写 option_plans, 不进 Today, 不画 oz1)")
+        elif size["note"]:
+            L.append(f"      {size['note']}")
     if p.get("stop_underlying"):
         pa = p.get("premium_at_stop")
         L.append(f"   止损: **标的**${p['stop_underlying']:g} 触发 (不是期权价)"

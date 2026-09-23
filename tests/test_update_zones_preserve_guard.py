@@ -256,3 +256,18 @@ def test_time_window_cleanup_does_not_refresh_analysis(upz):
     mod.main(['--ticker', 'GOOGL', '--bucket', 'watchlist', '--constraint-until', 'none'])
     del card['agent']['action']['constraints']['until']
     assert json.loads(wl.read_text())['tickers']['GOOGL'] == card
+
+
+def test_removing_whole_constraint_is_cleanup_not_repaint(upz):
+    """过期的「本周只做正股」要整条删 —— 只动约束键且全为 none = 纯删除, 不走重画
+    (不要求重传 zones/stop, 不刷新分析时钟); 空 constraints 整个移除。"""
+    mod, wl = upz
+    doc = json.loads(wl.read_text())
+    card = doc['tickers']['GOOGL']
+    card['agent']['action']['constraints'] = {'vehicle': 'stock', 'reason': 'week focus',
+                                              'from': '2026-09-08', 'until': '2026-09-11'}
+    wl.write_text(json.dumps(doc))
+    mod.main(['--ticker', 'GOOGL', '--bucket', 'watchlist', '--vehicle', 'none', '--constraint-reason', 'none',
+              '--constraint-from', 'none', '--constraint-until', 'none'])
+    del card['agent']['action']['constraints']
+    assert json.loads(wl.read_text())['tickers']['GOOGL'] == card

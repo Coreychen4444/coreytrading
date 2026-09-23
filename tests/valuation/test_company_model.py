@@ -55,6 +55,122 @@ def result(p=None):
     return cm.build(p or packet(), as_of=STAMP)
 
 
+def test_after_tax_equity_and_discontinued_items_preserve_pretax_and_cash_bridge():
+    p = packet()
+    q = p['scenarios'][0]['quarters'][0]
+    q['income']['after_tax_items'] = {'basis': 'synthetic source presentation',
+        'excluded_from_pretax_and_tax': True, 'equity_income': 6, 'discontinued_income': -8}
+    r = cm.earnings(q['segments'], q['income'], q['shares'], p['segment_names'])
+    assert r['pretax'] == 11
+    assert r['continuing_income'] == 15
+    assert r['consolidated_income'] == 7 and r['parent_income'] == 6
+    # Cash starts with total consolidated income. Remove noncash equity income
+    # and discontinued loss exactly once when constructing continuing cash flow.
+    q['cash']['noncash_adjustments'].update(equity_income_reversal=-6, discontinued_loss_reversal=8)
+    assert cm.liquidity(r, q['cash'], 100, 20)['operating_cash_flow'] == 13
+    assert r['gaap_eps'] == .06
+
+
+def test_preferred_dividend_reduces_common_income_not_consolidated_cash():
+    p = packet(); q = p['scenarios'][0]['quarters'][0]
+    q['income'].update(preferred_dividends=3, preferred_dividend_basis='synthetic declared cumulative allocation')
+    r = cm.earnings(q['segments'], q['income'], q['shares'], p['segment_names'])
+    assert r['consolidated_income'] == 9 and r['parent_income_before_preferred'] == 8
+    assert r['parent_income'] == 5 and r['gaap_eps'] == .05
+    assert cm.liquidity(r, q['cash'], 100, 20)['operating_cash_flow'] == 13
+    del q['income']['preferred_dividend_basis']
+    with pytest.raises(ValueError, match='preferred dividend'):
+        cm.earnings(q['segments'], q['income'], q['shares'], p['segment_names'])
+
+
+@pytest.mark.parametrize('shares,expected', [(20,.05),(100,.04)])
+def test_preferred_if_converted_adds_back_dividend_only_when_dilutive(shares,expected):
+    p=packet(); q=p['scenarios'][0]['quarters'][0]
+    q['income'].update(preferred_dividends=3,preferred_dividend_basis='synthetic')
+    q['shares']['preferred_if_converted']={'basis':'synthetic separate from ordinary dilution','shares':shares,'dividend_addback':3}
+    r=cm.earnings(q['segments'],q['income'],q['shares'],p['segment_names'])
+    assert r['gaap_eps']==pytest.approx(expected)
+    assert r['parent_income']==5 and r['consolidated_income']==9
+
+
+def test_preferred_conversion_annual_numerator_and_denominator():
+    p=packet()
+    for q in p['scenarios'][0]['quarters']:
+        q['income'].update(preferred_dividends=3,preferred_dividend_basis='synthetic')
+        q['shares']['preferred_if_converted']={'basis':'synthetic','shares':100,'dividend_addback':3}
+    r=result(p)['scenarios']['base']['quarters']
+    w=cm.earnings_window(r,['0','1','2','3'],'gaap')
+    assert w['parent_income']==20 and w['eps_income']==32
+    assert w['weighted_diluted_shares']==200 and w['eps']==.16
+
+
+def test_preferred_conversion_cannot_add_back_more_than_dividend():
+    p=packet();q=p['scenarios'][0]['quarters'][0]
+    q['income'].update(preferred_dividends=3,preferred_dividend_basis='synthetic')
+    q['shares']['preferred_if_converted']={'basis':'synthetic','shares':100,'dividend_addback':4}
+    with pytest.raises(ValueError,match='exceeds'):
+        cm.earnings(q['segments'],q['income'],q['shares'],p['segment_names'])
+
+
+def test_security_eps_does_not_change_consolidated_cash_or_legal_shares():
+    p=packet();q=p['scenarios'][0]['quarters'][0]
+    q['income']['parent_after_tax_adjustments']={}
+    q['shares']['eps_securities']={'basis':'synthetic', 'basic_equivalents':[], 'participation':None,
+        'debt_if_converted':[{'id':'N','basis':'net tax expense','shares':100,'after_tax_interest':1}]}
+    r=cm.earnings(q['segments'],q['income'],q['shares'],p['segment_names'])
+    assert r['consolidated_income']==9 and r['parent_income']==8
+    assert r['gaap_eps_income']==9 and r['gaap_diluted_shares']==200
+    assert r['closing_shares']==100
+    assert cm.liquidity(r,q['cash'],100,20)['operating_cash_flow']==13
+
+
+def test_security_eps_full_year_recomputes_allocation():
+    p=packet();s=p['scenarios'][0];s.pop('multiple')
+    s['earnings_windows']={'four':{'quarters':['0','1','2','3'],'basis':'gaap'}}
+    for q in s['quarters']:
+        q['income']['parent_after_tax_adjustments']={}
+        q['shares']['eps_securities']={'basis':'synthetic','basic_equivalents':[], 'participation':None,
+            'debt_if_converted':[{'id':'N','basis':'net tax expense','shares':100,'after_tax_interest':1}]}
+    w=result(p)['scenarios']['base']['earnings_windows']['four']
+    assert w['eps_income']==36 and w['weighted_diluted_shares']==200
+    assert w['eps']==.18
+
+
+def test_ended_unreported_bridge_is_explicit_estimate_not_actual_opening():
+    p=packet();s=p['scenarios'][0];s.pop('multiple')
+    start=date(2026,6,9)
+    p['opening_balance']['date']=s['opening_date']='2026-06-08'
+    p['observed']['end']='2026-06-08'
+    for q in s['quarters']:
+        end=start+timedelta(days=90);q.update(start=str(start),end=str(end));start=end+timedelta(days=1)
+    with pytest.raises(ValueError,match='ended-unreported'):result(p)
+    q=s['quarters'][0]
+    q['unreported_bridge']={'basis':'synthetic ended but unreported at current cutoff',
+        'known_at':'2026-09-08T07:00:00+00:00','source_refs':['synthetic'],
+        'expires_at':'2026-09-09T07:00:00+00:00','reported_results_available':False}
+    r=result(p)
+    assert r['opening_balance']['date']=='2026-06-08'
+    assert r['scenarios']['base']['quarters'][0]['period_status']=='ended_unreported_estimate'
+    assert r['scenarios']['base']['quarters'][1]['period_status']=='future_projection'
+    assert r['publication']['status']=='withheld'
+    q['unreported_bridge']['expires_at']='2026-09-08T07:00:00+00:00'
+    with pytest.raises(ValueError,match='freshness'):result(p)
+
+
+@pytest.mark.parametrize('change', ['missing', 'included', 'unknown', 'extra'])
+def test_after_tax_scope_rejected(change):
+    p = packet(); q = p['scenarios'][0]['quarters'][0]
+    a = {'basis': 'synthetic', 'excluded_from_pretax_and_tax': True,
+         'equity_income': 6, 'discontinued_income': -8}
+    if change == 'missing': del a['equity_income']
+    elif change == 'included': a['excluded_from_pretax_and_tax'] = False
+    elif change == 'unknown': a['discontinued_income'] = None
+    elif change == 'extra': a['pretax_income'] = 6
+    q['income']['after_tax_items'] = a
+    with pytest.raises(ValueError):
+        cm.earnings(q['segments'], q['income'], q['shares'], p['segment_names'])
+
+
 def test_hand_reconciliation_and_financing():
     p = packet()
     before = deepcopy(p)
@@ -172,7 +288,7 @@ def test_company_path_integrates_without_legacy_valuation_or_rate(monkeypatch):
     row = r['tickers']['SYN']
     assert row['status'] == 'company_research' and row['baseline'] is None
     assert row['company_research']['observed']['status'] == 'reconciled'
-    assert 'company-v5.2-research' in fyi_map(r)['SYN']
+    assert cm.VERSION in fyi_map(r)['SYN']
 
 
 def test_invalid_company_input_does_not_fall_back_to_old_prices(monkeypatch):

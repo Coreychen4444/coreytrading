@@ -179,7 +179,16 @@ def zone_bands(zones: Optional[dict]) -> Optional[dict]:
         "no_chase": coerce_float(zones.get("no_chase_above")),
         "stop": coerce_float(zones.get("stop_level")),
         "valid_until": zones.get("valid_until"),
+        "anchored_on": zone_anchor(zones),
     }
+
+
+def zone_anchor(zones: Optional[dict]) -> Optional[str]:
+    """zones 画于哪天 (`anchored_on.date`, 也认 zone_bands 的扁平字符串) → 'YYYY-MM-DD' | None。"""
+    a = (zones or {}).get("anchored_on")
+    if isinstance(a, dict):
+        a = a.get("date")
+    return str(a)[:10] if a else None
 
 
 def zone_position(close: float, zb: dict) -> str:
@@ -505,17 +514,33 @@ def zone_mech_stale(zones: Optional[dict], thesis: Optional[dict],
     if closes and isinstance(z2, list) and len(z2) == 2 and z2[0] and closes[-1][1] < float(z2[0]):
         out.append(f"收盘 {closes[-1][1]:g} < zone2 下沿 {float(z2[0]):g} "
                    "(breakdown stale, 当日口径 2026-08-20 — 带内挂单语义已反转)")
-    # 波动 stale = |单日收收| > 2×ATR14 (per-ticker 尺, 首次接线 ——
-    # 固定 10% 只活过文档)。ATR 算不出 (序列不足) → 本腿沉默, 其余腿照常。
-    from .technical import atr as _atr  # 函数内 import — 与 book.py 同款, 避免顶层环
-    a14 = (_atr(rows, 14) or [None])[-1] if rows else None
-    cl2 = [coerce_float(r.get("close")) for r in rows[-2:]]
-    if a14 and len(cl2) == 2 and cl2[0] and cl2[1]:
-        chg, thr = abs(cl2[1] / cl2[0] - 1), STALE_VOL_ATR_MULT * a14 / cl2[0]
-        if chg > thr:
-            out.append(f"单日 {chg * 100:.1f}% > {STALE_VOL_ATR_MULT:g}×ATR14 "
-                       f"({thr * 100:.1f}%) (volatility stale)")
+    vs = vol_stale(rows, zone_anchor(zones))
+    if vs:
+        out.append(f"单日 {vs[0] * 100:.1f}% > {STALE_VOL_ATR_MULT:g}×ATR14 "
+                   f"({vs[1] * 100:.1f}%) (volatility stale)")
     return out
+
+
+def vol_stale(rows: List[dict], anchor: Optional[str]) -> Optional[tuple]:
+    """波动 stale 腿 (单一真源; entry_guard / today_group / agent_inputs / portfolio_brief 共用)。
+    → (|单日收收|, 2×ATR14/前收) | None。
+
+    |单日收收| > 2×ATR14 (per-ticker 尺; 固定 10% 只活过文档)。ATR 算不出 → 沉默。
+    **那根 K 线的日期 ≤ zones 画卡日 = 卡已按它重画过 → 不再判 stale** (不比画卡日时,
+    重画后的次日仍会被同一根 K 判 stale, 逐日重复派发重画)。
+    """
+    if len(rows) < 2:
+        return None
+    bar_day = str(rows[-1].get("time") or rows[-1].get("date") or "")[:10]
+    if anchor and bar_day and bar_day <= anchor:
+        return None
+    from .technical import atr as _atr  # 函数内 import — 与 book.py 同款, 避免顶层环
+    a14 = (_atr(rows, 14) or [None])[-1]
+    c0, c1 = coerce_float(rows[-2].get("close")), coerce_float(rows[-1].get("close"))
+    if not (a14 and c0 and c1):
+        return None
+    chg, thr = abs(c1 / c0 - 1), STALE_VOL_ATR_MULT * a14 / c0
+    return (chg, thr) if chg > thr else None
 
 
 def gate_staleness(agent: Optional[dict], today: str,

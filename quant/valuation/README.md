@@ -308,13 +308,31 @@ notes into rate exposures, or measure announcement-minute price jumps.
 ## Company reconstruction pilot
 
 `company_model.py` is a separate explicit company engine, currently
-`company-v5.2-research`. It does not inherit archetype growth, margins, a share
+`company-v5.4.1-research`. It does not inherit archetype growth, margins, a share
 count inferred from EPS, or the old cash-flow-derived PE. The private input
 catalog is `trade/valuation/company_models.json`, keyed by ticker; capture adds
 it to the frozen evidence with ownership/hash checks. Assessment routes a ticker
 with a packet to this engine. Expired, mismatched or invalid packets do not fall
 back to legacy prices. Other tickers remain legacy diagnostics under the global
 publication hold. No current company is approved for publication.
+The host snapshot keeps each full packet for deterministic calculation. The
+valuation worker view carries only a per-company summary and the full-packet
+hash; it receives a compact host calculation summary later, linked by the full
+receipt hash. Full packets and receipts remain in the daily archive. This avoids
+sending long DCF input periods and every quarterly calculation through the
+model prompt on every daily run.
+
+The daily company route now distinguishes each ticker's operating-value
+estimability. A sourced `operating_path_hold` in its company packet means the
+long-term operating path is unestimable; the engine returns unknown operating
+and dependent equity values while preserving separate quarterly diagnostics.
+Expired packets return unknown only for that ticker. Current base-case operating
+DCF is shown in the daily FYI report as a dated conditional business value,
+explicitly not equity or a share price. A company whose separately archived long
+case has earnings/depreciation paths that differ from its current quarterly
+packet stays withheld from daily operating-value output. No company has an
+accepted fair-value or market-target release; incomplete companies do not
+suppress the other companies' research.
 
 The explicit input contract uses schema `1.0`, currency `USD`, scale `millions`
 for both money and shares. Every packet has `known_at`, fixed `valid_until`, a
@@ -567,3 +585,55 @@ FCFF资本扣除及D&A加回一致；与lease_details同时使用时融资租赁
 营运资本须排除上述资产，新增投资口径排除偿还旧融资，避免重复计入。余额变化不能直接
 充当新增投资或期间摊销。缺省not_separately_reconciled；算式通过仅为arithmetically_reconciled，
 source_completeness仍为not_established，零值需要证据而不是填写标签即可放行。全局发布停用不变。
+
+## Research earnings additions
+
+`company-v5.3-research` optionally accepts `income.after_tax_items` with an explicit
+basis and confirmation that equity-method/discontinued income is excluded from
+pretax income and tax expense. Consolidated income remains the cash-flow starting
+point; common earnings separately subtract noncontrolling income and explicitly
+supported preferred dividends. Preferred cash payments belong in the cash bridge.
+
+A separately supplied `shares.preferred_if_converted` block specifies conversion
+shares and dividend addback. The engine tests dilution separately for GAAP and
+adjusted quarterly and earnings-window results. This limited single-pool mechanism
+does not implement participating-security/two-class allocation, convertible-debt
+interest addbacks, contingent conversion, or class-specific EPS. Those issuer
+structures require an explicit further bridge before using common-share results.
+New optional fields do not change legacy inputs' numerical earnings/cash paths.
+
+## Securities EPS and ended-unreported periods
+
+`company-v5.4-research` accepts `shares.eps_securities` for GAAP-only calculations.
+Nominal-exercise prefunded warrants remain in basic EPS during losses. An issuer's
+explicit combined presentation of equal-rights preferred/common can be supplied
+as basic equivalents; this does not change legal closing common shares. One
+nonconvertible participating class can receive undistributed income without
+absorbing losses when its contract says so. This is not a general multi-class
+allocation engine; participating-class conversion is rejected.
+
+Convertible-debt instruments provide separate weighted shares and after-tax
+interest addbacks. Each is tested in order of dilution using continuing income
+as the control number. Earnings windows sum raw income/addbacks and weight shares,
+then retest; they do not sum quarterly EPS or already allocated class income.
+Capped calls are not netted. Mandatory cash-principal settlement needs an explicit
+excess-share calculation; full-note shares must not be substituted for it.
+These EPS trials do not convert debt, raise cash, or change closing legal shares.
+Mixing this mode with legacy preferred conversion or adjusted-income entries is
+rejected because the adjusted securities numerator needs its own evidence.
+
+The first modeled quarter may already have ended only with an explicit
+`unreported_bridge`, evidence that results remain unavailable and a short expiry
+(at most seven days from its known-at time). It must immediately follow the
+disclosed opening balance; the receipt labels it `ended_unreported_estimate`.
+This permits an honest estimate between
+reported actuals and future quarters, not backdating or forward-validation credit.
+Existing prospective validation still requires freezing before the period starts.
+An expired bridge must be rechecked against issuer disclosure, not silently extended.
+
+`company-v5.4.1-research` tests ordinary dilution against continuing earnings
+allocated to common, including participating-class dividends. Positive total
+continuing income alone does not establish dilution when common earnings are
+negative. Debt trials use the same allocated control EPS. Existing frozen
+numerical fields are unchanged; the fix covers an additional boundary
+case, not a new forecast or validation approval.

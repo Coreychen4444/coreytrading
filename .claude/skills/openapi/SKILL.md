@@ -18,7 +18,7 @@ Respond in the same language as the user's input. If the user writes in English,
 
 ## ⚠️ 本工作区适配（LOCAL — 官方升级时此段必须保留，全清单见 `LOCAL_PATCHES.md`）
 
-1. **Python 解释器**：所有脚本一律 `.venv/moomoo/bin/python3`（系统 python 有 protobuf 冲突）。SDK 版本契约见 repo 根 `requirements.txt`（当前 10.9.6908 ↔ OpenD 10.9.6918，big-version 必须匹配，patch 号不用）。
+1. **Python 解释器**：所有脚本一律 `.venv/moomoo/bin/python3`（系统 python 有 protobuf 冲突）。SDK 版本契约见 repo 根 `requirements.txt`（当前 10.10.7008 ↔ OpenD 10.10.7008，big-version 必须匹配，patch 号不用）。
 2. **RSA 加密**：本机 OpenD **强制 RSA**。`common.py` 已打本地补丁读 `.env` 的 `FUTU_OPEND_ENCRYPT=1` + `FUTU_OPEND_RSA_KEY`（官方版无此能力，裸官方脚本连不上）。
 3. **FUTUSG 货币硬规则**：`get_portfolio.py` / `accinfo_query` 查资金/购买力**必须显式 `--currency USD`**，否则 server 默认 HKD 换算（total_assets/power 全错口径）。
 4. **实盘默认**：本工作区 `.env` 配 `FUTU_TRD_ENV` + 交易脚本带 `--confirmed` 硬约束；官方"默认 SIMULATE"声明以 env 实际配置为准。

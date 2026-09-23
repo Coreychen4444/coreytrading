@@ -137,7 +137,7 @@ flowchart TD
 
 | 位置 | 内容 |
 |---|---|
-| [AGENTS.md](AGENTS.md) | 对所有模型生效的项目合同；[CLAUDE.md](CLAUDE.md) 只是一行 `@AGENTS.md` 导入垫片 |
+| [AGENTS.md](AGENTS.md) | 对所有模型生效的项目合同（Codex 与 Claude Code ≥ 2.1.277 原生读取）；[CLAUDE.md](CLAUDE.md) 只是一行 `@AGENTS.md` 导入垫片，给旧版 Claude Code 运行时 |
 | [AI_BOOTSTRAP.md](AI_BOOTSTRAP.md) / [AI_BOOTSTRAP_CN.md](AI_BOOTSTRAP_CN.md) | 编码 Agent 的 fresh clone 搭建指南 |
 | [agents/](agents/) | 领域方法、角色契约、路由和运行手册 |
 | [quant/](quant/) | 宿主控制器、数据同步、机械决策、估值和报告 |

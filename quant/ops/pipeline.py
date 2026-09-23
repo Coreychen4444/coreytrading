@@ -272,8 +272,8 @@ def handle_opend_down(send: bool) -> Dict:
         host, port = opend_endpoint()
         if send:
             notify(f"⚠️ OpenD unreachable ({host}:{port}) — 持仓监控已变黑。"
-                   f"重启: <install_dir>/OpenD.app/Contents/MacOS/OpenD "
-                   f"--cfg_file=<install_dir>/OpenD.xml")
+                   f"先 tmux attach -t opend 看是否卡在登录提示；"
+                   f"进程已退出则跑 opend/start.sh")
         alerts[OPEND_DOWN_KEY] = {"active": True, "lastAlertTs": now}
         save_state(st)
         fired = True

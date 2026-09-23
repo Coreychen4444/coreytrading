@@ -75,6 +75,7 @@ from quant.core.paths import (EARNINGS_CALENDAR_PATH, KLINE_CACHE_DIR,  # noqa: 
                               KLINE_DEEP_DIR, POSITIONS_PATH, WATCHLIST_PATH)
 from quant.core.sectors import benchmark_for  # noqa: E402
 from quant.core import bottom_evidence  # noqa: E402  (底部确认概率: 随机游走位置几何, 零参数)
+from quant.core import key_levels  # noqa: E402  (⭐箱顶 / 箱体位置; 描述性, 样本外无 edge)
 from quant.decision.level_map import cluster_pivots, find_lvn, top_hvn  # noqa: E402
 from quant.decision.regime_transition import (rel_volume, streak_above,  # noqa: E402
                                               volume_leg)
@@ -832,6 +833,22 @@ def bottom_block(bars: List[dict], atr20: Optional[float], dv: Optional[Dict]) -
     return b
 
 
+def box_block(bars: List[dict], atr20: Optional[float], bottom: Dict) -> Dict:
+    """箱体位置（底部 / 底部与关键阻力之间 / 已突破关键阻力; 区分震荡还是单边）
+    → {state, cn, top, brk}。判别式真源 `core/key_levels`（与 moomoo ⭐ 线同一把尺）；「底部」= 本页抄底框架
+    在场（与 🔁 表同一个 `listed`，不重判）。**描述性**：样本外 ⭐ 突破与普通突破无差，位置词不带好坏。"""
+    close = float(bars[-1]["close"])
+    top = key_levels.box_top(bars)
+    brk = key_levels.last_breakout(bars)
+    at_bottom = bool(bottom.get("listed")) and bottom.get("stage") in ("formed", "watch")
+    pos = key_levels.position(close, atr20, top, brk, at_bottom)
+    return {**pos,
+            "top": ({"level": top["level"], "tests": top["tests"],
+                     "dist_pct": round((top["level"] / close - 1.0) * 100.0, 1)} if top else None),
+            "brk": ({"level": brk["level"], "date": brk["date"], "intact": brk["intact"],
+                     "gain_pct": brk["gain_pct"]} if brk else None)}
+
+
 def confirm_block(b: Dict, bars: List[dict]) -> Optional[Dict]:
     """底部确认概率（`core/bottom_evidence`）：
     20 根内**先收盘越前高、后才收破止跌低**的随机游走概率（位置 × 该票 HV20，零拟合参数）。
@@ -937,7 +954,8 @@ def setups_lines(r: Dict) -> List[str]:
     if b.get("listed"):
         L.append(f"🔁 抄底 {b['cn']}（{'已形成' if b['formed'] else '即将形成'}）"
                  f"　止跌低 {b['low']:g}（{b['low_date'][5:]}，{b['dist']['low']}）= 止损（下影线低点）"
-                 f"　距 60 日高 {b['dd_at_low']:+.0%}@低 / {b['dd_now']:+.0%}@现价")
+                 + (f"　从顶 {b['top']:g}（{b['top_date'][5:]}）跌下来 {b['decline_n']:.1f}N" if b.get("decline_n") is not None else "")
+                 + f"　距 60 日高 {b['dd_at_low']:+.0%}@低 / {b['dd_now']:+.0%}@现价")
         sh = b.get("shadow") or {}
         shadow_txt = (f"下影 {sh['lower_pct']}% / 实体 {sh['body_pct']}% / 收盘位 {sh['close_pos']}"
                       if sh.get("lower_pct") is not None else "影线不可算")
@@ -1018,6 +1036,7 @@ def read(ticker: str, asof: Optional[str] = None) -> Dict:
     bottom = bottom_block(bars, atr20, struct.get("dow"))
     trend = trend_setup(t, (card or {}).get("agent"), bars, atr20,
                         gate_cls=((struct.get("next_gate") or {}).get("path")))
+    box = box_block(bars, atr20, bottom)
     return {
         "ticker": t, "asof": pa["date"], "bars": len(bars),
         # ⚠️ `--asof` 只截断**价格**，卡片读的仍是**今天**那张（zones/regime/gate 都是现在的值）。
@@ -1029,6 +1048,7 @@ def read(ticker: str, asof: Optional[str] = None) -> Dict:
         "structure": struct, "price_action": pa, "volume": vol,
         "indicators": ind,
         "setups": {"bottom": bottom, "trend": trend},
+        "box": box,
         "disclaimer": DISCLAIMER,
     }
 
@@ -1121,6 +1141,8 @@ def render(r: Dict) -> str:
 
     L.append("⑥ 两种模式（判读层，零授权效力）")
     L.extend("　" + x for x in setups_lines(r))
+    if r.get("box"):
+        L.append("　🧭 箱体位置：" + box_item(r))
     L.append("　" + r["disclaimer"])
     return "\n".join(L)
 
@@ -1159,6 +1181,8 @@ def bottom_row(r: Dict) -> str:
         stage = f"{b['cn']} 收{b['close']:g}<{b['low']:g}"
     else:
         stage = f"{b['cn']}" + (f"(下影{sh['lower_pct']}%)" if sh.get("lower_pct") is not None else "")
+    if b.get("decline_n") is not None:
+        stage += f" · 顶跌{b['decline_n']:.1f}N"
     if b.get("undercut_prev"):
         stage += f" ⚠️盘中破{b['undercut_prev']['low']:g}收回"
     low = f"{b['low']:g} ({b['dist']['low']})"
@@ -1205,7 +1229,7 @@ def trend_row(r: Dict) -> str:
 
 
 def _bottom_key(r: Dict):
-    """✓止跌 → ⏳今日新低 → ✗；✓ 内最新的信号在前（最新鲜的止跌最可操作），同日票名序。"""
+    """✓止跌 → ⏳顶后新低 → ✗；✓ 内最新的信号在前（最新鲜的止跌最可操作），同日票名序。"""
     b = r["setups"]["bottom"]
     return (b["rank"], b.get("bars_since_signal") or 0, r["ticker"])
 
@@ -1225,7 +1249,7 @@ def digest(reports: List[Dict], asof: Optional[str] = None) -> str:
     listed = {r["ticker"] for r in bottoms} | {r["ticker"] for r in trends}
     rest = sorted(r["ticker"] for r in ok if r["ticker"] not in listed)
     L = [f"## [FYI] 收盘判读 {asof or ''} · 两种模式 · 判读层，零授权效力".replace("  ", " "),
-         "> 🔁 抄底 = 近 20 日低距 60 日高 ≥10%，空头衰竭：✓止跌 = 次日未新低 或 止跌日长下影（已形成）；⏳今日新低 = 明日不再新低即止跌（即将形成）；"
+         "> 🔁 抄底 = 从 20 日顶跌下来 ≥2N（顶跌 = 顶到止跌低 ÷ 止跌低那天的 ATR20）且止跌低距 60 日高 ≥10%，空头衰竭：✓止跌 = 次日未新低 或 止跌日长下影（已形成）；⏳顶后新低 = 今日低点是顶之后的最低点，明日不再新低即止跌（即将形成）；"
          "✗ = 收破止跌低。止跌低 = 下影线低点 = 止损。反弹/反转 = 两个事实：越前高（该段下跌最后一个 lower high）/ 回踩更高低点。"
          "确认 = 20 根内先收盘越前高、后才收破止跌低的概率（位置 × 波动的随机游走基准，零参数；离止损越近越低、赔率越高，不是排序键）",
          "> 🚀 趋势确认 = 收盘站上卡片 gate ×N + 量腿 RelVR≥1.1 → 转移；只列 ≤5 根内已转移 / 站稳量腿未过 / 计数中 / gate 之下 ≤1N。"
@@ -1246,9 +1270,47 @@ def digest(reports: List[Dict], asof: Optional[str] = None) -> str:
         L.append("无")
     L.append("")
     L.append(f"其余 {len(rest)} 票不在两种形态内（不列）：{'、'.join(rest) if rest else '—'}")
+    box = box_lines(ok)
+    if box:
+        L.append("")
+        L.extend(box)
     for r in errs:
         L.append(f"⚠️ {r['ticker']} {r['error']}")
     return "\n".join(L)
+
+
+# 箱体位置段: 全书每票恰好一次, 按位置分组。
+# 词只描述价格在箱体结构里的哪儿 —— 单边 / 震荡是描述词, 不是信号 (样本外无 edge)。
+BOX_ORDER = ("broken", "near_top", "mid", "bottom", "failed", "none")
+BOX_LABEL = {"broken": "⭐已破箱顶·单边", "near_top": "箱顶下·震荡", "mid": "箱体中段·震荡",
+             "bottom": "底部", "failed": "⭐突破失败·回到震荡", "none": "无箱"}
+BOX_LEGEND = ("> ⭐ = 近 20 根最高价所在、近 60 根被从下方打过 ≥2 次的簇上沿（moomoo ⭐ 线同一把尺）；"
+              "已破 = 突破后没收破 线−0.5N、上方也没长出新箱顶。描述性：样本外 ⭐ 突破与普通突破无差，"
+              "只看位置，不当信号")
+
+
+def box_item(r: Dict) -> str:
+    """一票的位置短语：已破 → ⭐线 离线涨幅·确认日；箱内 / 底部 → 上方 ⭐线（距离）；失败 → ⭐线·确认日。"""
+    b, t = r["box"], r["ticker"]
+    top, brk = b.get("top"), b.get("brk")
+    if b["state"] in ("broken", "failed") and brk:
+        tail = f" {brk['gain_pct']:+.1f}%" if b["state"] == "broken" else ""
+        return f"{t} ⭐{brk['level']:g}{tail}·{brk['date'][5:]}"
+    if top:
+        return f"{t} ⭐{top['level']:g}（距 {top['dist_pct']:+.1f}%）"
+    return t
+
+
+def box_lines(reports: List[Dict]) -> List[str]:
+    rs = [r for r in reports if r.get("box")]
+    if not rs:
+        return []
+    L = [f"### 🧭 箱体位置（{len(rs)}）", BOX_LEGEND]
+    for st_ in BOX_ORDER:
+        grp = sorted((r for r in rs if r["box"]["state"] == st_), key=lambda r: r["ticker"])
+        if grp:
+            L.append(f"- **{BOX_LABEL[st_]}**（{len(grp)}）：" + " · ".join(box_item(r) for r in grp))
+    return L
 
 
 def main() -> int:

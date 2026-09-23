@@ -35,7 +35,7 @@
 | 估值层（判断层，零授权效力） | `quant/valuation/`（合同 `quant/valuation/README.md`）；账本 `trade/valuation/valuations.jsonl`；人工区 `inputs.json`（新票画卡时一并 `quant/valuation/archetypes.py set` 归原型，缺 = brief `INFRA:card_missing_archetype`）；卡片镜像 `agent.valuation` 由 `quant/sync/valuation_sync.py` 写；独立日更 `quant/ops/valuation_daily.py`（归档 `var/valuation-daily/`） |
 | 基本面框架（判断层，零授权效力） | 方法规格在 `agents/methods/`（若配置）；卡片字段 `agent.thesis.frame`（判别式 `quant/core/thesis_frame.py`，writer `--thesis-frame`）；存量散文 thesis 不专门迁，重画价位带时逐张替换 |
 | 研究层 | `quant/research/`：可复用机械件与合成脚手架；私有预注册、数据、结果与裁决不入库，live 代码不得 import 它 |
-| OpenD | `.claude/skills/openapi/scripts/`；环境细节 `.claude/rules/tools-environment.md`；订单类底层脚本不在 pipeline 内，任何改单动作先取显式授权 |
+| OpenD | `.claude/skills/openapi/scripts/`；环境细节 `.claude/rules/tools-environment.md`；启动用 `opend/start.sh`（启动前自检登录字段与 RSA 行仍在——自更新可能把配置还原成模板，判据 = 字段存在，不 diff 模板；配置说明 `opend/README.md`）；订单类底层脚本不在 pipeline 内，任何改单动作先取显式授权 |
 
 ## 常设裁决（Standing directives；后裁决优先）
 1. **技术面优先 v3**：入场授权（gate / regime / zone / cap）= 纯价格结构；财报·thesis·研报·宏观一律 [FYI]。唯一 sizing 例外 = 财报反应日 T+0 名义 cap 缩仓（`quant/core/earnings.py`）。财报落地 → 卡在反应日收盘后全重画（`INFRA:card_stale_earnings` 只报不拦）。
@@ -43,7 +43,7 @@
 3. **情报层收拢**：本仓只做技术分析 + 风控，不采集任何新闻 / 宏观 / 社媒。归因 = tape 定时点 → kline 大盘 / 板块 → 情报归档（`trade/intelligence/reports/`，若配置）→ 「触发源未知」（合法输出，不编造）。
 4. **宏观相位**：持仓 / 入场 / 组合风险讨论先读宏观快照（`trade/intelligence/macro/current.json`，若配置）作方向先验与风险环境；它不翻译成 GO / VETO / cap / 股数，宏观 schema 的写权限与 hard veto 恒为 false；缺失或校验失败 → 写「宏观先验无有效输入」，不自行抓新闻。
 5. **授权与 sizing**：cap 二值 {0, 40% NAV}（`current_regime.cap_pct_nav`；结构未修复 = `structure_repair_veto` = VETO）。实际能下多少 = `quant/core/sizing.py` `entry_cap()` 六臂取小（regime cap − 敞口 / gate 预算 2.5→4→5% NAV risk 累计 ÷ 真 stop 距离 / at-risk 5% / 冲击预算 15% / gross 110% / 购买力）。档位 = `gate_count(card)`（卡上给了 cap 的 up 转移条数）。整股约束最小 1 股。细则 `.claude/rules/position-tiers.md`。
-6. **期权**：gate1 起可期权，须过 IV 硬门槛（`sizing.long_call_iv_gate`）；保费上限 gate1 12.5% / gate2 7.5% / gate3 5% NAV；正股退出线 = 授予 cap 的 gate ×1 日收盘；**限价锚 = 正股 z1 回踩**，追高 = 规则外 `above_z1`（期权 BUY 落库盖正股价位）。合约选择与保费映射归 `quant/options/option_plan.py`。**抄底 `reversal_probe`（试行）**：第二入场类，前提空仓；信号 = `quant/core/setups.py` ✓止跌（次日未新低 / 长下影），止损 = 止跌低收盘 ×1、无 S1，正股 + call（IVP 门），授权住 `option_plans.json`。
+6. **期权**：gate1 起可期权，须过 IV 硬门槛（`sizing.long_call_iv_gate`）；保费上限 gate1 12.5% / gate2 7.5% / gate3 5% NAV；正股退出线 = 授予 cap 的 gate ×1 日收盘；**限价锚 = 正股 z1 回踩**，追高 = 规则外 `above_z1`（期权 BUY 落库盖正股价位）。合约选择与保费映射归 `quant/options/option_plan.py`。**抄底 `reversal_probe`（试行）**：第二入场类，前提空仓；信号 = `quant/core/setups.py` ✓止跌（次日未新低 / 长下影），且须先有一段下跌：20 日顶到止跌低 ≥ 2×ATR20@止跌低（`setups.DECLINE_MIN_ATR`；创 20 日新高途中的晃动不是底）；止损 = 止跌低收盘 ×1、无 S1，正股 + call（IVP 门），授权住 `option_plans.json`。
 7. **退出无 override**：卡片 stop / 棘轮地板 / 趋势死亡线 / G-01 任一成立 → 当日执行，不给「看一天」选项，不起草 override；未执行 = 规则外评 C 起步，brief `exit_overdue` 逐日点名。
 8. **破 z2 下沿 = 当日 BUY 冻结**（盘中告警 `z2_breach_buy_freeze`，不动 cap；收盘裁定，postclose 重画）。
 9. **注解只给规则外成交**（判据见 trading-discipline）；`tier` / `auth` 落库即机械盖章；增量 BUY 自动落 lots（`lot_reconcile`），部分卖出归人工，漂移走 `INFRA:lot_drift`。
@@ -57,7 +57,7 @@
 | overnight-briefing | `30 18 * * 1-5` | 盘前简报 + 开盘操作手册 + 当日挂单清单（`--mode briefing`），技术研究回执 + 代码渲染风控收据，宏观先验读发布快照 |
 | postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画（每轮 `repaint_bound`）→入场计划（`option_plans` 按同一收盘重锚）→提醒线 / 白名单→转移达标收据与简报 |
 | gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled（等待预算 = 上游 lease，不私设秒数）后推 gate 阶梯表原文 |
-| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：两种模式清单（🔁 抄底 = 次日未新低 / 长下影，止损 = 止跌低，附 [FYI] 底部确认概率 / 🚀 趋势确认 gate 接近度；已形成·即将形成）原文推送，未形成不列（判别式 `quant/core/setups.py`；零授权、零模型调用） |
+| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：首段大盘状态卡（SPY / QQQ / SMH 震荡·单边·转换中 + 转移线，`quant/journal/market_regime_log.py`，只作整体参考，不进排序与授权）+ 两种模式清单（🔁 抄底 = 次日未新低 / 长下影，止损 = 止跌低，附 [FYI] 底部确认概率 / 🚀 趋势确认 gate 接近度；已形成·即将形成）原文推送，未形成不列；尾段 🧭 箱体位置（全书按 ⭐已破·单边 / 箱顶下 / 中段 / 底部分组，`quant/core/key_levels.py`；描述性标注，样本外未复现 edge，不进排序与授权）（判别式 `quant/core/setups.py`；零授权、零模型调用） |
 | weekly-portfolio-review | `3 10 * * 6` | 周复盘（宏观 / 技术 / 风控三角色唯一时点 + Agent 层周基线；估值归独立任务） |
 | valuation-daily | 每日 08:00（示例，Codex 运行器） | 独立估值：刷新→冻结→宏观情景→计算→估值报告；规范 `tasks/codex/valuation-daily.md`，零授权效力 |
 

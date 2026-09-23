@@ -24,13 +24,21 @@
           下影线低点 = **本类的 stop**）。顶定了下跌才定，底才定：反弹里的分形高不算顶，回踩不会被当成新底
           （「窗内最低 low」会把更早的旧低当成底；「最近分形高之后的低」会把反弹里的回踩当成底；顶锚两种都对）。
           L 距 60 日高 ≥ `DD_MIN`(10%)，否则不是「跌下来的」，没有底可抄 → none。
+  一段下跌  顶到 L ≥ `DECLINE_MIN_ATR`(2) × ATR20@L，否则只是上涨途中的正常晃动，没有空头力量可衰竭 → none
+          （典型形状：当日创 20 日新高，顶 = 当日，「顶之后的最低 low」就是当日自己的低点 → 会被误标成
+          「今日新低」，次日不破即「✓止跌」。顶锚下 L 不再是 20 日最低点，旧定义自带的「前面有一段下跌」
+          随之丢失，60 日高门挡不住：离更早的高点仍然很远）。
+          尺子 = L 那根的 ATR20（`technical.atr` Wilder，只算 L 之前 `ATR_TAIL_BARS` 根）：L 定了尺子就定，
+          框架不因之后波动放大来回翻。回放中 1.5N / 2N / 2.5N 同形无拐点 = 语义线不是筛子。
+          用 N 不用 %：低波动票跌幅百分比不大也可能已是 ≥2N 的一段下跌。
   衰竭证据（两条，缺一即可）：
     次日未新低  L 之后至少有一根完成日线且它没有跌破 L（由 L 是窗内最低这个构造保证：
                 「L 不是最后一根」就等价于「第二天没有继续新低」）。信号日 = L 的次日。
     长下影      L 那根本身收出长下影 —— 判别式复用 `technical.detect_hammer`
                 （下影 > 实体 ×2 且上影 < 实体 ×0.5，锤子线的
                 量化口径；本仓已知它没有「下影占区间比」这一维，事实一并播出）。信号日 = L 当日。
-  阶段    ⏳今日新低（即将形成）= 今日创 20 日新低且不是长下影 → 「明日不再新低 = 止跌」
+  阶段    ⏳顶后新低（即将形成）= 今日低点是 20 日顶之后的最低点（且过了上面两道门）且不是长下影
+                               → 「明日不再新低 = 止跌」。它**不是** 20 日新低：顶锚下 L 可以高于 20 日最低点
           ✓止跌（已形成）      = 任一衰竭证据成立，且此后没有收盘跌破 L
           ✗反弹结束            = 收盘 < 昨日框架的 L（只能从昨日框架判：今日收破则 L 已不是窗内最低）
           盘中破 L 收回（下影再探）= 今日框架的新 L，标 `undercut_prev`；本类止损在下影线低点，
@@ -44,8 +52,9 @@
   这是判读，不是退出指令：「反弹就尽早清仓」的机械口径归 exit_guard，须先过
   `exit_rules_backtest`（改退出参数前须先跑回测）。
 
-  顶锚的已知形状：收盘创 20 日新高 = 下跌已被整段收复 → 框架自然解体（那是模式 2 的世界）；顶滑出 20 日窗
-  后框架重锚到窗内新的顶。顶那根自己的 low 也算「顶之后」（一根大阴线反转日既是顶也是底的候选）。
+  顶锚的已知形状：创 20 日新高 = 顶移到当日 → 顶到 L 只剩当日振幅，过不了「一段下跌」门 → none（那是模式 2
+  的世界）；此后要从这个新顶再跌出 ≥2N 才重新有框架。顶滑出 20 日窗后框架重锚到窗内新的顶。顶那根自己的
+  low 也算「顶之后」：一根振幅 ≥2N 的大阴线反转日既是顶也是底的候选（它过得了门）。
 
 ════════════════════════════════════════════════════════════════════════
 模式 2 趋势确认 —— 卡片 gate（转移机）的接近度
@@ -69,13 +78,17 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from . import reversal
-from .technical import detect_hammer, swing_points
+from .technical import atr, detect_hammer, swing_points
 
 # 与反转探针共用同一套窗口词汇（20 日低 / 60 日高 / 10% 回撤门）—— 判读框架与授权信号
 # 不各说各话；改 reversal.PARAMS（要重跑回测）时本模块自动跟随。
 LOW_LOOKBACK = int(reversal.PARAMS["newlow_lookback"])    # 止跌低 = 近 20 日最低 low
 HIGH_LOOKBACK = int(reversal.PARAMS["high_lookback"])     # 回撤参照 = 60 日高
 DD_MIN = float(reversal.PARAMS["drawdown_min"])           # L 距 60 日高 ≥10% 才有底可抄
+# 一段下跌: 顶到 L ≥ 2 × ATR20@L。与 reversal.PARAMS max_dist_atr (离底太远的 2N 上限)
+# 同数不同身份, 不跟随; 改它 = 换判别式, 须先重跑回测。
+DECLINE_MIN_ATR = 2.0
+ATR_TAIL_BARS = 120      # ATR20@L 只算 L 之前 120 根 (Wilder 种子影响 0.95^100 < 1%; 回放不必每根全序列重算)
 LH_LOOKBACK = HIGH_LOOKBACK      # L 之前找前高的回看窗（同 60 日框架）
 SWING_WING = 2                   # 5 根分形（technical.swing_points 缺省, 与 gate 画线同尺）
 MIN_BARS = HIGH_LOOKBACK + 1     # 60 日高 + 至少一根: 少于它判不了「跌下来的」
@@ -88,11 +101,12 @@ MODE_CN = {MODE_BOTTOM: "抄底", MODE_TREND: "趋势确认"}
 STAGES: Dict[str, Dict] = {
     "formed": {"cn": "✓止跌", "formed": True, "rank": 0,
                "desc": "空头衰竭：止跌低之后未再新低，或止跌日收出长下影；止损 = 止跌低"},
-    "watch": {"cn": "⏳今日新低", "formed": False, "rank": 1,
-              "desc": "今日创 20 日新低且不是长下影；明日不再新低 = 止跌"},
+    "watch": {"cn": "⏳顶后新低", "formed": False, "rank": 1,
+              "desc": "今日低点是 20 日顶之后的最低点（顶到它 ≥2N）且不是长下影；明日不再新低 = 止跌"},
     "dead": {"cn": "✗反弹结束", "formed": False, "rank": 2,
              "desc": "收盘跌破止跌低，昨日框架作废"},
-    "none": {"cn": "无", "formed": False, "rank": 9, "desc": "回撤不足 10%，没有底可抄"},
+    "none": {"cn": "无", "formed": False, "rank": 9,
+             "desc": "距 60 日高不足 10%，或顶到止跌低不足 2N：没有一段下跌可抄"},
 }
 LISTED_STAGES = ("formed", "watch", "dead")     # 进推送的阶段（未形成的不列）
 RECENT_SIGNAL_BARS = 10      # ✓止跌 只在信号 ≤10 根内算「刚形成」; 更老的归趋势确认表 / 反弹反转判读
@@ -118,6 +132,15 @@ def shadow_facts(bar: dict) -> Dict:
             "upper_pct": round((h - max(o, c)) / rng * 100),
             "body_pct": round(abs(c - o) / rng * 100),
             "close_pos": round((c - l) / rng, 2)}
+
+
+def atr20_at(bars: List[dict], i: int) -> Optional[float]:
+    """bars[i] 那根的 ATR20（`technical.atr` Wilder，只用 bars[i] 及之前 `ATR_TAIL_BARS` 根）→ float | None。"""
+    if i < 0:
+        i += len(bars)
+    a = atr(bars[max(0, i - ATR_TAIL_BARS + 1):i + 1], 20)
+    v = a[-1] if a else None
+    return float(v) if v else None
 
 
 def last_lower_high(bars: List[dict], i_low: int, lookback: int = LH_LOOKBACK,
@@ -152,7 +175,15 @@ def _frame(bars: List[dict]) -> Dict:
         "close": close,
     }
     if -dd_at_low < DD_MIN:
-        out.update(stage="none", why=f"20 日低距 60 日高仅 {dd_at_low:+.1%}（<{DD_MIN:.0%}）")
+        out.update(stage="none", why=f"止跌低距 60 日高仅 {dd_at_low:+.1%}（<{DD_MIN:.0%}）")
+        return out
+    a_lo = atr20_at(bars, i_low)
+    decline_n = ((out["top"] - low) / a_lo) if a_lo else None
+    out.update({"atr_at_low": a_lo, "decline_n": (round(decline_n, 2) if decline_n is not None else None)})
+    if decline_n is None or decline_n < DECLINE_MIN_ATR:
+        dn = "ATR 不可得" if decline_n is None else f"{decline_n:.1f}N"
+        out.update(stage="none", why=(f"顶 {out['top']:g}（{out['top_date'][5:]}）到止跌低 {low:g} 仅 {dn}"
+                                      f"（<{DECLINE_MIN_ATR:g}N）：上涨途中的晃动，没有一段下跌可抄"))
         return out
     lh = last_lower_high(bars, i_low)
     out["lh"] = lh["price"] if lh else None
@@ -167,7 +198,7 @@ def _frame(bars: List[dict]) -> Dict:
                 "above_low_bar_high": bool(close > _f(lbar, "high")),        # 收盘站上止跌日最高点
                 "low_bar_vol_ratio": (round(_f(lbar, "volume") / avg_vol, 2) if avg_vol > 0 else None)})
     if not hammer and held_days == 0:
-        out.update(stage="watch", why="今日创 20 日新低；明日不再新低 = 止跌")
+        out.update(stage="watch", why=f"今日低点是顶后新低（顶到它 {decline_n:.1f}N）；明日不再新低 = 止跌")
         return out
     sigs = ([SIGNAL_HAMMER] if hammer else []) + ([SIGNAL_HELD] if held_days > 0 else [])
     sig_idx = i_low if hammer else i_low + 1

@@ -18,9 +18,9 @@ import math
 
 from quant.core.agent_contracts import canonical_hash
 from quant.core.io_json import atomic_write_json, read_json
-from quant.valuation import company_cashflow, company_equity, company_multiples
+from quant.valuation import company_cashflow, company_equity, company_multiples, company_eps
 
-VERSION = "company-v5.2-research"
+VERSION = "company-v5.4.1-research"
 
 
 def number(value, name, *, minimum=None):
@@ -88,8 +88,22 @@ def earnings(segments, income, shares, required_segments):
                         - number(income["interest_expense"], "interest_expense", minimum=0)
                         + _sum(income["other_nonoperating"], "other_nonoperating"))
     pretax = totals["operating_profit"] + nonoperating
-    consolidated = pretax - number(income["tax_expense"], "tax_expense")
-    parent = consolidated - number(income["noncontrolling_income"], "noncontrolling_income")
+    after_tax = income.get("after_tax_items")
+    equity_income = discontinued = 0.0
+    if after_tax is not None:
+        if (set(after_tax) != {"basis", "excluded_from_pretax_and_tax", "equity_income", "discontinued_income"}
+                or not after_tax["basis"] or after_tax["excluded_from_pretax_and_tax"] is not True):
+            raise ValueError("after-tax items require explicit scope and exclusion from pretax/tax")
+        equity_income = number(after_tax["equity_income"], "after-tax equity income")
+        discontinued = number(after_tax["discontinued_income"], "after-tax discontinued income")
+    continuing = pretax - number(income["tax_expense"], "tax_expense") + equity_income
+    consolidated = continuing + discontinued
+    parent_before_preferred = consolidated - number(income["noncontrolling_income"], "noncontrolling_income")
+    preferred = income.get("preferred_dividends", 0)
+    if "preferred_dividends" in income and not income.get("preferred_dividend_basis"):
+        raise ValueError("preferred dividend numerator requires explicit basis")
+    preferred = number(preferred, "preferred dividends", minimum=0)
+    parent = parent_before_preferred - preferred
     adjusted = parent + _sum(income["parent_after_tax_adjustments"], "parent_after_tax_adjustments")
     basic = number(shares["basic_weighted"], "basic_weighted", minimum=1e-12)
     incremental = number(shares["incremental_dilutive"], "incremental_dilutive", minimum=0)
@@ -97,16 +111,58 @@ def earnings(segments, income, shares, required_segments):
     # Loss-period anti-dilution is not an estimate of profitable-period shares.
     gaap_denominator = basic if parent < 0 else basic + incremental
     adjusted_denominator = basic if adjusted < 0 else basic + incremental
+    gaap_numerator, adjusted_numerator = parent, adjusted
+    added_shares = addback = 0.0
+    conversion = shares.get("preferred_if_converted")
+    if conversion is not None:
+        if (set(conversion) != {"basis", "shares", "dividend_addback"}
+                or not conversion["basis"] or "preferred_dividends" not in income):
+            raise ValueError("preferred if-converted requires separate shares and dividend basis")
+        added_shares = number(conversion["shares"], "preferred conversion shares", minimum=1e-12)
+        addback = number(conversion["dividend_addback"], "preferred dividend addback", minimum=0)
+        if addback > preferred:
+            raise ValueError("conversion addback exceeds preferred dividends")
+        # This block is separate from ordinary incremental shares; include only
+        # when dilutive for the selected numerator (GAAP and adjusted separately).
+        if (parent + addback) / (gaap_denominator + added_shares) < parent / gaap_denominator:
+            gaap_numerator += addback
+            gaap_denominator += added_shares
+        if (adjusted + addback) / (adjusted_denominator + added_shares) < adjusted / adjusted_denominator:
+            adjusted_numerator += addback
+            adjusted_denominator += added_shares
+    eps_inputs = None
+    if "eps_securities" in shares:
+        if conversion is not None or income["parent_after_tax_adjustments"]:
+            raise ValueError("securities EPS cannot mix legacy conversion or adjusted earnings; use an explicitly separate basis")
+        if discontinued and income["noncontrolling_income"]:
+            raise ValueError("securities EPS needs a separate discontinued NCI allocation")
+        eps_inputs = {"income": parent, "control_income": parent - discontinued,
+                      "basic_common": basic, "incremental": incremental,
+                      "securities": deepcopy(shares["eps_securities"])}
+        security_eps = company_eps.calculate(**eps_inputs)
+        parent = adjusted = security_eps["basic_common_income"]
+        gaap_numerator = adjusted_numerator = security_eps["diluted_income"]
+        gaap_denominator = adjusted_denominator = security_eps["diluted_shares"]
+        basic = security_eps["basic_shares"]
     return {**totals, "pretax": pretax, "consolidated_income": consolidated,
+            "continuing_income": continuing, "after_tax_equity_income": equity_income,
+            "discontinued_income": discontinued,
+            "parent_income_before_preferred": parent_before_preferred,
+            "preferred_dividends": preferred,
             "tax_expense": number(income["tax_expense"], "tax_expense"),
             "interest_income": income.get("interest_income"),
             "interest_expense": income.get("interest_expense"),
             "adjusted_definition": income["adjusted_definition"],
             "parent_income": parent, "adjusted_parent_income": adjusted,
-            "gaap_eps": parent / gaap_denominator, "adjusted_eps": adjusted / adjusted_denominator,
+            "gaap_eps_income": gaap_numerator, "adjusted_eps_income": adjusted_numerator,
+            "preferred_conversion_shares": added_shares,
+            "preferred_conversion_dividend_addback": addback,
+            "gaap_eps": gaap_numerator / gaap_denominator, "adjusted_eps": adjusted_numerator / adjusted_denominator,
             "basic_weighted_shares": basic, "incremental_dilutive_shares": incremental,
             "gaap_diluted_shares": gaap_denominator, "adjusted_diluted_shares": adjusted_denominator,
-            "closing_shares": closing}
+            "closing_shares": closing,
+            "securities_eps_inputs": eps_inputs,
+            "securities_eps": security_eps if eps_inputs is not None else None}
 
 
 def income_cash_timing(result, cash):
@@ -253,12 +309,31 @@ def earnings_window(quarters, ids, basis):
     definitions = {q["adjusted_definition"] for q in selected}
     if basis == "adjusted" and len(definitions) != 1:
         raise ValueError("mixed adjusted earnings definitions")
+    securities_inputs = [q.get("securities_eps_inputs") for q in selected]
+    if any(x is not None for x in securities_inputs):
+        if any(x is None for x in securities_inputs):
+            raise ValueError("mixed securities EPS methods in earnings window")
+        annual = company_eps.calculate(**company_eps.aggregate(securities_inputs, days))
+        return {"start": str(start), "end": str(end), "earnings_basis": basis,
+                "parent_income": annual["basic_common_income"],
+                "adjusted_definition": next(iter(definitions)) if basis == "adjusted" else None,
+                "weighted_diluted_shares": annual["diluted_shares"],
+                "eps_income": annual["diluted_income"], "eps": annual["diluted_eps"],
+                "securities_eps": annual, "revenue": sum(q["revenue"] for q in selected),
+                "status": "research_projection", "validated": False}
     income = sum(q[income_key] for q in selected)
     denominator = sum((q["basic_weighted_shares"] + (q["incremental_dilutive_shares"] if income >= 0 else 0)) * d
                       for q, d in zip(selected, days)) / sum(days)
+    eps_income = income
+    conversion_shares = sum(q.get("preferred_conversion_shares", 0) * d
+                            for q, d in zip(selected, days)) / sum(days)
+    conversion_addback = sum(q.get("preferred_conversion_dividend_addback", 0) for q in selected)
+    if conversion_shares and (income + conversion_addback) / (denominator + conversion_shares) < income / denominator:
+        eps_income += conversion_addback
+        denominator += conversion_shares
     return {"start": str(start), "end": str(end), "earnings_basis": basis, "parent_income": income,
             "adjusted_definition": next(iter(definitions)) if basis == "adjusted" else None,
-            "weighted_diluted_shares": denominator, "eps": income / denominator,
+            "weighted_diluted_shares": denominator, "eps_income": eps_income, "eps": eps_income / denominator,
             "revenue": sum(q["revenue"] for q in selected), "status": "research_projection", "validated": False}
 
 
@@ -412,6 +487,13 @@ def build(package, *, as_of):
     _evidence(package, sources, cutoff)
     if cutoff >= stamp(package["valid_until"]):
         raise ValueError("company input expired")
+    operating_hold = package.get("operating_path_hold")
+    if operating_hold is not None:
+        if (not isinstance(operating_hold, dict)
+                or operating_hold.get("status") != "unestimable"
+                or not operating_hold.get("reason")):
+            raise ValueError("operating path hold requires unestimable status and reason")
+        _evidence(operating_hold, sources, cutoff)
     required = package["segment_names"]
     observed = package["observed"]
     _evidence(observed, sources, cutoff)
@@ -425,7 +507,9 @@ def build(package, *, as_of):
            "authority": "analysis_only", "input_hash": canonical_hash(package),
            "publication": {"status": "withheld", "reason": "company_model_not_yet_accepted"},
            "observed": audit, "opening_balance": opening, "scenarios": {}, "status": "research_only",
-           "accuracy": "not_established", "sources": sources}
+           "accuracy": "not_established", "sources": sources,
+           "estimability": {"operating_value": "unestimable" if operating_hold else "unknown",
+                            "reason": operating_hold["reason"] if operating_hold else None}}
     if audit["status"] != "reconciled" or opening["status"] != "reconciled":
         out["status"] = "input_mismatch"
     else:
@@ -444,8 +528,22 @@ def build(package, *, as_of):
             prior_end, rows = date.fromisoformat(scenario["opening_date"]), []
             for q in scenario["quarters"]:
                 start, end = date.fromisoformat(q["start"]), date.fromisoformat(q["end"])
-                if not 75 <= (end - start).days <= 105 or end <= cutoff.date():
+                bridge = q.get("unreported_bridge")
+                period_status = "future_projection"
+                if not 75 <= (end - start).days <= 105:
                     raise ValueError("explicit future quarter required")
+                if end <= cutoff.date():
+                    if rows or bridge is None or bridge.get("reported_results_available") is not False:
+                        raise ValueError("explicit future quarter or first ended-unreported bridge required")
+                    _evidence(bridge, sources, cutoff)
+                    if (cutoff >= stamp(bridge["expires_at"])
+                            or stamp(bridge["expires_at"]) - stamp(bridge["known_at"]) > timedelta(days=7)):
+                        raise ValueError("ended-unreported bridge freshness expired or exceeds seven days")
+                    if end <= date.fromisoformat(observed["end"]):
+                        raise ValueError("unreported bridge must follow last actual quarter")
+                    period_status = "ended_unreported_estimate"
+                elif bridge is not None:
+                    raise ValueError("unreported bridge only for an ended quarter")
                 if start != prior_end + timedelta(days=1):
                     raise ValueError("forecast quarters must be consecutive")
                 if any(r["id"] == q["id"] for r in rows):
@@ -460,21 +558,30 @@ def build(package, *, as_of):
                                    - number(q["shares"]["repurchased"], "repurchased", minimum=0))
                 if abs(expected_shares - e["closing_shares"]) > 1e-6:
                     raise ValueError("share roll-forward mismatch")
-                rows.append({"id": q["id"], "start": q["start"], "end": q["end"], **e, "cash": cash})
+                rows.append({"id": q["id"], "start": q["start"], "end": q["end"],
+                             "period_status": period_status, **e, "cash": cash})
                 liquid, debt, prior_end = cash["ending_liquidity"], cash["ending_debt"], end
             if not rows:
                 raise ValueError("forecast quarters required")
             gap = max(r["cash"]["funding_gap"] for r in rows)
-            operating = operating_value(scenario.get('operating_dcf'), rows, sources=sources, cutoff=cutoff)
+            operating = ({'status': 'unknown', 'reason': 'operating_path_unestimable: ' + operating_hold['reason']}
+                         if operating_hold else operating_value(scenario.get('operating_dcf'), rows, sources=sources, cutoff=cutoff))
             out["scenarios"][name] = {"basis": scenario["basis"], "quarters": rows,
                 "assumptions": scenario.get("assumptions", {}),
                 "earnings_windows": {label: earnings_window(rows, window["quarters"], window["basis"])
                                      for label, window in scenario.get("earnings_windows", {}).items()},
                 "maximum_funding_gap": gap,
                 "operating_value": operating,
-                "business_equity": business_equity(scenario.get("business_equity"), rows, sources=sources, cutoff=cutoff, funding_gap=gap, operating=operating),
+                "business_equity": ({'status': 'unknown', 'reason': 'operating_path_unestimable'}
+                                    if operating_hold else business_equity(scenario.get("business_equity"), rows, sources=sources, cutoff=cutoff, funding_gap=gap, operating=operating)),
                 "target_12m": independent_multiple(scenario.get("multiple"), rows, cutoff=cutoff, sources=sources, funding_gap=gap, ticker=package["ticker"]),
                 "intrinsic": owner_value(scenario.get("owner_dcf"), cutoff=cutoff, sources=sources, funding_gap=gap)}
+        base = out['scenarios'].get('base', {}).get('operating_value', {})
+        if not operating_hold and base.get('status') == 'research_sensitivity':
+            out['estimability'] = {'operating_value': 'conditional_research',
+                                   'reason': 'not_common_equity_or_current_share_price'}
+        elif not operating_hold:
+            out['estimability']['reason'] = base.get('reason', 'base_operating_path_missing')
     out["receipt_hash"] = canonical_hash(out)
     return out
 

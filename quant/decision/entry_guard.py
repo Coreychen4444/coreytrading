@@ -625,6 +625,7 @@ def dow_line(pr: dict) -> str:
 #   有效   = 存活 (无收盘 < 止跌低) ∧ 收盘 ≤ 止跌低 + max_dist_atr×ATR20 ∧ age < valid_days (10)
 #            (位置受控后年龄无效; ATR 是上限不是门槛, 防止离底部太远、进场距离不上不下 → TOO_FAR 只播不授权)
 #   域     = R0: 止跌低距 60 日高 ≥10% (不排 R2; 见 bottom_stage_backtest 探索定价)
+#            + 一段下跌: 顶到止跌低 ≥2×ATR20@止跌低 (setups.DECLINE_MIN_ATR)
 #   限价   = reversal.ladder: min(信号收盘, 最新收盘) / 止跌低之上 2/3 / 1/3 (不锚 z1, z1 是 gate 类的锚)
 #   止损   = 止跌低 (下影线低点) 收盘 ×1, 无 S1 (exit_guard 按卡 entry_class 分流; 正股 = 卡 stop)
 #   正股腿 = cap = min(组合层六臂 available_cap, gate1 风险预算 2.5% NAV ÷ 止损距) → share_ladder 整股三档
@@ -1475,6 +1476,11 @@ def write_option_plans(results: List[dict], today: str) -> int:
         rungs = pd_.get("rungs") or []
         tiers = [t for t in (size.get("tiers") or []) if t.get("shares")]
         if r.get("verdict") != "PLAN" or not chosen.get("code") or not tiers or not rungs:
+            continue
+        if size.get("exception"):
+            # 1 张就超保费上限 = 0 张 = 期权腿关 (position-tiers「1 张书面例外」未裁, 未裁前不存在)。
+            # 不守会照写 contracts 1 → today_group 进组 + moomoo 画 oz1 (一张保费远超 NAV 上限),
+            # 与文本「⛔ 不是可执行计划」两个答案; 抄底路径 (上方) 早已这样守。
             continue
         code = str(chosen["code"])
         code = code[3:] if code.startswith("US.") else code

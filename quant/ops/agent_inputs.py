@@ -302,6 +302,18 @@ def _valuation_view(value):
             "newest_included_period": _object(kept[-1]).get("period") if kept else None,
             "unknowns": (["Older quarterly rows are archived but omitted from this model view; do not infer full-cycle normalization from eight quarters."]
                          if len(quarters) > len(kept) else [])}
+    # Full company packets, especially long DCF periods, belong to the host
+    # calculator. The research worker receives its calculation receipt later;
+    # replaying the raw packet in its prompt burns tokens without adding facts.
+    view["company_models"] = {ticker: {
+        "ticker": ticker, "packet_view": "summary", "full_packet_hash": canonical_hash(packet),
+        "full_evidence_ref": "company_models", "known_at": packet.get("known_at"),
+        "valid_until": packet.get("valid_until"),
+        "observed_end": _object(packet.get("observed")).get("end"),
+        "segment_names": packet.get("segment_names"),
+        "scenario_ids": [s.get("id") for s in packet.get("scenarios") or [] if isinstance(s, dict)],
+        "operating_path_hold": _object(packet.get("operating_path_hold")).get("reason"),
+    } for ticker, packet in _object(value.get("company_models")).items() if isinstance(packet, dict)}
     return view
 
 

@@ -423,11 +423,28 @@ def test_macro_scenario_is_calculated_before_valuation_from_full_archive(routes)
         return record
     output = run_workflow("Review", capture, routes=routes, run_role_fn=worker)
     assert output["status"] == "completed"
-    assert observed["valuation"] == observed["risk"] == output["valuation_calculations"]
+    assert observed["valuation"] == observed["risk"]
+    assert observed["valuation"]["receipt_view"] == "worker_summary"
+    assert observed["valuation"]["full_receipt_hash"] == output["valuation_calculations"]["receipt_hash"]
     actual = observed["valuation"]["tickers"]["SYN"]
-    assert actual["macro_scenarios"] == expected["tickers"]["SYN"]["macro_scenarios"]
+    assert actual["macro_scenarios"][0]["fair_value"] == expected["tickers"]["SYN"]["macro_scenarios"][0]["fair_value"]
     assert actual["macro_scenarios"][0]["fair_value"] > actual["baseline"]["fair_value"]
     assert capture["data"] == package
+
+
+def test_valuation_worker_receipt_is_bounded_and_points_to_full_host_receipt():
+    import json
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import packet, STAMP
+    full = build({'selected_tickers': ['SYN'],
+                  'valuation': {'company_models': {'SYN': packet()}}}, as_of=STAMP)
+    view = _valuation_worker_receipt(full)
+    assert view['full_receipt_hash'] == full['receipt_hash']
+    assert view['tickers']['SYN']['company_research']['scenarios']['base']['quarter_count'] == 8
+    assert 'quarters' not in view['tickers']['SYN']['company_research']['scenarios']['base']
+    assert len(json.dumps(view)) < len(json.dumps(full)) / 4
+    assert len(full['tickers']['SYN']['company_research']['scenarios']['base']['quarters']) == 8
 
 
 def test_invalid_valuation_market_input_does_not_abort_other_research(routes):

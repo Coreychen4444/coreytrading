@@ -107,6 +107,47 @@ def test_host_links_earnings_and_equity_bridge_without_duplicate_segment_value()
     with pytest.raises(ValueError,match='differs from company'):cm.build(p,as_of=STAMP)
 
 
+def test_unestimable_company_does_not_hide_another_company_operating_value():
+    from quant.report.valuation_report import coverage_summary, fyi_map
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import packet, STAMP
+    ready = packet()
+    scenario = ready['scenarios'][0]
+    dcf = case()
+    next_q = scenario['quarters'][4]
+    dcf.update(known_at=scenario['known_at'], basis=scenario['basis'],
+               source_refs=scenario['source_refs'], date=scenario['quarters'][3]['end'])
+    dcf['periods'][0].update(start=next_q['start'], end=next_q['end'], operating_profit=13)
+    dcf['terminal']['date'] = next_q['end']
+    scenario['operating_dcf'] = dcf
+    held = deepcopy(ready)
+    held['ticker'] = 'HELD'
+    held['operating_path_hold'] = {'status': 'unestimable', 'reason': 'cash and capital path conflict',
+                                   'known_at': scenario['known_at'], 'basis': 'synthetic review',
+                                   'source_refs': scenario['source_refs']}
+    expired = deepcopy(ready)
+    expired['ticker'] = 'OLD'
+    expired['valid_until'] = STAMP
+    receipt = build({'selected_tickers': ['SYN', 'HELD', 'OLD'],
+                     'valuation': {'company_models': {'SYN': ready, 'HELD': held, 'OLD': expired}}},
+                    as_of=STAMP)
+    rows = receipt['tickers']
+    assert rows['SYN']['company_research']['scenarios']['base']['operating_value']['status'] == 'research_sensitivity'
+    assert rows['HELD']['company_research']['scenarios']['base']['operating_value']['status'] == 'unknown'
+    assert rows['HELD']['company_research']['scenarios']['base']['business_equity']['status'] == 'unknown'
+    assert rows['OLD']['status'] == 'unknown' and 'company input expired' in rows['OLD']['missing']
+    assert [rows[t]['estimability']['operating_value'] for t in ('SYN', 'HELD', 'OLD')] == [
+        'conditional_research', 'unestimable', 'input_expired']
+    assert coverage_summary(receipt) == {'total': 3, 'publishable': 0, 'company_research': 2,
+                                          'computed': 0, 'conditional_operating': 1,
+                                          'operating_path_unestimable': 1, 'expired_inputs': 1,
+                                          'unestimable': 2}
+    lines = fyi_map(receipt)
+    assert '基准条件经营价值 $' in lines['SYN'] and '不是普通股每股价值' in lines['SYN']
+    assert '长期经营价值不可估' in lines['HELD'] and '基准条件经营价值 $' not in lines['HELD']
+    assert '本轮估值未知' in lines['OLD'] and '基准条件经营价值 $' not in lines['OLD']
+
+
 def lease_case():
     p = case()
     p['periods'][0]['lease_details'] = {

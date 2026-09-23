@@ -48,7 +48,9 @@ def test_independent_daily_sequence_and_archived_receipt(setup):
     out = daily.run_daily(**kwargs)
     assert events == ["refresh", "capture", "macro", "valuation"]
     assert out["status"] == "completed"
-    assert out["coverage"] == {"total": 1, "computed": 1, "publishable": 0, "company_research": 0}
+    assert out["coverage"] == {"total": 1, "computed": 1, "publishable": 0,
+                               "company_research": 0, "conditional_operating": 0,
+                               "operating_path_unestimable": 0, "expired_inputs": 0, "unestimable": 0}
     assert out["publication"]["status"] == "withheld"
     assert read_json(out["receipt"])["receipt_hash"] == out["receipt_hash"]
     assert read_json(out["workflow"])["risk_snapshot"] is None
@@ -110,6 +112,7 @@ def test_preview_has_no_writes_refresh_or_models(setup):
 
 
 def test_company_pilot_reaches_daily_archive_without_legacy_price(setup):
+    from quant.valuation.company_model import VERSION
     from tests.valuation.test_company_model import packet, STAMP as COMPANY_STAMP
     kwargs, events = setup
     now = datetime.fromisoformat(COMPANY_STAMP)
@@ -118,9 +121,11 @@ def test_company_pilot_reaches_daily_archive_without_legacy_price(setup):
     kwargs['capture_fn'] = lambda **kw: {'snapshot': frozen, 'snapshots': {r: frozen for r in ('macro', 'technical', 'risk', 'valuation')}, 'summary': {}}
     out = daily.run_daily(**kwargs)
     assert out['status'] == 'completed', out
-    assert out['coverage'] == {'total': 1, 'computed': 0, 'publishable': 0, 'company_research': 1}
+    assert out['coverage'] == {'total': 1, 'computed': 0, 'publishable': 0,
+                               'company_research': 1, 'conditional_operating': 0,
+                               'operating_path_unestimable': 0, 'expired_inputs': 0, 'unestimable': 0}
     assert read_json(out['receipt'])['tickers']['SYN']['company_research']['observed']['status'] == 'reconciled'
-    assert 'company-v5.2-research' in Path(out['report']).read_text()
+    assert VERSION in Path(out['report']).read_text()
 
 
 def test_day_is_singapore_and_no_market_holiday_gate(setup):

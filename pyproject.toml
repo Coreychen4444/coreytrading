@@ -27,11 +27,11 @@ dependencies = [
 
 [project.optional-dependencies]
 broker = [
-  "moomoo-api==10.9.6908",
+  "moomoo-api==10.10.7008",
   "protobuf==3.20.3",
 ]
 dev = [
-  "moomoo-api==10.9.6908",
+  "moomoo-api==10.10.7008",
   "protobuf==3.20.3",
   "pytest>=8.0",
 ]

@@ -250,7 +250,8 @@ def test_z1_budget_is_the_actual_cap_not_the_card_percentage():
 def test_per_ticker_cap_keeps_priority_kinds():
     wl = {"tickers": {"XX": {"agent": {"zones": {
         "valid_until": "2099-01-01",
-        "reclaim_gates": [{"level": float(i)} for i in range(1, 8)],   # 7 道 gate
+        "reclaim_gates": [{"level": float(i)}                          # 名额 +1 道 gate
+                          for i in range(1, prs.MAX_PER_TICKER + 2)],
         "accumulation_zone_1": [0.5, 0.9]}}}}}
     lines, notes = prs.desired_lines({"tickers": {}}, wl, TODAY)
     assert len(lines) == prs.MAX_PER_TICKER
@@ -395,7 +396,8 @@ def test_pinned_gates_survive_the_per_ticker_cap():
     """上限只裁可裁的线 —— pin 不占名额, 也不被丢。"""
     wl = {"tickers": {"XX": {"agent": {
         "zones": {"valid_until": "2099-01-01",
-                  "reclaim_gates": [{"level": float(i)} for i in range(1, 9)],
+                  "reclaim_gates": [{"level": float(i)}
+                                    for i in range(1, prs.MAX_PER_TICKER + 3)],
                   "accumulation_zone_1": [0.5, 0.9]},
         "last_regime": {"repair_gate": {"level": 100.0}},
         "next_regime": {"entry_gate": {"level": 200.0}}}}}}
@@ -403,7 +405,8 @@ def test_pinned_gates_survive_the_per_ticker_cap():
     notes_got = [d["note"] for d in lines]
     assert "gate:cur" in notes_got and "gate:next" in notes_got
     assert sum(1 for n in notes_got if not n.startswith("gate:")) == prs.MAX_PER_TICKER
-    assert len(lines) == prs.MAX_PER_TICKER + 2 <= 10      # moomoo 硬上限内, 留手动余量
+    # moomoo 硬上限 = 每票每类型 20 (实测); 线会翻向 ⇒ 按全挤同侧算, 且给手动线留余量
+    assert len(lines) == prs.MAX_PER_TICKER + 2 < prs.SERVER_MAX_PER_TYPE
     assert any("上限" in n for n in notes)
 
 
@@ -606,13 +609,15 @@ def test_held_today_member_gets_z1_line_with_budget():
     assert z1[0]["note"] == "z1:2%:450", "持仓成员的 z1 必须带预算, 不是裸线"
 
 
-def test_held_without_grant_gets_no_z1_line_not_even_bare():
-    """无授权的持仓**不画裸 z1**(与 watchlist 的裸观察线有意不同):
-    cap 0 时回踩不是任何动作的触发点, 响铃只会邀请未授权加仓 (8/3 夜盘的形状)。"""
+def test_held_without_grant_gets_bare_z1_line():
+    """持仓与 watchlist 同义 (画线尽可能完整, 取代旧的「无授权持仓不画裸 z1」):
+    裸 "z1" = 无授权观察线 (不是动作触发点), 带预算 = 有授权。
+    授权判据不动 (预算仍只给 Today 成员), 变的只是看得见。"""
     positions, _ = _held_with_z1(cap=False)
     lines, _ = prs.desired_lines(positions, {"tickers": {}}, "2026-08-09",
                                  budgets={})
-    assert not [d for d in lines if d["kind"] == "z1"]
+    z1 = [d for d in lines if d["kind"] == "z1"]
+    assert [(d["value"], d["note"]) for d in z1] == [(124.8, "z1")], "裸线, 不带预算 = 无授权"
     assert [d for d in lines if d["kind"] == "stop"], "下行保护仍由 stop 线负责"
 
 
@@ -800,3 +805,234 @@ def test_bottom_first_rung_line_is_owned_so_reanchor_replaces_it():
     # 计划整张消失 (信号过期 / 票不再入选) → 残线同样收走
     adds, dels, _, _ = prs.plan_ops([], rows)
     assert not adds and [r["value"] for r in dels] == [357.89]
+
+
+# ── 远端 gate (把阶梯顶之后的几条 gate 也画出来) ──────────────
+
+def _fg_card(preview=None):
+    nr = {"entry_gate": {"level": 200.0}}
+    if preview is not None:
+        nr["next_gate_preview"] = preview
+    return {"tickers": {"XX": {"moomoo_listed": True, "agent": {
+        "zones": {"valid_until": "2099-01-01"}, "next_regime": nr}}}}
+
+
+FAR = [{"n": 3, "level": 230.0, "touches": 4, "kinds": "high+low", "rejections": 14, "source": "cluster"},
+       {"n": 4, "level": 260.0, "touches": 1, "kinds": "high", "rejections": 1, "source": "window_high"}]
+
+
+def test_future_gates_number_on_from_the_card_ladder():
+    """卡上的 preview = 裸 "gate:+2"; 机械候选接着往上数, 备注带收据 (= 来源编码)。"""
+    lines, _ = prs.desired_lines({"tickers": {}}, _fg_card({"level": 215.0}), TODAY,
+                                 far_gates={"XX": FAR})
+    got = {d["note"]: (d["value"], d["type"], d["kind"], bool(d.get("pin"))) for d in lines}
+    assert got["gate:next"] == (200.0, "PRICE_UP", "gate", True)
+    assert got["gate:+2"] == (215.0, "PRICE_UP", "fgate", False)
+    assert got["gate:+3 簇×4HL 拒14"] == (230.0, "PRICE_UP", "fgate", False)
+    assert got["gate:+4 窗高"] == (260.0, "PRICE_UP", "fgate", False)
+    assert all(prs._owned_note(n) for n in got)                  # 下一轮对账认得出是自己的
+    assert all(prs._note_width(n) <= prs.NOTE_WIDTH_MAX for n in got)
+
+
+def test_stale_preview_is_not_drawn_and_mechanical_takes_plus_two():
+    """`stale: true` = 降级时搬运的旧上行阶梯 (「价位已失效待重画」) —— 不画成线。"""
+    lines, _ = prs.desired_lines({"tickers": {}}, _fg_card({"level": 215.0, "stale": True}),
+                                 TODAY, far_gates={"XX": [{**FAR[0], "n": 2}]})
+    notes = {d["note"]: d["value"] for d in lines if d["kind"] == "fgate"}
+    assert notes == {"gate:+2 簇×4HL 拒14": 230.0}
+
+
+def test_far_gates_default_to_card_only():
+    lines, _ = prs.desired_lines({"tickers": {}}, _fg_card({"level": 215.0}), TODAY)
+    assert [d["note"] for d in lines if d["kind"] == "fgate"] == ["gate:+2"]
+
+
+def test_future_gates_are_cut_first_and_farthest_first():
+    """优先级垫底 + 非 pin: 名额不够时先裁它, 由远及近; cur/next 两条轴不受影响。"""
+    wl = _fg_card({"level": 215.0})
+    wl["tickers"]["XX"]["agent"]["zones"]["reclaim_gates"] = [
+        {"level": float(i)} for i in range(1, prs.MAX_PER_TICKER)]          # 占掉 MAX−1 个名额
+    lines, notes = prs.desired_lines({"tickers": {}}, wl, TODAY, far_gates={"XX": FAR})
+    fg = [d["note"] for d in lines if d["kind"] == "fgate"]
+    assert fg == ["gate:+2"]                                                # 只剩一个名额 → 最近那条
+    assert "gate:next" in [d["note"] for d in lines]
+    assert sum("超每票上限" in n for n in notes) == 2
+
+
+def test_future_gate_flips_instead_of_vanishing():
+    lines, _ = prs.desired_lines({"tickers": {}}, _fg_card({"level": 215.0}), TODAY,
+                                 far_gates={"XX": FAR})
+    kept, _ = prs.orient_sides(lines, {"US.XX": 240.0})
+    sides = {d["note"]: d["type"] for d in kept if d["kind"] == "fgate"}
+    assert sides == {"gate:+2": "PRICE_DOWN", "gate:+3 簇×4HL 拒14": "PRICE_DOWN",
+                     "gate:+4 窗高": "PRICE_UP"}
+
+
+def test_future_gate_map_reads_the_live_card_and_the_card_ladder_top(monkeypatch):
+    """卡源判别式与 z1_budgets 同拍 (live → positions 卡); 锚 = 未 stale 的 preview, 缺则 next。"""
+    pos = {"tickers": {"AA": {"broker": {"qty": 3}, "agent": {
+        "next_regime": {"entry_gate": {"level": 50.0}, "next_gate_preview": {"level": 60.0}}}}}}
+    wl = {"tickers": {
+        "AA": {"agent": {"next_regime": {"entry_gate": {"level": 999.0}}}},   # 被 live 卡遮住
+        "BB": {"agent": {"next_regime": {"entry_gate": {"level": 70.0},
+                                         "next_gate_preview": {"level": 80.0, "stale": True}}}},
+        "CC": {"agent": {"zones": {}}}}}                                      # 没有轴 → 不出
+    seen = {}
+
+    def fake_candidates(bars, above, n):
+        seen[bars] = (above, n)
+        return [{"level": above + 1, "touches": 2, "kinds": "high", "rejections": 0,
+                 "source": "cluster"}]
+
+    monkeypatch.setattr(prs.future_gates, "candidates", fake_candidates)
+    out = prs.future_gate_map(pos, wl, bars_of=lambda t: t)
+    depth = prs.future_gates.FUTURE_GATES_MAX
+    assert seen == {"AA": (60.0, depth), "BB": (70.0, depth)}
+    assert {t: [(c["level"], c["n"]) for c in v] for t, v in out.items()} == {
+        "AA": [(61.0, 3)],          # 未 stale 的 preview 占了 +2 → 机械从 +3 起
+        "BB": [(71.0, 2)]}          # preview stale → 机械接 +2
+
+
+def test_write_throttle_keeps_every_window_under_the_server_rate_limit():
+    """一次上百条的迁移会撞「每 30 秒 60 次」, 窗口满之后其余 ADD 全拒 ——
+    换血是先删后加, 被删的旧线 (含 stop) 在服务端消失。旧节流「每 10 次停 0.6s」只在差异 <60 时碰巧够用。"""
+    t, slept = [0.0], []
+
+    def sleep(s):
+        slept.append(s)
+        t[0] += s
+
+    cap = prs.SERVER_SET_MAX_PER_WINDOW - 5
+    th = prs._Throttle(cap, prs.SERVER_SET_WINDOW_S, clock=lambda: t[0], sleep=sleep)
+    stamps = []
+    for _ in range(118):                        # 首轮实际规模
+        th.wait()
+        stamps.append(t[0])
+        t[0] += 0.05                            # 一次 API 往返
+    worst = max(sum(1 for s in stamps if a <= s < a + prs.SERVER_SET_WINDOW_S) for a in stamps)
+    assert worst <= cap < prs.SERVER_SET_MAX_PER_WINDOW == 60
+    assert len(slept) == 2                      # 118 = 55 + 55 + 8: 只在撞顶时睡
+    t[0], slept[:] = 1000.0, []
+    small = prs._Throttle(cap, prs.SERVER_SET_WINDOW_S, clock=lambda: t[0], sleep=sleep)
+    for _ in range(10):                         # 平时每轮 5–10 条: 一次都不等
+        small.wait()
+    assert slept == []
+
+
+def test_server_limit_leaves_room_for_manual_lines():
+    """实测: 每票每类型 20 条。线会翻向 ⇒ 最坏全挤同侧。
+    pin 至多 4 条/票 (gate:cur / gate:next / ⭐待破 / ⭐已破) 不占名额。"""
+    pins = 4
+    assert prs.MAX_PER_TICKER + pins < prs.SERVER_MAX_PER_TYPE == 20
+    assert 1 + prs.future_gates.FUTURE_GATES_MAX < prs.MAX_PER_TICKER   # 远端 gate 吃不完可裁名额
+
+
+# ── 画线补全 + ⭐ 箱顶 / 止跌低 (无论是否有持仓, 所有线, 并标注极其关键的位置) ──
+
+_FULL_ZONES = {"valid_until": "2099-01-01", "stop_level": 90.0, "trim_zone": [130.0, 135.0],
+               "no_chase_above": 112.0, "accumulation_zone_1": [108.0, 110.0],
+               "accumulation_zone_2": [100.0, 108.0], "reclaim_gates": [{"level": 115.0}]}
+
+
+def test_watchlist_card_now_draws_stop_trim_and_z2():
+    """候选卡此前只有 z1 / nochase / gate —— stop 与 trim 只在持仓画; z2 两桶都没有。"""
+    wl = {"tickers": {"XX": {"moomoo_listed": True, "agent": {"zones": dict(_FULL_ZONES)}}}}
+    lines, _ = prs.desired_lines({"tickers": {}}, wl, TODAY)
+    got = {(d["kind"], d["value"], d["type"], d["note"]) for d in lines}
+    assert ("stop", 90.0, "PRICE_DOWN", "stop:card") in got      # 卡片 regime 地板, 不是持仓止损
+    assert ("trim", 130.0, "PRICE_UP", "trim") in got
+    assert ("z2", 100.0, "PRICE_DOWN", "z2") in got              # 下沿 (上沿 = z1 下沿, 不重复)
+    assert ("z1", 110.0, "PRICE_DOWN", "z1") in got and ("gate", 115.0, "PRICE_UP", "gate") in got
+
+
+def test_held_card_now_draws_z2_and_reclaim_rungs():
+    pos = {"tickers": {"XX": {"broker": {"qty": 3}, "agent": {"zones": dict(_FULL_ZONES)}}}}
+    lines, _ = prs.desired_lines(pos, {"tickers": {}}, TODAY, budgets={})
+    got = {(d["kind"], d["value"], d["note"]) for d in lines}
+    assert {("z2", 100.0, "z2"), ("gate", 115.0, "gate"), ("z1", 110.0, "z1"),
+            ("stop", 90.0, "stop:card"), ("trim", 130.0, "trim")} <= got
+
+
+_TOP = {"level": 120.3, "lo": 119.8, "touches": 3, "kinds": "high", "tests": 3,
+        "test_dates": ["2026-07-01", "2026-08-01", "2026-09-01"], "bucket": 0.5}
+_BRK = {"level": 104.4, "lo": 103.9, "touches": 2, "kinds": "high", "tests": 2, "date": "2026-09-18",
+        "intact": True, "held": True, "bucket": 0.5}
+
+
+def _key_card(next_gate=None):
+    ag = {"zones": dict(_FULL_ZONES)}
+    if next_gate:
+        ag["next_regime"] = {"entry_gate": {"level": next_gate}}
+    return {"tickers": {"XX": {"moomoo_listed": True, "agent": ag}}}
+
+
+def test_key_line_snaps_onto_the_card_line_on_the_same_wall_and_is_pinned():
+    """箱带 (下沿 − 桶宽 … 上沿 + 桶宽) 里已有卡片线 → 吸附到它的价位, 同价并入后 ⭐ 当 head;
+    同一堵墙不画两遍 (与 future_gates 同一去重口径)。"""
+    lines, _ = prs.desired_lines({"tickers": {}}, _key_card(next_gate=120.0), TODAY,
+                                 key_map={"XX": {"top": _TOP, "brk": None, "stoplow": None}})
+    at = [d for d in lines if d["value"] == 120.0]
+    assert len(at) == 1 and at[0]["note"] == "⭐箱顶 测3/gate:next" and at[0]["pin"]
+    assert not [d for d in lines if d["value"] == 120.3], "簇上沿没有第二条线"
+
+
+def test_key_line_standalone_when_no_card_line_is_near():
+    lines, _ = prs.desired_lines({"tickers": {}}, _key_card(), TODAY,
+                                 key_map={"XX": {"top": _TOP, "brk": {**_BRK, "intact": False},
+                                                 "stoplow": None}})
+    keys = {d["note"]: (d["value"], d["kind"], bool(d.get("pin"))) for d in lines
+            if d["note"].startswith(prs.KEY_NOTE_PREFIX)}
+    assert keys == {"⭐箱顶 测3": (120.3, "key", True), "⭐假突破 09-18": (104.4, "key", True)}
+
+
+def test_key_line_merges_with_a_down_line_after_orientation():
+    """⭐已破 (线在现价下方) 吸附到 z1 上沿: 定向前 ⭐ 是 PRICE_UP、z1 是 PRICE_DOWN,
+    翻向后同价同向 → 并成一条, ⭐ 在前。"""
+    lines, _ = prs.desired_lines({"tickers": {}}, _key_card(), TODAY,
+                                 key_map={"XX": {"top": None, "stoplow": None,
+                                                 "brk": {**_BRK, "level": 110.3, "lo": 109.9}}})
+    lines, _ = prs.orient_sides(lines, {"US.XX": 125.0})
+    lines, _ = prs.collapse_same_price(lines)
+    at = [d for d in lines if d["value"] == 110.0]
+    assert [(d["type"], d["note"]) for d in at] == [("PRICE_DOWN", "⭐已破 09-18/z1")]
+
+
+def test_mechanical_lines_survive_an_expired_card_but_not_delisting():
+    """⭐ / 止跌低 来自 K 线不来自卡: 卡过期照画 (卡片线仍跳过并报出); 移出自选 = 不画。"""
+    wl = {"tickers": {
+        "OLD": {"agent": {"zones": {**_FULL_ZONES, "valid_until": "2026-01-01"}}},
+        "GONE": {"moomoo_listed": False, "agent": {"zones": dict(_FULL_ZONES)}}}}
+    km = {t: {"top": _TOP, "brk": None, "stoplow": {"level": 95.0, "signal_date": "2026-09-17"}}
+          for t in ("OLD", "GONE")}
+    lines, notes = prs.desired_lines({"tickers": {}}, wl, TODAY, key_map=km)
+    assert {(d["ticker"], d["note"]) for d in lines} == {("OLD", "⭐箱顶 测3"), ("OLD", "止跌低 ✓09-17")}
+    assert any("OLD" in n and "过期" in n for n in notes)
+
+
+def test_new_notes_are_owned_and_fit_the_server_width():
+    for n in ("z2", "⭐箱顶 测3", "⭐已破 09-22", "⭐假突破 09-09", "止跌低 ✓09-17",
+              "⭐已破 09-22/gate:cur/nochase/z1"):                 # 最宽的现实并入形态
+        assert prs._owned_note(n), n
+        assert prs._note_width(n) <= prs.NOTE_WIDTH_MAX, n
+    for manual in ("⭐", "止跌", "关键位", "z2手动"):
+        assert prs._owned_note(manual) == manual.startswith(("⭐", "止跌低")), manual
+    # 并不进 40 宽 → 回退让位: 丢的是被并入那段, ⭐ 恒为 head (优先级最高) 不会被挤掉
+    win = {"note": "⭐已破 09-22/gate:cur/nochase", "kind": "key"}
+    assert prs._merged_note(win, {"note": "z1:11%:2.2k", "kind": "z1"}) is None
+    assert prs.PRIORITY["key"] < min(v for k, v in prs.PRIORITY.items() if k != "key")
+
+
+def test_key_level_map_eligibility_and_formed_only_stoplow(monkeypatch):
+    """资格与 future_gate_map 同拍 (live → positions; 自选内的候选; moomoo_listed=False 不画);
+    止跌低只在 ✓止跌 (formed) 时画 —— ⏳ 的 L 每天在动, 画了只会每轮换血。"""
+    pos = {"tickers": {"AA": {"broker": {"qty": 1}}, "AA270115C100000": {"broker": {"qty": 1}}}}
+    wl = {"tickers": {"BB": {}, "CC": {"moomoo_listed": False}, "DD": {}}}
+    stage = {"AA": {"stage": "formed", "low": 95.0, "signal_date": "2026-09-17"},
+             "BB": {"stage": "watch", "low": 50.0}, "DD": {"stage": "none"}}
+    monkeypatch.setattr(prs.key_levels, "box_top", lambda bars: {"level": 1.0} if bars == "BB" else None)
+    monkeypatch.setattr(prs.key_levels, "last_breakout", lambda bars: None)
+    monkeypatch.setattr(prs.setups, "bottom_setup", lambda bars: stage[bars])
+    out = prs.key_level_map(pos, wl, bars_of=lambda t: t)
+    assert out == {"AA": {"top": None, "brk": None,
+                          "stoplow": {"level": 95.0, "signal_date": "2026-09-17"}},
+                   "BB": {"top": {"level": 1.0}, "brk": None, "stoplow": None}}

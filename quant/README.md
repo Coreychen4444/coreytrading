@@ -24,7 +24,7 @@
    │           nav_report（NAV 区间变动剔除外部现金流，周复盘 NAV 变动的唯一口径）
    │           valuation_report（冻结估值收据 → 当轮 FYI，缺口不回退到旧价）
    ├── journal 账本写入层（prose-only 不算落库）
-   │           annotate_event · decision_log
+   │           annotate_event · decision_log · market_regime_log（大盘状态卡每日快照账本 + chart-read 首段，判读层）
    ├── valuation 估值层（**判断层零授权效力**：读三表/快照/K 线/宏观快照，写自己的账本）
    │           fundamentals（OpenD 三表+快照+PE 分位+目标价 → market/fundamentals 缓存）
    │           archetypes（商业模式原型缺省 + 人工区 inputs.json 校验）
@@ -34,6 +34,7 @@
    │           assessment（冻结输入的每日计算收据）· scenarios（宏观/公司情景传导）· response（短期事件样本与滚动检验）
    │           evidence（财报补充证据、前瞻时效和利息传导）· event_data（按真实交易日构建消息后日线样本）
    │           universe（估值层默认范围 = 持仓 ∪ 候选，只有名字，零授权效力）
+   │           company_model / company_eps（公司级模型与显式证券级 EPS 算术，无现金/债务换算）
    ├── decision 决策层（机械闸门）
    │           entry_guard · exit_guard · regime_transition · regime_score
    │           structure_drift · level_map · catalyst_check · tape_check
@@ -48,6 +49,7 @@
    ├── data    把外部世界读进本地
    │           market_data · macro_fetch · earnings_calendar
    │           sec_facts（显式 CIK 的 SEC 财务事实读取和披露日期筛选，不推断字段映射）
+   │           sec_inline（缓存财报离线数字抽取，精确期间/实体/单位/分部，冲突或不支持格式保留未知）
    │           kline_cache · iv_logger · nav_snapshot · skhy_premium
    │           cash_flow_sync（券商资金流水 → 外部现金流账本，只收出入金）
    └── core    纯共享库 · 单一真源 · 无副作用
@@ -55,7 +57,10 @@
                sizing · structure · drift · technical · holdings
                episodes · book · earnings · sectors · patterns（形态判别式，Lo 2000 工序）
                dow（短期道氏四步状态机，提供趋势终止观察与结构排序）
+               market_regime（大盘状态卡：ER20 自身分位档 × 短期道氏 → 单边上行/单边下行/震荡/转换中 + 转移线 + 历史频率；判读层零授权）
                reversal（抄底入场类判别式：信号 / 止跌低 / 域 / 有效期；授权归 entry_guard）· setups（两种模式判读：抄底 = 空头衰竭的价格行为 / 趋势确认 = gate 接近度；零授权）
+               future_gates（卡片阶梯顶之上的远端 gate 候选：pivot 簇上沿 + 窗口最高价，与 bottom_evidence 同一把尺；零授权；两个消费者读同一个 `for_card`：price_reminder_sync 的 `gate:+N` 线 / gate_ladder_report 的远端行）
+               key_levels（⭐箱顶 = 近 20 根最高价所在的簇 × 近 60 根被从下方测 ≥2 次、⭐突破 ×2 收盘、箱体位置判读；同一把簇尺，窗口全是既有常量别名；零授权；消费者 price_reminder_sync 的 ⭐ 线）
                market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
                agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· valuation_contracts（情景单位、期限与传导约束）· motto（可选尾行，未配置即空）
                macro_analysis / macro_evidence（宏观研究模块 schema 与逐项证据收据）· macro_playbook（事件剧本形状，零授权）· interpreter（生产入口解释器守卫）

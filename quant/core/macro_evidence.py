@@ -73,7 +73,7 @@ _STRUCTURE_GAPS = {
     "breadth": "No dated constituent universe or member-level participation denominator.",
     "liquidity": "Daily funding averages are partial; no depth, impact, margin or cross-currency basis.",
     "price_structure": "Market sample changes are partial; individual technical levels belong to the technical role.",
-    "seasonality": "No predefined seasonal sample, roll calendar or out-of-sample estimate in this feed.",
+    "seasonality": "Dated calendar context is retained separately when present; no seasonal effect estimate or observed rebalance flow in this quote feed.",
 }
 
 
@@ -95,6 +95,12 @@ def build_market_context(captures, *, as_of):
         else:
             eligible.append((at, item["ref"], document))
     eligible.sort(key=lambda item: (item[0], item[1]))
+    calendars = [
+        {"source_ref": ref, "captured_at": at.isoformat(),
+         "calendar": deepcopy(document["market_structure_calendar"])}
+        for at, ref, document in eligible
+        if isinstance(document.get("market_structure_calendar"), dict)
+    ]
     histories = {}
     for captured, source_ref, document in eligible:
         metrics = document.get("metrics")
@@ -192,6 +198,7 @@ def build_market_context(captures, *, as_of):
     return {
         "schema_version": "1.0.0", "as_of": as_of, "observations": observations, "sample_changes": changes,
         "aligned_rates": _aligned_rates(observations),
+        "market_structure_calendars": calendars,
         "coverage": coverage, "quote_feed_structure_gaps": dict(_STRUCTURE_GAPS), "excluded_captures": excluded,
         "authority": "analysis_only", "independent_evidence": False,
         "limitations": ["Coverage describes only the quote feed; frozen narrative reports may contain additional dated evidence.",

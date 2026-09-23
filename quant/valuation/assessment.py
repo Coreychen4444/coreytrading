@@ -242,6 +242,11 @@ def build(data: dict, *, as_of: str, macro_scenarios=None, evidence_refs=None) -
                 if research["status"] == "input_mismatch":
                     result.update(status="unknown")
                     result["missing"].append("company_disclosure_reconciliation_failed")
+                operating = research.get("estimability") or {}
+                result["estimability"] = {"operating_value": (
+                    operating.get("operating_value", "unknown") if research["status"] != "input_mismatch" else "unknown"),
+                    "reason": operating.get("reason"),
+                    "fair_value_per_share": "withheld", "market_target_12m": "withheld"}
                 continue
             if rf["rf"] is None:
                 raise ValueError(rf["basis"])
@@ -301,6 +306,12 @@ def build(data: dict, *, as_of: str, macro_scenarios=None, evidence_refs=None) -
                     result["macro_scenarios"].append({"status": "unknown", "scenario_id": scenario.get("id"), "reason": str(exc)})
         except (ValueError, KeyError, TypeError, OverflowError) as exc:
             result["missing"].append(str(exc))
+        reason = "company input expired" if "company input expired" in result["missing"] else (
+            result["missing"][0] if result["missing"] else "company_model_not_available")
+        result["estimability"] = {"operating_value": "input_expired" if reason == "company input expired"
+                                  else "legacy_diagnostic" if result["status"] == "computed" else "unknown",
+                                  "reason": reason, "fair_value_per_share": "withheld",
+                                  "market_target_12m": "withheld"}
     output["receipt_hash"] = canonical_hash(output)
     return output
 

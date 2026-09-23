@@ -21,7 +21,7 @@ from quant.ops.agent_health import acquire_job, owns_job, release_job
 from quant.ops.agent_inputs import capture_inputs
 from quant.ops.agent_runtime import load_routes, run_role
 from quant.ops.agent_workflow import run_workflow
-from quant.report.valuation_report import fyi_map
+from quant.report.valuation_report import coverage_summary, fyi_map
 from quant.valuation.assessment import build
 from quant.valuation.model import publication_policy
 from quant.valuation.universe import coverage_tickers
@@ -118,20 +118,20 @@ def run_daily(*, preview=False, retry=False, root=None, control_dir=None,
         if not owns_job(control, lease["lease_id"]):
             raise ValueError("valuation_lease_lost")
         atomic_write_json(directory / "valuation.json", receipt)
+        coverage = coverage_summary(receipt)
         report = (f"每日估值 · {day} SGT\n估值时点：{receipt['as_of']}\n"
-                  "发布状态：withheld；模型待重建，公允价值及12个月目标暂不发布。\n"
+                  f"逐票状态：条件经营价值可审阅 {coverage['conditional_operating']}；"
+                  f"旧经营路径不可估 {coverage['operating_path_unestimable']}；"
+                  f"输入过期 {coverage['expired_inputs']}；"
+                  f"获准发布每股价格 {coverage['publishable']}。\n"
+                  "每股公允价值及12个月目标暂不发布；各股研究缺口见下。\n"
                   "研究判断，零授权效力。条件情景与短期研究估计不代表已验证预测。\n\n"
                   + "\n\n".join(t + "\n" + line for t, line in lines.items()))
         (directory / "report.md").write_text(report + "\n")
         job.update(status=workflow["status"], stage="finished", total_calls=workflow["total_calls"],
                    report=str(directory / "report.md"), receipt=str(directory / "valuation.json"),
                    workflow=str(directory / "workflow.json"), receipt_hash=receipt["receipt_hash"],
-                   publication=publication_policy(),
-                   coverage={"total": len(receipt.get("tickers", {})), "publishable": 0,
-                             "company_research": sum(r["status"] == "company_research"
-                                                     for r in receipt.get("tickers", {}).values()),
-                             "computed": sum(r["status"] == "computed"
-                                             for r in receipt.get("tickers", {}).values())})
+                   publication=publication_policy(), coverage=coverage)
         if job["status"] == "completed" and job["refresh"].get("errors"):
             job["status"] = "partial"
         return job

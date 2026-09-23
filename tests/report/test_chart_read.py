@@ -158,6 +158,7 @@ def _bottom(stage="formed", **over):
             "higher_low_date": None, "bars_since_higher_low": None, "retest_frac": 0.52, "deep_retest": False,
             "lh": 228.5, "lh_date": "2026-08-27", "above_lh": False, "undercut_prev": None,
             "dd_at_low": -0.35, "dd_now": -0.25, "close": 224.55,
+            "top": 280.83, "top_date": "2026-08-17", "decline_n": 4.12, "atr_at_low": 20.88,
             "dist": {"low": "-13.2%/1.6N", "bounce_high": "+13.4%/1.6N",
                      "pullback_low": "-0.4%/0.0N", "lh": "+1.8%/0.2N"},
             "probe": None, "weekly_cn": "周线级上涨·观察③", "weekly_prior": "大级别回调结束候选",
@@ -346,7 +347,7 @@ def test_digest_rows_carry_no_authorization_fields(report):
 
 
 def test_digest_sorts_by_stage_rank(report):
-    """已形成在前（✓止跌 → ⏳今日新低 → ✗），✓ 内最新信号在前；趋势表 ✓已转移 → ✅ → ⏳ → ▫️。"""
+    """已形成在前（✓止跌 → ⏳顶后新低 → ✗），✓ 内最新信号在前；趋势表 ✓已转移 → ✅ → ⏳ → ▫️。"""
     rs = [_with(report, ticker="Bwatch", bottom=_bottom("watch"), trend={"state": None, "gate": None}),
           _with(report, ticker="Bdead", bottom=_bottom("dead"), trend={"state": None, "gate": None}),
           _with(report, ticker="Bold", bottom=_bottom("formed", bars_since_signal=6), trend={"state": None, "gate": None}),
@@ -370,7 +371,7 @@ def test_digest_never_silently_drops_a_ticker(report):
 
 def test_digest_bottom_row_says_signal_stop_bounce_lh_and_verdict(report):
     row = CR.bottom_row(_with(report, ticker="NB", bottom=_bottom("formed", probe="🔁探针R1·09-09")))
-    assert row.startswith("| **NB** | ✓止跌 09-02 次日未新低(下影62%) · 收上止跌日高 | 194 (-13.2%/1.6N) | +15.3% · 高 254.74 · 回踩低 223.64 | 228.5 (+1.8%/0.2N) | — | 反弹（未越前高）")
+    assert row.startswith("| **NB** | ✓止跌 09-02 次日未新低(下影62%) · 收上止跌日高 · 顶跌4.1N | 194 (-13.2%/1.6N) | +15.3% · 高 254.74 · 回踩低 223.64 | 228.5 (+1.8%/0.2N) | — | 反弹（未越前高）")
     assert "周线级上涨·观察③" in row and "🔁探针R1·09-09" in row and row.count(" | ") == 6
     hl = CR.bottom_row(_with(report, ticker="NB", bottom=_bottom("formed", higher_low=True, higher_low_date="2026-09-12")))
     assert "回踩低 223.64↑09-12" in hl and "反转候选（回踩更高低点" in hl
@@ -378,7 +379,7 @@ def test_digest_bottom_row_says_signal_stop_bounce_lh_and_verdict(report):
     assert "✗反弹结束 收188<194" in dead
     watch = CR.bottom_row(_with(report, ticker="NB", bottom=_bottom("watch", undercut_prev={
         "low": 194.0, "date": "2026-09-01", "cn": "x"})))
-    assert "⏳今日新低(下影62%) ⚠️盘中破194收回" in watch and "明日不再新低=止跌" in watch
+    assert "⏳顶后新低(下影62%) · 顶跌4.1N ⚠️盘中破194收回" in watch and "明日不再新低=止跌" in watch
 
 
 def test_digest_trend_row_says_state_gate_count_volume_distance(report):
@@ -782,3 +783,61 @@ def test_detail_page_spells_out_what_the_confirmation_probability_means(report):
     b = _bottom("formed", confirm_p={"state": "open", "p": 0.42, "cn": "42%"})
     txt = "\n".join(CR.setups_lines(_with(report, bottom=b, trend=_trend())))
     assert "底部确认：42%（20 根内先收盘越前高 228.5、后才收破止跌低 194 的概率" in txt and "不是排序键" in txt
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. 箱体位置段（位置分布；判别式 core/key_levels）
+# ══════════════════════════════════════════════════════════════
+
+from quant.core import key_levels as KL  # noqa: E402
+
+
+def _box(state, top=None, brk=None):
+    return {"state": state, "cn": KL.POSITIONS[state]["cn"], "top": top, "brk": brk}
+
+
+def test_report_carries_a_box_position(report):
+    b = report["box"]
+    assert b["state"] in CR.BOX_ORDER and {"state", "cn", "top", "brk"} <= set(b)
+
+
+def test_bottom_bucket_reads_the_same_listed_flag_as_the_bottom_table():
+    """「底部」= 🔁 表同一个 listed（✓ / ⏳），不重判；✗反弹结束 不算底部。平盘 = 没有簇 = 无箱。"""
+    flat = _bars([100.0] * 300)
+    assert CR.box_block(flat, 2.0, {"listed": True, "stage": "formed"})["state"] == "bottom"
+    assert CR.box_block(flat, 2.0, {"listed": True, "stage": "watch"})["state"] == "bottom"
+    assert CR.box_block(flat, 2.0, {"listed": True, "stage": "dead"})["state"] == "none"
+    assert CR.box_block(flat, 2.0, {"listed": False, "stage": "formed"})["state"] == "none"
+
+
+def test_box_section_lists_every_ticker_once_grouped_in_order(report):
+    rs = [
+        {**_with(report, ticker="SYNA"), "box": _box("broken", brk={"level": 142.4, "date": "2026-09-22",
+                                                                  "intact": True, "gain_pct": 5.16})},
+        {**_with(report, ticker="SYNB"), "box": _box("near_top", top={"level": 288.0, "tests": 2, "dist_pct": 4.1})},
+        {**_with(report, ticker="SYNC"), "box": _box("mid", top={"level": 376.0, "tests": 2, "dist_pct": 7.1})},
+        {**_with(report, ticker="SYND"), "box": _box("bottom")},
+        {**_with(report, ticker="SYNE"), "box": _box("failed", brk={"level": 119.35, "date": "2026-08-11",
+                                                                   "intact": False, "gain_pct": 14.0})},
+        {**_with(report, ticker="ZZ"), "box": _box("none")},
+    ]
+    out = CR.digest(rs)
+    sec = out[out.index("### 🧭 箱体位置（6）"):].splitlines()
+    groups = [ln for ln in sec if ln.startswith("- **")]
+    assert [re.match(r"- \*\*(.+?)\*\*", ln).group(1) for ln in groups] == [      # 顺序写死: 单边 → 逼近顶 → 中段 → 底 → 失败 → 无箱
+        "⭐已破箱顶·单边", "箱顶下·震荡", "箱体中段·震荡", "底部", "⭐突破失败·回到震荡", "无箱"]
+    body = "\n".join(groups)
+    for t in ("SYNA", "SYNB", "SYNC", "SYND", "SYNE", "ZZ"):
+        assert len(re.findall(rf"(?<![A-Z]){t}(?![A-Z])", body)) == 1, t
+    assert "SYNA ⭐142.4 +5.2%·09-22" in body and "SYNE ⭐119.35·08-11" in body      # 失败不报涨幅
+    assert "SYNB ⭐288（距 +4.1%）" in body
+    legend = sec[1]
+    assert legend.startswith("> ⭐ = ") and "样本外" in legend and "不当信号" in legend
+    for word in ("cap", "NAV", "股数", "$", "买入", "加仓"):
+        assert word not in "\n".join(sec), word
+
+
+def test_box_section_is_skipped_for_reports_without_it(report):
+    r = _with(report, bottom=_bottom("formed"), trend=_trend())
+    r.pop("box", None)
+    assert "🧭 箱体位置" not in CR.digest([r])

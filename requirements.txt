@@ -1,6 +1,8 @@
 # Full broker-connected development environment.
 # For the smaller install, prefer: pip install -e '.[dev]'
-moomoo-api==10.9.6908
+# moomoo-api big-version must match the running OpenD (patch numbers need not match;
+# PyPI can trail OpenD). Upgrade this pin in the same change as an OpenD upgrade.
+moomoo-api==10.10.7008
 protobuf==3.20.3
 pandas>=2.2
 numpy>=2.0

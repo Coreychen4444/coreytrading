@@ -298,7 +298,7 @@ When producing execution zones later in Step 5, the K-line derived levels feed d
 Output format:
 
 【技术报告】
-形态（两种模式，`chart_read.py --tickers <T>` 口径；不出买入 / 卖出信号评级）：🔁 抄底 <✓止跌 / ⏳今日新低 / 无> · 🚀 趋势确认 <✓已转移 / ✅站稳·量腿未过 / ⏳计数中 m/n / ▫️逼近 / 无>
+形态（两种模式，`chart_read.py --tickers <T>` 口径；不出买入 / 卖出信号评级）：🔁 抄底 <✓止跌 / ⏳顶后新低 / 无> · 🚀 趋势确认 <✓已转移 / ✅站稳·量腿未过 / ⏳计数中 m/n / ▫️逼近 / 无>
 关键价位：
 支撑：___
 压力：___

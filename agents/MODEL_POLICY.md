@@ -4,11 +4,12 @@
 
 ## 当前生产配置（以 `routing.json` 为准，优先于下方初始偏好）
 
-- 两个 profile 的主用分别为 `claude-opus-5` / `high` 与 `gpt-6-astra` / `medium`，`fallback` 为空：失败保留失败，不转发另一家，也不自动换同厂商模型。自动第二轮追问关闭（`limits.max_followup_rounds = 0`）。
+- 两个 profile 的主用分别为 `claude-opus-5-5` / `high` 与 `gpt-6-sol` / `medium`，`fallback` 为空：失败保留失败，不转发另一家，也不自动换同厂商模型。自动第二轮追问关闭（`limits.max_followup_rounds = 0`）。
 - 单次 workflow 并行 2、调用 8；全局额度并行 2、滚动一小时 12 次调用。调用次数不是订阅 token 配额，不能保证账户永不限额。
 - `autopaint.enabled = true, apply = true, review = false`：技术提案通过宿主字段、时效、revision、机械规则与 writer 检查后正常落卡，没有第二模型调用。宿主在新研究记录中绑定 `submission_review_required = false`，并在提交前及 writer 锁内检查当前政策；旧记录缺少该字段默认仍要求复核。回执明确 `review_policy = not_required_by_host`、`review_run_id = null`，不伪造已复核。`reviewer_profile` 仅为配置兼容保留。
 - `execution_transport = desktop`：宿主不启动模型 CLI，研究请求由对应运行器的 Desktop 会话按 `tasks/desktop-research.md` 领取并回写；`cli` 仍可选。
 - 控制器保留可配置的跨厂商故障接管：主用失败后可先尝试另一家首选，再按原厂商次选、另一家次选降级；明确的 session 额度耗尽跳过本次运行中该厂商剩余端点。独立复核按实际产出研究的厂商选择另一家；另一家不可用时研究保留为 `needs_review`，不允许同源自批。
+- 定时任务的模型可能由宿主应用单独持有（应用状态，而非 `routing.json`）：直接改应用的状态文件可能被下一次运行写回覆盖；升级时须经应用自身的界面或接口逐个修改，并以任务会话元数据中实际报告的 `model` 回读核验。命令行运行器可能落后于应用内置运行时，恢复 `cli` 传输前先确认 CLI 版本识别新模型 ID。
 
 恢复跨模型接管、复核或更高 effort 须有维护者的明确新授权与预算；决策前先用 `quant/report/agent_metrics.py --days 7` 的周基线核对调用、落卡与失败分类。
 

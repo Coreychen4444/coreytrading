@@ -7,7 +7,8 @@
     **不依赖本地进程存活**。挂进 pipeline 随 heartbeat/briefing 自动跑 ——
     手工步骤 = 不存在(NBIS 教训)。
 
-同步什么(每票 ≤6 条; moomoo 上限 10 条/票, 给手动留余量):
+同步什么(每票 ≤10 条可裁线 + 2 条 pin; moomoo 服务端上限 = **每票每类型 20 条**,
+PRICE_UP / PRICE_DOWN 各自计数 —— 实测, 见 SERVER_MAX_PER_TYPE; 给手动留余量):
   positions(live_tickers, 判据 broker.qty≠0):
     下方线(每 underlying 一条,  用户 裁决"下方三者取 max"):
       max(卡片 stop, 棘轮地板, 趋势死亡线) → PRICE_DOWN note "stop:card|lock|trail"
@@ -43,7 +44,28 @@
     立此条前: current gate 根本没有线(代码只画 reclaim 梯与 next gate), 而 next
     gate 被现价穿过就当"错侧"丢弃 —— 实测本书 4 张卡的 gate 此刻隐形, 其中
     AAOI 133 / META 601 正处在"穿过了但没 ×2 确认"的状态, 掉回去就清零, 恰恰
-    是最该有线的时刻。reclaim 梯不在此列(本 regime 内的早信号, 收复即完成使命)。
+    是最该有线的时刻。**"翻方向而不是消失"是全体线的默认**, pin 不再独享 —— 见 `orient_sides`。
+  远端 gate (**两桶都画**, 正股卡; 目的是看得见更多的后续关键点位;
+  非 pin, 优先级最低 = 挤名额时最先被裁):
+    gate+2   next_regime.next_gate_preview.level (卡上, agent 判读; `stale: true` 的
+             旧上行阶梯不画 —— 那个数「已失效待重画」)      → note "gate:+2"
+    再往上   `core.future_gates.for_card` —— 卡片阶梯顶之上最近的 ≤FUTURE_GATES_MAX 个
+             pivot 簇上沿 (≥2 触碰, 250 根, 与底部证据研究同一把尺) + 窗口最高价;
+             **不住卡、零授权、每轮按 K 线缓存重算**     → note "gate:+3 簇×4 拒14" / "gate:+4 窗高"
+             备注里的收据 (触碰数 / 拒绝数) 同时编码来源: 带收据 = 机械候选, 裸 "gate:+2" = 卡上的。
+    这些线**不是转移轴** —— 转移机只扫 entry_gate; 它们回答「再往上哪儿有地标」, 响了不授权任何动作。
+  补全 (无论是否有持仓, 画线尽可能完整 —— z1 / nochase / gate / trim / 抄底等所有线,
+  并标注出极其关键的位置):
+    zone2 下沿             → PRICE_DOWN note "z2"  (**两桶都画**; 收破 = Breakdown stale + 当日 BUY 冻结)
+    watchlist 补 卡 stop ("stop:card") 与 trim 下沿 ("trim") —— 此前只有持仓画
+    持仓补 reclaim 梯 ("gate") 与**无授权的裸 z1** —— 取代旧的「无授权持仓不画裸 z1」。
+      备注照旧编码授权: 带预算 "z1:2%:450" = Today 成员, 裸 "z1" = 无授权观察线, 两桶同义。
+    ⭐ 线 (`core.key_levels`, 机械, 零授权, **pin**): "⭐箱顶 测3" = 待破的箱顶 (近 20 根最高价所在的簇、
+      近 60 根被从下方测试 ≥2 次); "⭐已破 MM-DD" = 近 60 根的 ⭐突破 (之后没收破 线−0.5N);
+      "⭐假突破 MM-DD" = 突破过但收破过。箱带内已有卡片线 → **吸附到那条线** (同价并入, ⭐ 当 head),
+      否则画在簇上沿。过期卡 / 无 zones 的卡也画 (它不来自卡片)。
+    止跌低 (`core.setups.bottom_setup` ✓止跌 在场) → "止跌低 ✓MM-DD" (两桶都画; 持仓票不走抄底授权,
+      线只是「底在哪」的结构事实)。
     zone1 上沿             → PRICE_DOWN note "z1"  (回踩进参与带)
       Today 白名单成员 → "z1:2%:450" 比例+起步预算 (用户 定版):
       响铃即见"这轮能下多少", 不用先开卡。**持仓票同权**(补洞):
@@ -95,7 +117,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from datetime import date  # noqa: E402
 
-from quant.core import book, earnings, env, structure  # noqa: F401  (.env → os.environ; book = 组合占用真源; structure = regime 所有权真源)
+from quant.core import book, earnings, env, future_gates, key_levels, setups, structure  # noqa: F401  (.env → os.environ; book = 组合占用真源; structure = regime 所有权真源; future_gates = 远端 gate 候选; key_levels = ⭐箱顶; setups = 止跌低)
 from quant.core.holdings import live_tickers  # noqa: E402
 from quant.core.io_json import read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
@@ -111,15 +133,59 @@ LEGACY_PREFIX = "cc:"                       #  前的所有权前缀 — 认旧�
 # 抄底正股首档线备注前缀 — 写线与认领同读这一个常量。只写不认领会让首档每次重锚都
 # ADD 新线、旧线被当手动永不 DEL (同票残留多条抄底线)。
 BOTTOM_NOTE_PREFIX = "抄底首档:"
-KINDS = ("stop", "trim", "gate", "z1", "nochase", "g01", "oz1")   # oz1 = 期权选约首档限价 ()
-MAX_PER_TICKER = 6
+# ⭐ 箱顶线 / 止跌低线的备注词头 — 写线与认领同读这两个常量 (只写不认领会留下残线)。
+KEY_NOTE_PREFIX = "⭐"
+STOPLOW_NOTE_PREFIX = "止跌低"
+KINDS = ("stop", "trim", "gate", "z1", "z2", "nochase", "g01", "oz1")   # oz1 = 期权选约首档限价; z2 = 二档下沿
+# moomoo 服务端硬限 = 每票**每类型** 20 条, PRICE_UP / PRICE_DOWN 独立计数 —— 实测定界: PRICE_UP
+# 第 21 条被拒, 服务端原文「The price alerts of type PRICE_UP for <T> have reached the limit of 20.
+# You cannot add more within 10 minutes.」(撞限后该票该类型另有 10 分钟冷却); 同票 13 UP + 13 DOWN
+# 共存被接受。⚠️ 旧「10 条/票」与 SDK docstring「每种类型最多 10 个」都是没探过上界的误记。
+# 线随现价翻向 (orient_sides) ⇒ 最坏情形一票的线全挤在同一侧, 预算按单侧 20 算。
+SERVER_MAX_PER_TYPE = 20
+# moomoo 服务端写限速 = set_price_reminder **每 30 秒 60 次** —— 实测撞限, 服务端原文
+# 「Set Price Alerts request failed due to high frequency. Maximum 60 times per 30 seconds.」
+# 旧节流「每 10 次停 0.6s」只在差异 <60 条时碰巧够用 (平时每轮 5–10 条); 一次上百条的迁移会让
+# 超出窗口的 ADD 全被拒, 而换血是先删后加 ⇒ 被删的旧线 (含 stop) 在服务端**消失**到下一轮。
+SERVER_SET_MAX_PER_WINDOW = 60
+SERVER_SET_WINDOW_S = 30.0
+
+
+class _Throttle:
+    """滑动窗口限速: 任意 `window` 秒内至多 `cap` 次写调用 (到顶就睡到最老那次滑出窗口)。
+    clock / sleep 可注入 (测试用假时钟)。"""
+
+    def __init__(self, cap: int, window: float, clock=time.monotonic, sleep=time.sleep):
+        self.cap, self.window, self.clock, self.sleep = cap, window, clock, sleep
+        self.stamps: List[float] = []
+
+    def wait(self) -> None:
+        now = self.clock()
+        self.stamps = [s for s in self.stamps if now - s < self.window]
+        if len(self.stamps) >= self.cap:
+            self.sleep(self.window - (now - self.stamps[0]) + 0.5)
+            now = self.clock()
+            self.stamps = [s for s in self.stamps if now - s < self.window]
+        self.stamps.append(now)
+# 可裁线名额 12: 远端 gate 至多 1 (preview) + future_gates.FUTURE_GATES_MAX 条要名额 (深度住 core,
+# 与 TG 阶梯表同读一个数); 画线补全后两桶都多了 z2 / 止跌低, watchlist 多了 stop / trim, 持仓多了
+# z1 / reclaim 梯; pin 至多 4 条/票 (gate:cur/next + ⭐待破/⭐已破) ⇒ 最坏 12 + 4 = 16 条同侧 < 20,
+# 仍给手动线留 4 条。
+MAX_PER_TICKER = 12
 # nochase 排在 z1 之后: z1 是带预算的可执行线, nochase 是同 regime 的参与上界。
 # 同价同向撞线时标签并入不丢弃；服务端
 # 同 (code,type,value) 只能一条, 丢线不可避免但标签都留); 并不进去 (同 kind 真重复 /
 # 超宽) 才回退让位。优先级决定谁当 head (head 段 = 排序与所有权前缀的锚)。已知撞点:
-# gate == no_chase / no_chase == trim 下沿 / no_chase == z1 上沿 / stop == gate。
-PRIORITY = {"stop": 0, "trim": 1, "gate": 2, "z1": 3, "nochase": 4, "g01": 5, "oz1": 6}
-STOP_SRC_PRI = {"card": 0, "gate": 1, "lock": 2, "trail": 3}   # 同价并列时的稳定序: 静态源优先 (gate = 期权 S5g,)
+# gate == no_chase (正常设计) / no_chase == trim 下沿 / no_chase == z1 上沿
+# (单调律两端都允许相等) / stop == gate。
+# fgate = 远端 gate (preview + 机械候选): 备注走 "gate:+N" 词头 (所有权靠 startswith("gate:")),
+# 所以不进 KINDS (没有裸 "fgate" 备注); 优先级垫底 = 每票上限先裁它, 由远及近。
+# key = ⭐ 线: 最高优先级 = 同价并入时它当 head (「极其关键」写在最前面); 它是 pin, 不占名额。
+# stoplow = 止跌低: 紧跟 stop (都是「破了算错」的线); z2 排在 nochase 之后 (二档是 z1 的延伸)。
+# 既有七类的相对次序不变 (stop < trim < gate < z1 < nochase < g01 < oz1 < fgate)。
+PRIORITY = {"key": -1, "stop": 0, "stoplow": 1, "trim": 2, "gate": 3, "z1": 4, "nochase": 5,
+            "z2": 6, "g01": 7, "oz1": 8, "fgate": 9}
+STOP_SRC_PRI = {"card": 0, "gate": 1, "lock": 2, "trail": 3}   # 同价并列时的稳定序: 静态源优先 (gate = 期权 S5g)
 G01_GAINS = (1.0, 2.0, 3.0)                 # 镜像 exit_guard PARAMS["g01_levels"] 的增益列
 GUARDS_STALE_DAYS = 3                       # exit_guards as_of 超此天数 → 报出来 (仍用值: 只升不降 ⇒ 陈旧=偏低)
 
@@ -137,14 +203,15 @@ def _note_width(s: str) -> int:
 
 def _owned_note(note: str) -> bool:
     """所有权判别 = 词表本身: note 恰为 kind 或 "stop:"(binding 来源)/"z1:"(带预算)/
-    "gate:"(cur|next 常驻线)/"抄底首档:"(抄底正股首档)/"cc:"(legacy) 开头 = 系统的;
-    其他(空/自定义文字) = 用户手动, 永不触碰。
+    "gate:"(cur|next 常驻线, +N 远端 gate)/"抄底首档:"(抄底正股首档)/"⭐"/"止跌低"/"cc:"(legacy)
+    开头 = 系统的; 其他(空/自定义文字) = 用户手动, 永不触碰。
     并入形态 "a/b" 的每一段都须是系统词；"trim/nochase" 是，
     "trim/我的备注" 不是。边界只向「系统词的并入」扩, 手动线的误伤面不变。"""
     def seg_owned(s: str) -> bool:
         return (s in KINDS or s.startswith("stop:") or s.startswith("z1:")
                 or s.startswith("gate:") or s.startswith("oz1:")
                 or s.startswith(BOTTOM_NOTE_PREFIX)
+                or s.startswith(KEY_NOTE_PREFIX) or s.startswith(STOPLOW_NOTE_PREFIX)
                 or s.startswith(LEGACY_PREFIX))
     return bool(note) and all(seg_owned(s) for s in note.split("/"))
 
@@ -286,6 +353,109 @@ def _pinned_gate_lines(ticker: str, body: dict) -> List[Dict]:
     return out
 
 
+def _future_gate_lines(ticker: str, body: dict, far: Optional[List[Dict]]) -> List[Dict]:
+    """远端 gate 线: 卡上的 preview (gate+2) + 机械候选 (再往上)。非 pin。
+
+    卡上未 stale 的 preview 恒为 +2; 机械候选的编号 `n` 由 `future_gates.for_card` 给
+    (与 TG 阶梯表同一份, 不在这里再数一遍)。`far` = `future_gate_map` 的产出,
+    None/空 = 本轮没有 K 线或没有地标, 只画卡上那条。"""
+    out: List[Dict] = []
+    lvl = future_gates.live_preview(body.get("agent"))
+    if lvl:
+        d = _line(ticker, "fgate", "PRICE_UP", lvl)
+        d["note"] = "gate:+2"
+        out.append(d)
+    for c in far or []:
+        d = _line(ticker, "fgate", "PRICE_UP", c["level"])
+        d["note"] = f"gate:+{c['n']} {future_gates.evidence_tag(c)}"
+        out.append(d)
+    return out
+
+
+def future_gate_map(positions_doc: dict, watchlist_doc: dict,
+                    bars_of=book.bars) -> Dict[str, List[Dict]]:
+    """每张正股卡 → 阶梯顶之上的机械远端候选 {ticker: [candidate]}。
+
+    卡源判别式与 `z1_budgets` 同拍: live → positions 卡, 否则 → watchlist 卡
+    (positions 里的 closed 残卡不许遮住 watchlist 真源)。没有 next gate 的卡没有轴可接 → 不出。"""
+    live = {t for t in live_tickers(positions_doc) if _is_stock(t)}
+    out: Dict[str, List[Dict]] = {}
+    for src, names in ((positions_doc, live),
+                       (watchlist_doc, set(watchlist_doc.get("tickers") or {}) - live)):
+        for t in sorted(names):
+            if not _is_stock(t):
+                continue
+            agent = ((src.get("tickers") or {}).get(t) or {}).get("agent") or {}
+            if future_gates.ladder_top(agent) is None:
+                continue                          # 没有轴可接 —— 连 K 线都不必读
+            far = future_gates.for_card(agent, bars_of(t))
+            if far:
+                out[t] = far
+    return out
+
+
+def key_level_map(positions_doc: dict, watchlist_doc: dict,
+                  bars_of=book.bars) -> Dict[str, Dict]:
+    """每张正股卡 → {"top": 待破⭐箱顶|None, "brk": 近 60 根 ⭐突破|None, "stoplow": 止跌低|None}。
+
+    卡源判别式与 `future_gate_map` 同拍 (live → positions, 否则 watchlist; moomoo_listed=False 不画)。
+    **不看卡片 zones / 过期** —— 这三条线来自 K 线不来自卡, 卡过期照样画 (箱顶不因卡没重画而消失)。
+    全空的票不出 key (下游 `.get` 即空)。"""
+    live = {t for t in live_tickers(positions_doc) if _is_stock(t)}
+    names = live | {t for t, b in (watchlist_doc.get("tickers") or {}).items()
+                    if _is_stock(t) and (b or {}).get("moomoo_listed") is not False}
+    out: Dict[str, Dict] = {}
+    for t in sorted(names):
+        bars = bars_of(t)
+        if not bars:
+            continue
+        top = key_levels.box_top(bars)
+        brk = key_levels.last_breakout(bars)
+        bs = setups.bottom_setup(bars)
+        low = coerce_float(bs.get("low")) if bs.get("stage") == "formed" else None
+        stoplow = {"level": low, "signal_date": str(bs.get("signal_date") or "")} if low else None
+        if top or brk or stoplow:
+            out[t] = {"top": top, "brk": brk, "stoplow": stoplow}
+    return out
+
+
+def _key_note(kind: str, k: Dict) -> str:
+    if kind == "top":
+        return f"{KEY_NOTE_PREFIX}箱顶 {key_levels.evidence_tag(k)}"
+    word = "已破" if k.get("intact") else "假突破"
+    return f"{KEY_NOTE_PREFIX}{word} {str(k.get('date') or '')[5:]}"
+
+
+def _mechanical_lines(ticker: str, info: Optional[Dict], drawn: List[Dict]) -> List[Dict]:
+    """⭐ 两条 (pin) + 止跌低一条。`drawn` = 本票已生成的卡片线 —— ⭐ 的簇带 (下沿 − 桶宽, 上沿 + 桶宽)
+    里已有卡片线 → **吸附到最近那条的价位** (之后同价并入, ⭐ 优先级最高当 head: "⭐已破 MM-DD/gate:cur");
+    否则画在簇上沿。同一堵墙不画两遍 (与 future_gates 同一去重口径)。"""
+    if not info:
+        return []
+    code = f"US.{ticker}"
+    out: List[Dict] = []
+    for kind in ("top", "brk"):
+        k = info.get(kind)
+        if not k:
+            continue
+        pad = float(k.get("bucket") or 0.0)
+        near = [d for d in drawn if d["code"] == code
+                and k["lo"] - pad <= d["value"] <= k["level"] + pad]
+        value = (min(near, key=lambda d: abs(d["value"] - k["level"]))["value"]
+                 if near else k["level"])
+        d = _line(ticker, "key", "PRICE_UP", value)
+        d["note"] = _key_note(kind, k)
+        d["pin"] = True
+        out.append(d)
+    sl = info.get("stoplow")
+    if sl and sl.get("level"):
+        d = _line(ticker, "stoplow", "PRICE_DOWN", sl["level"])
+        d["note"] = f"{STOPLOW_NOTE_PREFIX} ✓{sl['signal_date'][5:]}" if sl.get("signal_date") \
+            else STOPLOW_NOTE_PREFIX
+        out.append(d)
+    return out
+
+
 def _no_chase_line(ticker: str, zones: dict) -> List[Dict]:
     """当前 regime 的追价上限 → 一条 PRICE_UP (用户  补)。
 
@@ -303,6 +473,15 @@ def _no_chase_line(ticker: str, zones: dict) -> List[Dict]:
     """
     nc = coerce_float(zones.get("no_chase_above"))
     return [_line(ticker, "nochase", "PRICE_UP", nc)] if nc else []
+
+
+def _z2_line(ticker: str, zones: dict) -> List[Dict]:
+    """二档下沿 → 一条 PRICE_DOWN "z2" (补全, 两桶都画)。
+
+    画下沿不画上沿: 上沿通常 = z1 下沿 (两带相接), 下沿才是新信息 —— 收破它 = zone Breakdown stale
+    (当日收盘即作废) + 盘中 `z2_breach_buy_freeze` 当日 BUY 冻结, 是带内唯一会改变行为的那条边。"""
+    z2 = zones.get("accumulation_zone_2") or []
+    return [_line(ticker, "z2", "PRICE_DOWN", z2[0])] if len(z2) == 2 and z2[0] else []
 
 
 def exit_floor_map(guards_doc: Optional[dict], positions_doc: dict) -> Dict[str, Dict]:
@@ -355,13 +534,17 @@ def g01_next_tier(lots: Optional[dict], mark: Optional[float]) -> Optional[float
 def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
                   budgets: Optional[Dict[str, str]] = None,
                   floors: Optional[Dict[str, Dict]] = None,
-                  option_plans: Optional[dict] = None) -> Tuple[List[Dict], List[str]]:
+                  option_plans: Optional[dict] = None,
+                  far_gates: Optional[Dict[str, List[Dict]]] = None,
+                  key_map: Optional[Dict[str, Dict]] = None) -> Tuple[List[Dict], List[str]]:
     """期望提醒集(纯函数, 可测)。返回 (lines, skip_notes)。
+    key_map = key_level_map() 的产出 (⭐ 箱顶 / 止跌低); 缺省 = 不画机械线。
     budgets = z1_budgets() 的产出; 命中的 z1 note 带起步预算后缀。
     floors = exit_floor_map() 的产出; 下方线取三者 max, note 带 binding 来源。
     option_plans = entry_guard 落的选约 (用户): 授权 underlying (在
     budgets = Today 成员) 的合约 → **合约 code 上挂首档限价 PRICE_DOWN**, note
-    "oz1:N张" — premium 跌到计划限价 = 参与点到了; 期权 basis 分开先例同 g01。"""
+    "oz1:N张" — premium 跌到计划限价 = 参与点到了; 期权 basis 分开先例同 g01。
+    far_gates = future_gate_map() 的产出; 缺省 = 只画卡上的 preview, 不画机械候选。"""
     lines: List[Dict] = []
     notes: List[str] = []
     floors = floors or {}
@@ -409,19 +592,20 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
                 lines.append(_line(t, "trim", "PRICE_UP", trim[0]))
             lines.extend(_no_chase_line(t, z))         # 当前 regime 的追价上限
             lines.extend(_pinned_gate_lines(t, body))  # 两条常驻 gate (cur/next)
-            # z1 回踩线 —— **只给 Today 白名单成员**(= 本轮有未行使的 cap 授权)。
-            #  补 (用户 点名的结构洞): `z1_budgets` 早就会为持仓成员算预算
-            # (desired_members 把 live 票排第一优先 _admit, 新转移回组的持仓在内),
-            # 但本函数此前只在 watchlist 分支画 z1 且 `t in live` 跳过持仓 ——
-            # **预算算了没线可挂**, 又一例"字段在转换中被丢"。
-            # 无授权的持仓**不画裸 z1**(与 watchlist 的裸观察线有意不同): cap 0 时
-            # 回踩不是任何动作的触发点, 响铃只会邀请未授权加仓 (8/3 夜盘 4 连的形状);
-            # 下行保护已有 stop 线, 授权恢复路径 = 新转移写新 since → 回组 → 线自动出现。
+            lines.extend(_future_gate_lines(t, body, (far_gates or {}).get(t)))   # 远端 gate (+2 …)
+            for g in (z.get("reclaim_gates") or []):   # 本 regime 内的早信号梯 (持仓也画)
+                if g.get("level"):
+                    lines.append(_line(t, "gate", "PRICE_UP", g["level"]))
+            # z1 回踩线。持仓与 watchlist 同义: 带预算 "z1:2%:450" = 有授权 (Today 成员);
+            # **裸 "z1" = 无授权观察线, 不是动作触发点**。授权判据不动 (预算照旧只给 Today 成员),
+            # 画线只管「看得见」—— 取代旧的「无授权持仓不画裸 z1」。
             z1 = z.get("accumulation_zone_1") or []
-            if len(z1) == 2 and z1[1] and budgets and t in budgets:
+            if len(z1) == 2 and z1[1]:
                 d = _line(t, "z1", "PRICE_DOWN", z1[1])
-                d["note"] = f"z1:{budgets[t]}"
+                if budgets and t in budgets:
+                    d["note"] = f"z1:{budgets[t]}"
                 lines.append(d)
+            lines.extend(_z2_line(t, z))
 
     for und in sorted(und_cands):
         v, src = _stop_pick(und_cands[und])
@@ -439,19 +623,31 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
             continue
         vu = z.get("valid_until")
         if vu and str(vu) < today:
-            notes.append(f"{t}: zones 过期 ({vu}) — 跳过, 重画后自动接上")
+            notes.append(f"{t}: zones 过期 ({vu}) — 卡片线跳过, 重画后自动接上 (⭐/止跌低 照画)")
             continue
         for g in (z.get("reclaim_gates") or []):   # 本 regime 内的早信号梯 (不 pin)
             if g.get("level"):
                 lines.append(_line(t, "gate", "PRICE_UP", g["level"]))
         lines.extend(_no_chase_line(t, z))         # 当前 regime 的追价上限
         lines.extend(_pinned_gate_lines(t, body))  # 两条常驻 gate (cur/next)
+        lines.extend(_future_gate_lines(t, body, (far_gates or {}).get(t)))   # 远端 gate (+2 …)
         z1 = z.get("accumulation_zone_1") or []
         if len(z1) == 2 and z1[1]:
             d = _line(t, "z1", "PRICE_DOWN", z1[1])
             if budgets and t in budgets:      # Today 白名单成员: 响铃即见 比例+起步预算
                 d["note"] = f"z1:{budgets[t]}"
             lines.append(d)
+        # 补全 (无论是否有持仓): 候选卡的 stop / trim 此前只有持仓画。
+        # stop = 卡片 regime 地板 (收破 = 本 regime 失效), 不是持仓止损; 备注沿用 binding 来源词 "stop:card"。
+        stop = coerce_float(z.get("stop_level"))
+        if stop:
+            d = _line(t, "stop", "PRICE_DOWN", stop)
+            d["note"] = "stop:card"
+            lines.append(d)
+        trim = z.get("trim_zone") or []
+        if len(trim) == 2 and trim[0]:
+            lines.append(_line(t, "trim", "PRICE_UP", trim[0]))
+        lines.extend(_z2_line(t, z))
 
     # 期权选约首档限价 (授权 underlying 才画 — 与 z1 预算同一个白名单语义)
     for und, plan in sorted((option_plans or {}).items()):
@@ -486,10 +682,18 @@ def desired_lines(positions_doc: dict, watchlist_doc: dict, today: str,
         d["note"] = f"oz1:{t0.get('contracts') or '?'}"
         lines.append(d)
 
+    # ⭐ 箱顶 / 止跌低: 机械线, 放在所有卡片线 (含持仓 stop 与抄底首档) 之后生成,
+    # 才能吸附到同一堵墙上已有的那条卡片线。资格与 key_level_map 同拍: live 正股 / 自选内的候选。
+    wl_ok = {t for t, b in (watchlist_doc.get("tickers") or {}).items()
+             if _is_stock(t) and (b or {}).get("moomoo_listed") is not False}
+    for t in sorted(key_map or {}):
+        if t in live or t in wl_ok:
+            lines.extend(_mechanical_lines(t, key_map[t], [d for d in lines if d["ticker"] == t]))
+
     # 去重 + 每票上限(按 kind 优先级, pin 先于同 kind 的普通线, 再按价位稳定排序)
     # pin 排前有两个作用: ①与 reclaim 梯同价时留下带 gate:cur/next 备注的那条
     # ②不占 MAX_PER_TICKER 名额 —— 上限只裁可裁的线。pin 至多 2 条/票 ⇒ 实际
-    # 天花板 6+2=8 < moomoo 的 10 条/票, 仍给手动线留余量。
+    # 天花板 MAX_PER_TICKER+2 < SERVER_MAX_PER_TYPE (单侧 20), 仍给手动线留余量。
     seen: Dict[Tuple, Dict] = {}
     per: Dict[str, List[Dict]] = {}
     capped: Dict[str, int] = {}
@@ -635,7 +839,9 @@ def _sync(dry_run: bool) -> Dict:
     opt_plans = ((read_json(OPTION_PLANS_PATH) or {}).get("plans")
                  if OPTION_PLANS_PATH.exists() else None)
     desired, skip_notes = desired_lines(positions, watchlist, et_today(), budgets,
-                                        floors=floors, option_plans=opt_plans)
+                                        floors=floors, option_plans=opt_plans,
+                                        far_gates=future_gate_map(positions, watchlist),
+                                        key_map=key_level_map(positions, watchlist))
     if nav is None:
         skip_notes.append("NAV 缺失 (nav_history 空?) — z1 备注本轮不带预算, 裸线兜底")
     if guards_doc is None:
@@ -686,20 +892,22 @@ def _sync(dry_run: bool) -> Dict:
         errors: List[str] = []
         done_add = done_del = 0
         if not dry_run:
-            for i, r in enumerate(dels):          # 先删, 释放每票配额
+            # 删与加共用一个窗口 (服务端按 set 调用计数, 不分 op); 留 5 次余量给同账户的手动操作
+            throttle = _Throttle(SERVER_SET_MAX_PER_WINDOW - 5, SERVER_SET_WINDOW_S)
+            for r in dels:                        # 先删, 释放每票配额
                 rid = r.get("key")
                 if rid is None:
                     errors.append(f"DEL 缺 key: {r.get('code')} {r.get('value')}")
                     continue
+                throttle.wait()
                 rt, data = ctx.set_price_reminder(code=r["code"], op=SetPriceReminderOp.DEL,
                                                   key=int(rid))
                 if rt != RET_OK:
                     errors.append(f"DEL {r['code']} {r.get('value')}: {data}")
                 else:
                     done_del += 1
-                if i % 10 == 9:
-                    time.sleep(0.6)               # 60 req/30s 限速余量
-            for i, d in enumerate(adds):
+            for d in adds:
+                throttle.wait()
                 rt, data = ctx.set_price_reminder(
                     code=d["code"], op=SetPriceReminderOp.ADD,
                     reminder_type=getattr(PriceReminderType, d["type"]),
@@ -709,8 +917,6 @@ def _sync(dry_run: bool) -> Dict:
                     errors.append(f"ADD {d['code']} {d['type']} {d['value']}: {data}")
                 else:
                     done_add += 1
-                if i % 10 == 9:
-                    time.sleep(0.6)
         return {"ok": not errors, "dry_run": dry_run,
                 "desired": len(desired), "adds": len(adds), "dels": len(dels),
                 "kept": kept, "kept_manual_dup": kept_manual,

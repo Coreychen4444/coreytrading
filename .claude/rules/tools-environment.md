@@ -7,8 +7,8 @@
 
 ## Moomoo OpenD
 - Install：官方 CLI / GUI 发行版；目录名 ≠ 版本号（自更新原地覆盖），真实版本看启动 banner 或 OpenD 的 `GTWLog_*.log`。
-- Config：安装目录内的 `OpenD.xml`。🚨 自更新可能把它还原成出厂模板（account 占位符 + RSA 注释掉 → 起不来 = 所有定时任务静默变黑）。判据 `diff <(tr -d '\r' < OpenD.xml.default) <(tr -d '\r' < OpenD.xml)` 为空；恢复用 `opend/OpenD.xml.reference` + 手填 md5；改 live 后同步回本地 reference。
-- Run：手动 `<install_dir>/OpenD.app/Contents/MacOS/OpenD --cfg_file=<install_dir>/OpenD.xml`（无 auto-start；常驻用 nohup / tmux）。Client 默认 `127.0.0.1:11111`；listener 只绑定本机，除非 operator 明确设计并保护远程访问。
+- Config：安装目录内的 `OpenD.xml`。🚨 自更新可能把它还原成出厂模板（account 占位符，或新版模板直接删掉登录字段、起在「Please enter account」交互提示；RSA 被注释掉 → API 连不上 = 所有定时任务静默变黑）。判据 = 字段存在，不 diff 模板（新版模板与旧 `.default` 不一致，diff 会给出假阴性）：`login_account` 与未注释的 `rsa_private_key` 都在（`opend/start.sh` 启动前自检同一件事）；恢复用 `opend/OpenD.xml.reference` 模板本地填值；改 live 后同步回本地 reference。
+- Run：`opend/start.sh`（tmux 会话 `opend`，关终端不死；控制台 `tmux attach -t opend`，Ctrl-b d 脱离；无 auto-start）。**新版 OpenD 登录**：配置里的账号密码不再用于登录，首次在控制台交互登录时选 Y 记住密码，之后只认命令行 `-login_account=<acct> -login_by_remember=1`（脚本从 `OpenD.xml` 取账号并带上）；记住失效 / 守护进程重启网关 → 卡在 `Please enter account` = API 断，heartbeat 推 `OpenD unreachable`，attach 进去手动登录。Client 默认 `127.0.0.1:11111`；listener 只绑定本机，除非 operator 明确设计并保护远程访问。
 - Encryption：启用时 RSA 1024 PKCS#1；单一 key（如 `~/.com.moomoo.OpenD/rsa/private_pkcs1.pem`），OpenD.xml 与 `.env` 的 `FUTU_OPEND_RSA_KEY` 同指一个本地绝对路径，不在安装目录放副本，不入库。
 - `.env`（workspace root）：`FUTU_OPEND_HOST` + `FUTU_OPEND_ENCRYPT=1` + `FUTU_OPEND_RSA_KEY`。
 - SDK：`moomoo-api` 与 OpenD 同 big-version（patch 号不用对齐；pin 在 `pyproject.toml` / `requirements.txt`）。升级 OpenD 后在隔离环境 `pip install --upgrade moomoo-api==<ver>` **并改 pin**。`moomoo.common` 缺 → `--force-reinstall --no-deps`。

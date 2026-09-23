@@ -98,11 +98,15 @@ def test_private_company_context_and_macro_observations_reach_both_research_role
 
 def test_company_model_packet_is_frozen_and_source_hashed(source):
     from tests.valuation.test_company_model import packet
+    from quant.core.agent_contracts import canonical_hash
     value = packet()
     write(source.company_models, {'SYN': value})
     out = capture(source, tickers=['SYN'])
     assert out['snapshot']['data']['valuation']['company_models'] == {'SYN': value}
-    assert out['snapshots']['valuation']['data']['valuation']['company_models'] == {'SYN': value}
+    summary = out['snapshots']['valuation']['data']['valuation']['company_models']['SYN']
+    assert summary['full_packet_hash'] == canonical_hash(value)
+    assert summary['packet_view'] == 'summary' and summary['scenario_ids'] == ['base']
+    assert 'quarters' not in str(summary) and len(str(summary)) < len(str(value)) / 10
     assert 'company_models' in out['snapshot']['evidence_refs']
 
 

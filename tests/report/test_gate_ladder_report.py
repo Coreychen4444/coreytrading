@@ -497,3 +497,76 @@ def test_gate_volume_leg_from_an_earlier_streak_day_is_reported_as_passed(monkey
     assert "✅ 172.5" in out and "量能闸未过" not in out
     assert "量腿 ✓" in out and "streak第1日" in out
     assert rt.streak_above(bars, 172.5) == len(glr._gate_streak(bars, 172.5)) == 2
+
+
+# ── 🔭 远端行 (阶梯顶之后的几条 gate, 与 moomoo 画线对齐) ──────────
+
+def _peaky_bars(peaks, base=100.0, n=120):
+    """平底 base 上按 {bar 序号: 高点} 插 swing high (tests/core/test_future_gates 同款)。"""
+    import datetime as dt
+    out = []
+    for i in range(n):
+        t = (dt.date(2025, 1, 1) + dt.timedelta(days=i)).isoformat()
+        out.append({"time": f"{t} 00:00:00", "open": base, "high": peaks.get(i, base + 1),
+                    "low": base - 1, "close": base, "volume": 1000, "turnover": base * 1000})
+    return out
+
+
+FAR_AGENT = {"zones": {"valid_until": "2099-01-01"},
+             "next_regime": {"name": "R_next", "entry_gate": {"level": 104.0, "days": 2},
+                             "next_gate_preview": {"level": 106.0, "days": 2}}}
+FAR_BARS = _peaky_bars({10: 110.0, 20: 110.4, 30: 120.0, 40: 120.5, 60: 130.0})
+
+
+def test_far_gate_rows_follow_the_card_ladder_and_never_count():
+    block = "\n".join(glr.render_ticker("XX", FAR_AGENT, FAR_BARS))
+    far = [ln for ln in block.splitlines() if glr.FAR_MARK in ln]
+    assert [ln.split("|")[1].strip() for ln in far] == [
+        f"{glr.FAR_MARK} 110.4", f"{glr.FAR_MARK} 120.5", f"{glr.FAR_MARK} 130"]
+    assert [ln.split("|")[2].strip() for ln in far] == ["远端 +3", "远端 +4", "远端 +5"]
+    assert all(ln.split("|")[3].strip() == "—" for ln in far)      # 不是转移轴: 不计数
+    assert "簇×2H" in far[0] and "距 +10.4%" in far[0] and "窗高" in far[2]
+    assert not any("⚡" in ln or "量腿" in ln for ln in far)          # 无快车道 / 无量腿
+    lines = block.splitlines()
+    assert lines.index(far[0]) > max(i for i, ln in enumerate(lines) if "106" in ln)   # 排在卡片阶梯之后
+
+
+def test_far_gate_rows_are_the_same_lines_moomoo_gets():
+    """渲染口径 = 判定口径: TG 表的 `远端 +N` 与手机备注 `gate:+N <收据>` 逐条对得上 ——
+    同一个 for_card, 两个渲染层不许各数各的。"""
+    from quant.sync import price_reminder_sync as prs
+    wl = {"tickers": {"XX": {"moomoo_listed": True, "agent": FAR_AGENT}}}
+    far_map = prs.future_gate_map({"tickers": {}}, wl, bars_of=lambda t: FAR_BARS)
+    lines, _ = prs.desired_lines({"tickers": {}}, wl, "2026-08-05", far_gates=far_map)
+    phone = {d["note"].split(" ", 1)[0]: (d["value"], d["note"].split(" ", 1)[1])
+             for d in lines if d["kind"] == "fgate" and " " in d["note"]}
+    rows = [ln.split("|") for ln in glr.far_gate_rows(FAR_AGENT, FAR_BARS, 100.0, 2.0)]
+    report = {"gate:" + r[2].strip().split()[-1]:
+              (float(r[1].replace(glr.FAR_MARK, "").strip()), r[4].split(" · ")[-1].strip())
+              for r in rows}
+    assert report == phone and len(report) == 3
+
+
+def test_no_axis_or_no_history_renders_no_far_rows():
+    assert glr.far_gate_rows({"zones": {}}, FAR_BARS, 100.0, 2.0) == []
+    assert glr.far_gate_rows(FAR_AGENT, FAR_BARS[:40], 100.0, 2.0) == []
+    # 既有 fixture (31 根以内) 的整块渲染不受影响 —— 没有远端行, 表照旧
+    assert glr.FAR_MARK not in "\n".join(glr.render_ticker("XX", AGENT, _bars([150] * 25)))
+
+
+def test_stale_preview_is_flagged_and_a_same_priced_far_gate_folds_into_its_row():
+    """旧阶梯价位 (stale) == 某个簇上沿 —— moomoo 上只有一条
+    `gate:+2 <收据>`, 表里也只许一行, 且 stale 必须说出口 (不然读成一道活的 0/2)。"""
+    agent = {"zones": {"valid_until": "2099-01-01"},
+             "next_regime": {"name": "R_next", "entry_gate": {"level": 104.0, "days": 2},
+                             "next_gate_preview": {"level": 110.4, "days": 2, "stale": True}}}
+    block = glr.render_ticker("XX", agent, FAR_BARS)
+    at = [ln for ln in block if "110.4" in ln]
+    assert len(at) == 1                                              # 一个价位一行
+    assert "stale" in at[0] and f"{glr.FAR_MARK} 远端 +2 簇×2H" in at[0]
+    assert not at[0].lstrip("| ").startswith(glr.FAR_MARK)           # 行主体仍是卡片行
+    far = [ln.split("|")[2].strip() for ln in block if ln.startswith(f"| {glr.FAR_MARK}")]
+    assert far == ["远端 +3", "远端 +4"]                              # 其余照常独立成行, 编号不断
+    # 未 stale 的 preview 行不带任何后缀
+    clean = [ln for ln in glr.render_ticker("XX", FAR_AGENT, FAR_BARS) if "| ▫️ 106 " in ln]
+    assert clean and "stale" not in clean[0] and glr.FAR_MARK not in clean[0]

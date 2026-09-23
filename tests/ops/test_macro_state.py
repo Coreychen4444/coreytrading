@@ -32,3 +32,12 @@ def test_same_payload_ignores_writer_owned_linkage():
     right = {"a": 1, "previous_run_id": "y", "state_hash": "h2"}
     assert state._same_payload(left, right)
     assert not state._same_payload(left, {"a": 2, "previous_run_id": "x", "state_hash": "h1"})
+
+
+def test_late_release_without_plan_targets_result_file(tmp_path):
+    """A released tier-1 event reviewed late (no pre-event plan) lands as the immutable result file."""
+    event = {"tier": "tier1", "event_id": "evt-late", "review_mode": "late_without_plan"}
+    target = state._event_target({"run_kind": "fixed", "next_event": event}, tmp_path)
+    assert target == (tmp_path / "evt-late-result.json", "result")
+    plain = dict(event, review_mode=None)
+    assert state._event_target({"run_kind": "fixed", "next_event": plain}, tmp_path) is None

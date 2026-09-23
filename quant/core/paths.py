@@ -38,6 +38,7 @@ EARNINGS_DEEP_DIR = MARKET_DIR / "earnings_deep"   # 历史财报事件存档 <T
 # 前视财报日历 + per-ticker 缩仓比例 (, earnings_window 路 A)。
 # 单文件入 git: entry_guard/brief/备注都在 needs_opend=False 的路径上读它。
 EARNINGS_CALENDAR_PATH = MARKET_DIR / "earnings_calendar.json"
+MARKET_REGIME_PATH = MARKET_DIR / "market_regime.jsonl"   # 大盘状态卡每日快照 = 可对账的预测账本 (journal/market_regime_log, 判读层)
 PREMIUM_DIR = MARKET_DIR / "premium"          # ADR/跨市场溢价追踪, <TICKER>.jsonl ()
 SKHY_PREMIUM_PATH = PREMIUM_DIR / "SKHY.jsonl"
 FUNDAMENTALS_DIR = MARKET_DIR / "fundamentals"   # OpenD 三表/快照/估值分位缓存 <TICKER>.json (可重拉, 不入 git; 估值层)
