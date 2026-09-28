@@ -840,13 +840,17 @@ def box_block(bars: List[dict], atr20: Optional[float], bottom: Dict) -> Dict:
     close = float(bars[-1]["close"])
     top = key_levels.box_top(bars)
     brk = key_levels.last_breakout(bars)
+    pend = key_levels.pending_breakout(bars)
     at_bottom = bool(bottom.get("listed")) and bottom.get("stage") in ("formed", "watch")
-    pos = key_levels.position(close, atr20, top, brk, at_bottom)
+    pos = key_levels.position(close, atr20, top, brk, at_bottom, pend)
     return {**pos,
             "top": ({"level": top["level"], "tests": top["tests"],
                      "dist_pct": round((top["level"] / close - 1.0) * 100.0, 1)} if top else None),
+            "pend": ({"level": pend["level"], "tests": pend["tests"],
+                      "over_pct": round((close / pend["level"] - 1.0) * 100.0, 1)} if pend else None),
             "brk": ({"level": brk["level"], "date": brk["date"], "intact": brk["intact"],
-                     "gain_pct": brk["gain_pct"]} if brk else None)}
+                     "gain_pct": brk["gain_pct"], "rebreak": brk.get("rebreak"),
+                     "over_ceiling": brk.get("over_ceiling")} if brk else None)}
 
 
 def confirm_block(b: Dict, bars: List[dict]) -> Optional[Dict]:
@@ -1281,21 +1285,32 @@ def digest(reports: List[Dict], asof: Optional[str] = None) -> str:
 
 # 箱体位置段: 全书每票恰好一次, 按位置分组。
 # 词只描述价格在箱体结构里的哪儿 —— 单边 / 震荡是描述词, 不是信号 (样本外无 edge)。
-BOX_ORDER = ("broken", "near_top", "mid", "bottom", "failed", "none")
-BOX_LABEL = {"broken": "⭐已破箱顶·单边", "near_top": "箱顶下·震荡", "mid": "箱体中段·震荡",
-             "bottom": "底部", "failed": "⭐突破失败·回到震荡", "none": "无箱"}
+BOX_ORDER = ("broken", "pending", "near_top", "mid", "bottom", "failed", "none")
+BOX_LABEL = {"broken": "⭐已破箱顶·单边", "pending": "⭐突破中·待确认", "near_top": "箱顶下·震荡",
+             "mid": "箱体中段·震荡", "bottom": "底部", "failed": "⭐突破失败·回到震荡", "none": "无箱"}
 BOX_LEGEND = ("> ⭐ = 近 20 根最高价所在、近 60 根被从下方打过 ≥2 次的簇上沿（moomoo ⭐ 线同一把尺）；"
-              "已破 = 突破后没收破 线−0.5N、上方也没长出新箱顶。描述性：样本外 ⭐ 突破与普通突破无差，"
-              "只看位置，不当信号")
+              "收盘 ×2 站上 = 突破，只站上一根 = 突破中；"
+              "已破 = 突破后没收破 线−0.5N、上方也没长出新箱顶；失败后收盘 ×2 越过失败那段的最高价 = 再破。"
+              "描述性：样本外 ⭐ 突破与普通突破无差，只看位置，不当信号")
 
 
 def box_item(r: Dict) -> str:
-    """一票的位置短语：已破 → ⭐线 离线涨幅·确认日；箱内 / 底部 → 上方 ⭐线（距离）；失败 → ⭐线·确认日。"""
+    """一票的位置短语：已破 → ⭐线 离线涨幅·确认日；突破中 → ⭐线 今收越线幅度（×1 待确认）；
+    箱内 / 底部 → 上方 ⭐线（距离）；失败 → ⭐线·确认日。"""
     b, t = r["box"], r["ticker"]
-    top, brk = b.get("top"), b.get("brk")
+    top, brk, pend = b.get("top"), b.get("brk"), b.get("pend")
+    if b["state"] == "pending" and pend:
+        return f"{t} ⭐{pend['level']:g} 今收 {pend['over_pct']:+.1f}%（×1 待确认）"
     if b["state"] in ("broken", "failed") and brk:
+        rb, over = brk.get("rebreak"), brk.get("over_ceiling")
+        if b["state"] == "broken" and rb:        # 失败后越过失败那段的最高价 ×2 = 再破, 涨幅按再破线
+            return (f"{t} ⭐{brk['level']:g}·{brk['date'][5:]} 再破 {rb['level']:g} "
+                    f"{brk['gain_pct']:+.1f}%·{rb['date'][5:]}")
         tail = f" {brk['gain_pct']:+.1f}%" if b["state"] == "broken" else ""
-        return f"{t} ⭐{brk['level']:g}{tail}·{brk['date'][5:]}"
+        s = f"{t} ⭐{brk['level']:g}{tail}·{brk['date'][5:]}"
+        if b["state"] == "failed" and over:
+            s += f" 今收越 {over:g}（×1 待确认）"
+        return s
     if top:
         return f"{t} ⭐{top['level']:g}（距 {top['dist_pct']:+.1f}%）"
     return t

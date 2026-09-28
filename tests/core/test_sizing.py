@@ -866,3 +866,23 @@ def test_derive_auth_reversal_probe_lives_in_option_plans_not_the_stock_card():
     assert auth is None                                            # 别的合约不沾光, 退回正股卡 cap 0
     auth, _ = sizing.derive_auth("TST270115C90000", cards, today="2026-08-26", option_plans=None)
     assert auth is None
+
+
+def test_cost_gate_zeroes_adds_below_average_cost_for_held_positions_only():
+    """成本闸 (成本不向下摊): 持仓后 min(线价, 现价) < 均价 → entry_cap 归 0,
+    binding below_cost; 空仓 (avg_cost None) 不参与 —— 建仓阶梯的第 2、3 档本来就在第 1 档之下。"""
+    ag = {"current_regime": {"cap_pct_nav": 0.4}}
+    kw = dict(atr=2.0, price=100.0, stop=95.0)
+    free = sizing.entry_cap(20000.0, ag, **kw)
+    above = sizing.entry_cap(20000.0, ag, **kw, avg_cost=99.0, spot=101.0)
+    line_below = sizing.entry_cap(20000.0, ag, **kw, avg_cost=101.0, spot=103.0)    # 线价 100 < 均价 101
+    spot_below = sizing.entry_cap(20000.0, ag, **kw, avg_cost=99.0, spot=98.0)      # 现价已在线下: 按现价成交
+    assert free["cap_usd"] > 0 and free["binding"] != "below_cost"
+    assert above["cap_usd"] == free["cap_usd"] and above["binding"] == free["binding"]
+    for ac in (line_below, spot_below):
+        assert ac["cap_usd"] == 0.0 and ac["binding"] == "below_cost" and ac["cap_frac"] == 0.0
+    assert sizing.binding_label(line_below) == "均价之下不摊"
+    assert not sizing.below_cost(90.0, 80.0, None)            # 空仓 = 建仓, 不受限
+    assert not sizing.below_cost(100.0, None, 100.0)          # 等于均价不算摊低
+    no_cap = sizing.entry_cap(20000.0, {"current_regime": {"cap_pct_nav": 0.0}}, **kw, avg_cost=101.0)
+    assert no_cap["binding"] == "regime"                      # 无授权先报 regime (更根本的原因)

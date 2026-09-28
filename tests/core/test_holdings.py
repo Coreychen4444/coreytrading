@@ -4,6 +4,8 @@
   qty>0  + status="closed"  INTC  实际持有 2 股被静音一整天
   qty==0 + status="active"  NBIS  平仓后当上次日简报的头号异动
 """
+import pytest
+
 from quant.core.holdings import (
     cards_missing_archetype, coverage_universe, flat_with_lots, held_bare, held_incl_option_underlyings, intel_universe, is_candidate,
     is_scannable_card,
@@ -298,3 +300,49 @@ def test_cards_missing_archetype_flags_painted_cards_only():
     assert cards_missing_archetype(pos, wl, inputs) == ["CAND", "FRESH"]
     assert cards_missing_archetype(pos, wl, {}) == ["AAA", "BBB", "CAND", "FRESH"]
     assert cards_missing_archetype({}, {}, {}) == []
+
+
+# ── 成本不向下摊: 加仓只许确认后往上加 ────────────────────────────────────────
+
+from quant.core.holdings import averaging_down, cost_basis  # noqa: E402
+
+
+def test_cost_basis_reads_managed_lots_first_then_broker_and_none_when_flat():
+    held = {"broker": {"qty": 30, "avg_cost": 45.0},                  # broker 合并均价 (含 base) 不作 PnL 参考
+            "lots": {"base": [{"qty": 10, "avg_cost": 25.0}],
+                     "position": [{"qty": 20, "avg_cost": 52.0}, {"qty": 10, "avg_cost": 49.0}]}}
+    assert cost_basis(held) == pytest.approx((20 * 52 + 10 * 49) / 30)
+    assert cost_basis({"broker": {"qty": 1, "avg_cost": 12.0}, "lots": {"position": []}}) == 12.0  # 期权: 权利金
+    assert cost_basis({"broker": {"qty": 0, "avg_cost": 52.0}}) is None                           # 空仓 = 建仓
+    assert cost_basis({"broker": {"qty": 5, "synthetic": True, "avg_cost": 10.0}}) is None
+
+
+def _ev(ts, qty, price, side="BUY", ticker="SYNA", kind=None):
+    return {"event_type": kind or ("fill" if side == "BUY" else "close"), "timestamp": ts,
+            "ticker": ticker, "side": side, "qty": qty, "price": price}
+
+
+def test_averaging_down_exempts_the_opening_ladder_and_flags_later_orders():
+    """建仓阶梯豁免 = 下单时空仓 / 与首笔同日补挂; 之后新下的单成交在均价之下 = 摊低。"""
+    prior = [_ev("2025-03-10T09:41:00-04:00", 20, 52.0)]
+    assert averaging_down(prior, "SYNA", "2025-03-10T06:40:00-04:00", 50.5) is None   # 空仓时挂的档
+    assert averaging_down(prior, "SYNA", "2025-03-10T13:00:00-04:00", 50.5) is None   # 首笔同日补挂
+    assert averaging_down(prior, "SYNA", "2025-03-07T20:00:00-04:00", 50.5) is None   # 前一天空仓时挂的 GTC 档
+    hit = averaging_down(prior, "syna", "2025-03-14T11:41:00-04:00", 49.0)            # 之后新下的单摊低
+    assert hit == {"avg_cost": 52.0, "qty": 20, "campaign_start": "2025-03-10"}
+    assert averaging_down(prior, "SYNA", "2025-03-14T11:41:00-04:00", 52.0) is None   # ≥ 均价 = 往上加
+    assert averaging_down([], "SYNA", "2025-03-14T11:41:00-04:00", 49.0) is None      # 无持仓
+
+
+def test_averaging_down_follows_the_campaign_through_sells_and_exits():
+    """平均成本法: 部分卖出按均价减量 (均价不变); 清仓 / 到期归零 = 下一笔是新 campaign 的建仓。"""
+    part = [_ev("2025-03-03T10:00:00-04:00", 10, 100.0), _ev("2025-03-04T10:00:00-04:00", 4, 120.0, "SELL")]
+    assert averaging_down(part, "SYNA", "2025-03-07T10:00:00-04:00", 99.0)["avg_cost"] == 100.0
+    flat = part + [_ev("2025-03-05T10:00:00-04:00", 6, 90.0, "SELL")]
+    assert averaging_down(flat, "SYNA", "2025-03-07T10:00:00-04:00", 80.0) is None
+    expired = [_ev("2025-06-02T10:00:00-04:00", 1, 25.0, ticker="C1"),
+               _ev("2025-07-01T16:00:00-04:00", 1, 0.0, side="", ticker="C1", kind="expire")]
+    assert averaging_down(expired, "C1", "2025-07-07T10:00:00-04:00", 5.0) is None
+    opt = [_ev("2025-06-20T10:00:00-04:00", 1, 12.0, ticker="SYNA270319C050000")]     # 期权按合约 (权利金)
+    assert averaging_down(opt, "SYNA270319C050000", "2025-06-27T09:36:00-04:00", 8.0)["avg_cost"] == 12.0
+    assert averaging_down(opt, "SYNA270319C055000", "2025-06-27T09:36:00-04:00", 8.0) is None

@@ -67,6 +67,35 @@ def test_breakout_needs_two_closes_and_sees_no_future():
     assert K.key_breakouts(bars[:-1]) == []
 
 
+def test_pending_breakout_covers_the_day_between_first_close_and_confirmation():
+    """⭐突破中: 第一根收盘越过 ⭐箱顶 → box_top 不再「待破」、⭐突破要第二根才成立,
+    没有这一态时这一天没有状态 (⭐ 提醒线消失, 🧭 判「无箱」)。与 key_breakouts 读同一个越线判据 (`_crossings`)。"""
+    day1 = _run(_series(BOX), [108.0, 110.6])
+    assert K.box_top(day1) is None and K.key_breakouts(day1) == []            # 缺口本身
+    pend = K.pending_breakout(day1)
+    assert (pend["level"], pend["tests"], pend["date"]) == (110.3, 2, day1[-1]["time"][:10])
+    assert K.position(110.6, 2.0, None, None, pend=pend)["state"] == "pending"
+    held = _run(day1, [112.0])                                                 # 第二根仍在线上 = ⭐突破
+    assert K.pending_breakout(held) is None
+    assert [e["level"] for e in K.key_breakouts(held)] == [pend["level"]]
+    # 收回线下 = 回到待破。越线那根的高点若冲出 上沿 + 容差, 20 根最高价就不再落在这个簇
+    # —— 那是 box_top 的箱顶定义, 不归本判据管; 这里越线那根高点 111.1 仍在容差内。
+    back = _run(day1, [109.0])
+    assert K.pending_breakout(back) is None and K.box_top(back)["level"] == pend["level"]
+    assert K.pending_breakout(_series(BOX)) is None                            # 没越线 = 没有
+    assert K.pending_breakout(_run(_series({30: 110.0, 90: 110.3}), [108.0, 111.5])) is None   # 非 ⭐ 不算
+
+
+def test_one_bar_over_two_stars_confirms_the_highest_that_holds():
+    """一根越过两条 ⭐ (A 110.3 近 20 根内测 2 次; B 115 在 20 根外、60 根内测 2 次, 仍是 ⭐), 第二根只站住 A →
+    ⭐突破 = A (「同一根越过多条取第二根仍站得住的最高那条」)。不能先取越过的最高 (B) 再验第二根 —— 那样
+    一条都不记。突破中那天取越过的最高 (B): 第二根没来之前, 不知道哪条站得住。"""
+    bars = _run(_series({65: 115.0, 75: 114.8, 102: 110.0, 110: 110.3}), [108.0, 116.0])
+    assert K.pending_breakout(bars)["level"] == 115.0
+    assert [e["level"] for e in K.key_breakouts(_run(bars, [112.0]))] == [110.3]
+    assert [e["level"] for e in K.key_breakouts(_run(bars, [117.0]))] == [115.0]
+
+
 def test_second_close_back_under_the_line_is_not_a_breakout():
     """×2 = 两根都站上; 第二根收回线下 (仍高于前一根) = 没确认 —— 不能只靠「后面还有一根」。"""
     assert K.key_breakouts(_run(_series(BOX), [108.0, 111.5, 109.0])) == []
@@ -97,6 +126,23 @@ def test_failed_breakout_stays_failed_even_after_reclaiming():
     assert bad["first_date"] < bad["date"]
 
 
+def test_rebreak_above_the_failed_leg_high_is_a_fresh_breakout():
+    """⭐ 突破 → 收破地板 (失败) → 收盘 ×2 越过失败那段的最高价 = 再破, 不再是「回到震荡」。
+    ×1 只播 `over_ceiling`; 站回 ⭐ 线但没越过那段最高价 = 仍在失败后的箱子里。"""
+    base = _run(_series(BOX), [108.0, 111.5, 114.0, 105.0])     # 失败那段最高价 = 114.5
+    inside = K.last_breakout(_run(base, [112.0, 113.0]))           # 站回 ⭐ 线, 没越 114.5
+    assert not inside["intact"] and inside["rebreak"] is None and inside["over_ceiling"] is None
+    day1 = K.last_breakout(_run(base, [112.0, 115.0]))
+    assert not day1["intact"] and day1["rebreak"] is None and day1["over_ceiling"] == 114.5
+    rb = K.last_breakout(_run(base, [112.0, 115.0, 116.0]))
+    assert rb["intact"] and rb["held"] and rb["rebreak"]["level"] == 114.5
+    assert rb["first_date"] < rb["rebreak"]["date"] and rb["level"] == 110.3   # 首根站上 < 确认日; ⭐ 线原样
+    assert rb["floor"] < 114.5 and rb["gain_pct"] == round((116.0 / 114.5 - 1) * 100, 2)
+    assert K.position(116.0, 2.0, None, rb)["state"] == "broken"
+    again = K.last_breakout(_run(base, [112.0, 115.0, 116.0, 108.0]))  # 再破后收破新地板 = 再失败
+    assert not again["intact"] and again["rebreak"]["level"] == 114.5
+
+
 def test_position_priority():
     brk = {"level": 100.0, "intact": True, "held": True, "first_date": "2026-09-01"}
     old_top = {"level": 120.0, "test_dates": ["2026-07-01", "2026-08-01"]}
@@ -111,6 +157,9 @@ def test_position_priority():
     assert K.position(110.0, 3.0, None, {**brk, "intact": False}, at_bottom=True)["state"] == "bottom"
     assert K.position(110.0, 3.0, None, None)["state"] == "none"
     assert {K.position(110.0, 3.0, None, None)["cn"]} <= {v["cn"] for v in K.POSITIONS.values()}
+    pend = {"level": 108.0, "tests": 2}                     # 今天刚越线的那件事最先: 旧已破 / 新箱顶 / 底部都让位
+    for args in ((None, brk), (new_top, brk), (new_top, None, True), (None, {**brk, "intact": False})):
+        assert K.position(110.0, 3.0, *args, pend=pend)["state"] == "pending", args
 
 
 def test_no_new_knobs_and_module_grants_nothing():

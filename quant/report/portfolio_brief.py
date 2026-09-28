@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, earnings, sizing, structure  # noqa: E402  组合占用 + 财报缩仓 + gate 结构完整性
 from quant.core.holdings import (
-    UNMANAGED_ROLES, cards_missing_archetype, flat_with_lots, is_candidate, is_managed,
+    UNMANAGED_ROLES, cards_missing_archetype, cost_basis, flat_with_lots, is_candidate, is_managed,
     is_reference_role, live_tickers, lot_gap, lot_qty, managed_tickers, underlying_cards_missing_zones)
 from quant.core.io_json import atomic_write_json, iter_jsonl, read_json
 from quant.core.occ import is_option_ticker
@@ -364,8 +364,10 @@ def price_breach_fills(days: int = UNTAGGED_FILL_WINDOW_DAYS) -> List[str]:
             und_txt = (f" 正股≈{und['price']:g}@{und.get('basis')}"
                        + (" (bar 跨带)" if und.get("ambiguous") else "")
                        if und.get("price") is not None else "")
+            cost = (row.get("cost_at_fill") or {}).get("avg_cost")      # below_avg_cost 的收据
             out.append(f"{row.get('ticker')} {row.get('qty')}@{row.get('price')} "
                        f"({ts[:10]}) {'+'.join(flags)}{und_txt}"
+                       + (f" 均价 {cost:g}" if cost else "")
                        + (" ⚠️跨日盖章" if row.get("stamp_stale_card_risk") else ""))
     return out
 
@@ -1121,6 +1123,9 @@ def position_budget(ticker: str, item: Dict, nav: Optional[float],
             cap, portfolio_binding = pc, "notional→premium"
         elif pc is None:
             portfolio_binding = "未接 (期权缺 delta/标的价 — 组合层只在书级口径生效)"
+        # 成本闸: 期权按合约, 现价权利金 < 持仓均价 = 往下摊 → 0
+        if sizing.below_cost(price, None, cost_basis(card or {})):
+            cap, portfolio_binding = 0.0, "below_cost"
     else:
         calculation_price, _ = sizing.line_price(
             (cfg or {}).get("accumulation_zone_1"), price)
@@ -1130,10 +1135,13 @@ def position_budget(ticker: str, item: Dict, nav: Optional[float],
             atr_value,
             2.0,
         )
+        # 成本闸: 与授权侧 grant_actual_cap 同一个 entry_cap 臂, 均价同读 holdings.cost_basis ——
+        # 简报预算行与提醒线 z1 备注必须是同一个 0。
         entry = sizing.entry_cap(
             nav, cfg, atr=atr_value, price=calculation_price, stop=stop,
             usage=usage, event_shrink=event_shrink, gate_no=gate_no,
             power_room=power_room, exposure=exposure,
+            avg_cost=cost_basis(card or {}), spot=price,
         )
         cap = (
             entry["cap_usd"] if entry["cap_usd"] is not None
@@ -1207,6 +1215,15 @@ def position_ladder(ticker: str, cfg: Optional[Dict], budget: Optional[Dict],
     prices = _eg.build_ladder(mode, close, rows, zb, atr=atr_v, reclaim=reclaimed)
     if not prices:
         return None
+    # 成本闸 (成本不向下摊): 持仓后的加仓档位在均价之下的一律不挂 ——
+    # 阶梯价降序, 剔掉的是尾档; 全剔 = 今天没有合规的加仓价 (预算行可能仍 >0: 线价在均价上、档位没有)。
+    cost = cost_basis(card or {})
+    dropped = [p for p in prices if sizing.below_cost(p, None, cost)]
+    prices = [p for p in prices if not sizing.below_cost(p, None, cost)]
+    cost_note = (f"均价 {cost:.2f} 之下的 {'/'.join(f'{p:g}' for p in dropped)} 不挂 (成本不向下摊)"
+                 if dropped else None)
+    if not prices:
+        return {"mode": mode, "tiers": [], "n_tiers": 0, "blocked": cost_note}
     sl = sizing.share_ladder(budget["remaining_usd"], prices, _eg.PARAMS["ladder_weights"])
     if not sl:
         return None
@@ -1215,7 +1232,7 @@ def position_ladder(ticker: str, cfg: Optional[Dict], budget: Optional[Dict],
     pr = _dow.priority_of_bars(full, resample_weekly(full)) if len(full) >= 3 else None
     return {"mode": mode, "prices": prices, "tiers": sl["tiers"], "n_tiers": sl["n_tiers"],
             "n_shares": sl["n_shares"], "degraded": sl["degraded"],
-            "exception": sl["exception"], "note": sl["note"], "dow": pr}
+            "exception": sl["exception"], "note": sl["note"], "dow": pr, "cost_note": cost_note}
 
 
 # ── 财报缩仓的减仓半边 (ledger A2) ──────────────────────
@@ -1601,8 +1618,11 @@ def build_position_card(item: Dict, cfg: Optional[Dict], budget: Optional[Dict],
 
     if budget:
         mult = f" ({budget['cap_multiple']:g}x)" if budget.get("cap_multiple") else ""
-        tail = ("买不起 1 股 → zone 触碰非加仓信号" if budget["exhausted"]
-                else f"还可 {budget['addable_shares']} 股")
+        if budget.get("portfolio_binding") == "below_cost":
+            tail = "成本不向下摊 → 今日不加 (加仓价须 ≥ 均价, 线照画)"
+        else:
+            tail = ("买不起 1 股 → zone 触碰非加仓信号" if budget["exhausted"]
+                    else f"还可 {budget['addable_shares']} 股")
         # 组合层 binding 必须点名: 一张写着 40% 的卡今天只给 34%, 不写出来就
         # 无法解释 —— 同 regime binding 那一条 (会驱动动作的约束要可解释)。
         if budget.get("portfolio_binding"):
@@ -1622,9 +1642,11 @@ def build_position_card(item: Dict, cfg: Optional[Dict], budget: Optional[Dict],
                      f"cap ${budget['cap_usd']:,.0f}{mult} → 余 ${budget['remaining_usd']:,.0f}, {tail}")
         # 与 entry_guard 的阶梯挂单同格式，清单照抄。
         lad = budget.get("ladder")
-        if lad:
+        if lad and lad.get("blocked"):
+            lines.append(f"阶梯 [{lad['mode']}]: 今日无合规加仓价 — {lad['blocked']}")
+        elif lad:
             seg = [f"${t['price']:g}×{t['shares']}股(${t['usd']:,.0f})" for t in lad["tiers"]]
-            extra = f" — {lad['note']}" if lad.get("note") else ""
+            extra = "".join(f" — {lad[k]}" for k in ("note", "cost_note") if lad.get(k))
             lines.append(f"阶梯 [{lad['mode']}] {lad['n_tiers']}档: " + " / ".join(seg) + extra)
             if lad.get("exception"):
                 lines.append("⛔ 未落 decisions.jsonl 书面例外前, 这不是可执行计划")
@@ -2377,7 +2399,7 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             "ticker": "INFRA", "type": "fill_price_breach", "value": len(breached),
         })
         if emit_gate("INFRA", "fill_price_breach"):
-            alerts.append("⚠️ 成交价位违规 (>no_chase 追价 / trim 区加仓 / 期权正股在 z1 之上, 带授权标签也点名): "
+            alerts.append("⚠️ 成交价位违规 (>no_chase 追价 / trim 区加仓 / 期权正股在 z1 之上 / 均价之下摊低, 带授权标签也点名): "
                           + "; ".join(breached)
                           + " → 规则外成交清单, annotate_event 补注 + 落评分")
             triggers.append({"ticker": "INFRA", "type": "fill_price_breach",

@@ -208,6 +208,24 @@ def test_z1_budgets_uses_actual_cap_and_nav():
     assert prs.z1_budgets({"tickers": {}}, wl, TODAY, nav=None, veto_of=UP) == {}
 
 
+def test_z1_note_keeps_the_line_but_shows_zero_budget_when_the_add_would_average_down():
+    """成本闸 (画线保留, 只是预算归 0): 持仓票 z1 线价 / 现价在均价之下 →
+    备注 "z1:0%:0" (线还在, 钱是 0); 站在均价之上 → 照常带预算。与 Today / 简报同一个 grant。"""
+    card = {"broker": {"qty": 10}, "lots": {"position": [{"qty": 10, "avg_cost": 103.0}]},
+            "agent": {"current_regime": {"name": "R_收复_97", "cap_pct_nav": 0.4, "since": "2025-03-10",
+                                         "source": "auto"},
+                      "zones": {"valid_until": "2099-01-01", "accumulation_zone_1": [99.0, 101.5]}}}
+    pos = {"tickers": {"TSTX": card}}   # 假 ticker: _admit 的波动腿读 K 线缓存, 不许吃 live
+    low = prs.z1_budgets(pos, {"tickers": {}}, TODAY, nav=22500.0, quote_of=QUOTE, veto_of=UP)
+    assert low == {"TSTX": "0%:0"}                               # 线价 101.5 < 均价 103
+    lines, _ = prs.desired_lines(pos, {"tickers": {}}, TODAY, budgets=low)
+    assert [d["note"] for d in lines if d["kind"] == "z1"] == ["z1:0%:0"]
+    cheap = {**card, "lots": {"position": [{"qty": 10, "avg_cost": 96.0}]}}
+    ok = prs.z1_budgets({"tickers": {"TSTX": cheap}}, {"tickers": {}}, TODAY, nav=22500.0,
+                        quote_of=QUOTE, veto_of=UP)
+    assert ok["TSTX"] != "0%:0"
+
+
 def test_z1_budgets_closed_position_card_does_not_shadow_watchlist():
     """Positions 有 closed 残卡 (qty 0 无 regime) 时,
     授权真源是 watchlist 卡 — 卡源判别式 = live_tickers (qty), 不是 dict 有无 key。
@@ -921,8 +939,8 @@ def test_write_throttle_keeps_every_window_under_the_server_rate_limit():
 
 def test_server_limit_leaves_room_for_manual_lines():
     """实测: 每票每类型 20 条。线会翻向 ⇒ 最坏全挤同侧。
-    pin 至多 4 条/票 (gate:cur / gate:next / ⭐待破 / ⭐已破) 不占名额。"""
-    pins = 4
+    pin 至多 5 条/票 (gate:cur / gate:next / ⭐待破 / ⭐突破中 / ⭐已破) 不占名额。"""
+    pins = 5
     assert prs.MAX_PER_TICKER + pins < prs.SERVER_MAX_PER_TYPE == 20
     assert 1 + prs.future_gates.FUTURE_GATES_MAX < prs.MAX_PER_TICKER   # 远端 gate 吃不完可裁名额
 
@@ -941,7 +959,8 @@ def test_watchlist_card_now_draws_stop_trim_and_z2():
     got = {(d["kind"], d["value"], d["type"], d["note"]) for d in lines}
     assert ("stop", 90.0, "PRICE_DOWN", "stop:card") in got      # 卡片 regime 地板, 不是持仓止损
     assert ("trim", 130.0, "PRICE_UP", "trim") in got
-    assert ("z2", 100.0, "PRICE_DOWN", "z2") in got              # 下沿 (上沿 = z1 下沿, 不重复)
+    assert ("z2floor", 100.0, "PRICE_DOWN", "z2下沿") in got      # 下沿: 收破 = 当日 BUY 冻结
+    assert ("z2", 108.0, "PRICE_DOWN", "z2") in got              # 上沿 = 回踩进二档 (此处 = z1 下沿)
     assert ("z1", 110.0, "PRICE_DOWN", "z1") in got and ("gate", 115.0, "PRICE_UP", "gate") in got
 
 
@@ -949,8 +968,37 @@ def test_held_card_now_draws_z2_and_reclaim_rungs():
     pos = {"tickers": {"XX": {"broker": {"qty": 3}, "agent": {"zones": dict(_FULL_ZONES)}}}}
     lines, _ = prs.desired_lines(pos, {"tickers": {}}, TODAY, budgets={})
     got = {(d["kind"], d["value"], d["note"]) for d in lines}
-    assert {("z2", 100.0, "z2"), ("gate", 115.0, "gate"), ("z1", 110.0, "z1"),
+    assert {("z2floor", 100.0, "z2下沿"), ("z2", 108.0, "z2"), ("gate", 115.0, "gate"), ("z1", 110.0, "z1"),
             ("stop", 90.0, "stop:card"), ("trim", 130.0, "trim")} <= got
+
+
+def test_z2_draws_both_edges_even_when_the_bands_do_not_touch():
+    """只画下沿不够: z1 线画的是 z1 **上沿**, z1 下沿从来没有线; 两带不相接时二档入口整条缺席。
+    两桶同画: 上沿 "z2" (与 "z1" 同义 = 回踩进带) / 下沿 "z2下沿"。"""
+    zones = {**_FULL_ZONES, "accumulation_zone_1": [107.0, 108.8], "accumulation_zone_2": [98.0, 100.6],
+             "stop_level": 96.9, "no_chase_above": 112.0, "trim_zone": [130.0, 135.0], "reclaim_gates": []}
+    books = (({"tickers": {}}, {"tickers": {"XX": {"moomoo_listed": True, "agent": {"zones": zones}}}}),
+             ({"tickers": {"XX": {"broker": {"qty": 1}, "agent": {"zones": zones}}}}, {"tickers": {}}))
+    for pos, wl in books:
+        lines, _ = prs.desired_lines(pos, wl, TODAY, budgets={})
+        assert sorted((d["value"], d["type"], d["note"]) for d in lines
+                      if d["kind"] in ("z1", "z2", "z2floor")) == [
+            (98.0, "PRICE_DOWN", "z2下沿"), (100.6, "PRICE_DOWN", "z2"), (108.8, "PRICE_DOWN", "z1")]
+    # 挤名额时会改变行为的下沿后裁: 下沿优先级高于上沿, 两者都在 nochase 之后
+    assert prs.PRIORITY["nochase"] < prs.PRIORITY["z2floor"] < prs.PRIORITY["z2"] < prs.PRIORITY["fgate"]
+
+
+def test_z2_floor_rename_migrates_in_one_round_and_never_claims_manual_notes():
+    """下沿备注 "z2" → "z2下沿" (上沿接手 "z2"): 服务端旧线同价换血 (先删后加) 一轮完成;
+    认领是精确匹配 —— 手动的 "z2手动" / "z2下沿手动" 永不触碰。"""
+    desired = [{"code": "US.XX", "type": "PRICE_DOWN", "value": 100.0, "note": "z2下沿"},
+               {"code": "US.XX", "type": "PRICE_DOWN", "value": 108.0, "note": "z2"}]
+    rows = [{"code": "US.XX", "reminder_type": "PRICE_DOWN", "value": 100.0, "note": "z2", "key": 1},
+            {"code": "US.XX", "reminder_type": "PRICE_DOWN", "value": 95.0, "note": "z2手动", "key": 2},
+            {"code": "US.XX", "reminder_type": "PRICE_DOWN", "value": 96.0, "note": "z2下沿手动", "key": 3}]
+    adds, dels, kept, kept_manual = prs.plan_ops(desired, rows)
+    assert sorted(d["note"] for d in adds) == ["z2", "z2下沿"]
+    assert [r["key"] for r in dels] == [1] and kept == 0
 
 
 _TOP = {"level": 120.3, "lo": 119.8, "touches": 3, "kinds": "high", "tests": 3,
@@ -985,6 +1033,24 @@ def test_key_line_standalone_when_no_card_line_is_near():
     assert keys == {"⭐箱顶 测3": (120.3, "key", True), "⭐假突破 09-18": (104.4, "key", True)}
 
 
+def test_pending_breakout_keeps_the_star_line_on_the_breakout_day():
+    """⭐突破中: 第一根收盘越过 ⭐箱顶那天线不消失 —— 原位 pin, 备注「⭐突破中 测N」,
+    与待破 / 已破同规则吸附同一堵墙上的卡片线。"""
+    km = {"XX": {"top": None, "brk": None, "pend": _TOP, "stoplow": None}}
+    lines, _ = prs.desired_lines({"tickers": {}}, _key_card(), TODAY, key_map=km)
+    at = [d for d in lines if d["note"].startswith(prs.KEY_NOTE_PREFIX)]
+    assert [(d["value"], d["note"], d["kind"], d.get("pin")) for d in at] == [(120.3, "⭐突破中 测3", "key", True)]
+    lines, _ = prs.desired_lines({"tickers": {}}, _key_card(next_gate=120.0), TODAY, key_map=km)
+    assert [d["note"] for d in lines if d["value"] == 120.0] == ["⭐突破中 测3/gate:next"]
+
+
+def test_key_note_after_rebreak_reads_rebreak_date():
+    """假突破后越过失败那段最高价 ×2 (core/key_levels 再破) → ⭐ 线备注换成「再破 MM-DD」。"""
+    rb = {**_BRK, "rebreak": {"level": 110.0, "date": "2026-09-22"}}
+    assert prs._key_note("brk", rb) == "⭐再破 09-22"
+    assert prs._key_note("brk", {**rb, "intact": False}) == "⭐假突破 09-18"
+
+
 def test_key_line_merges_with_a_down_line_after_orientation():
     """⭐已破 (线在现价下方) 吸附到 z1 上沿: 定向前 ⭐ 是 PRICE_UP、z1 是 PRICE_DOWN,
     翻向后同价同向 → 并成一条, ⭐ 在前。"""
@@ -1010,11 +1076,12 @@ def test_mechanical_lines_survive_an_expired_card_but_not_delisting():
 
 
 def test_new_notes_are_owned_and_fit_the_server_width():
-    for n in ("z2", "⭐箱顶 测3", "⭐已破 09-22", "⭐假突破 09-09", "止跌低 ✓09-17",
-              "⭐已破 09-22/gate:cur/nochase/z1"):                 # 最宽的现实并入形态
+    for n in ("z2", "z2下沿", "⭐箱顶 测3", "⭐突破中 测3", "⭐已破 09-22", "⭐假突破 09-09", "止跌低 ✓09-17",
+              "⭐已破 09-22/gate:cur/nochase/z1",                  # 最宽的现实并入形态
+              "stop:card/z2/gate:cur"):                           # z2 上沿撞持仓 binding stop
         assert prs._owned_note(n), n
         assert prs._note_width(n) <= prs.NOTE_WIDTH_MAX, n
-    for manual in ("⭐", "止跌", "关键位", "z2手动"):
+    for manual in ("⭐", "止跌", "关键位", "z2手动", "z2下沿手动"):
         assert prs._owned_note(manual) == manual.startswith(("⭐", "止跌低")), manual
     # 并不进 40 宽 → 回退让位: 丢的是被并入那段, ⭐ 恒为 head (优先级最高) 不会被挤掉
     win = {"note": "⭐已破 09-22/gate:cur/nochase", "kind": "key"}
@@ -1031,8 +1098,10 @@ def test_key_level_map_eligibility_and_formed_only_stoplow(monkeypatch):
              "BB": {"stage": "watch", "low": 50.0}, "DD": {"stage": "none"}}
     monkeypatch.setattr(prs.key_levels, "box_top", lambda bars: {"level": 1.0} if bars == "BB" else None)
     monkeypatch.setattr(prs.key_levels, "last_breakout", lambda bars: None)
+    monkeypatch.setattr(prs.key_levels, "pending_breakout", lambda bars: {"level": 2.0} if bars == "DD" else None)
     monkeypatch.setattr(prs.setups, "bottom_setup", lambda bars: stage[bars])
     out = prs.key_level_map(pos, wl, bars_of=lambda t: t)
-    assert out == {"AA": {"top": None, "brk": None,
+    assert out == {"AA": {"top": None, "brk": None, "pend": None,
                           "stoplow": {"level": 95.0, "signal_date": "2026-09-17"}},
-                   "BB": {"top": {"level": 1.0}, "brk": None, "stoplow": None}}
+                   "BB": {"top": {"level": 1.0}, "brk": None, "pend": None, "stoplow": None},
+                   "DD": {"top": None, "brk": None, "pend": {"level": 2.0}, "stoplow": None}}   # 只有突破中也出

@@ -47,7 +47,7 @@ ET_TZ = ZoneInfo('America/New_York')
 
 import re as _re  # noqa: E402
 from quant.sync import state_io  # noqa: E402
-from quant.core.holdings import derive_tier, stamping_cards  # noqa: E402  tier/卡片合并判别式单一真源
+from quant.core.holdings import averaging_down, derive_tier, stamping_cards  # noqa: E402  tier/卡片合并/成本闸判别式单一真源
 from quant.core.io_json import iter_jsonl, read_json  # noqa: E402
 from quant.core.occ import parse_occ, strip_us_prefix as _strip_us_prefix  # noqa: E402
 from quant.core.paths import KLINE_CACHE_DIR, OPTION_PLANS_PATH, POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
@@ -102,6 +102,18 @@ def load_existing_keys() -> tuple[set[str], set[tuple[str, str]]]:
 
 
 _to_iso_et = et_naive_to_iso  # single implementation: lib.timeutil
+
+
+def _events_of(ticker: str) -> List[dict]:
+    """本票已落库的全部事件 (成本闸判据的输入; 本批先落库的同票成交也在内 —— 逐笔追加即写盘)。"""
+    out: List[dict] = []
+    if not EVENTS_DIR.exists():
+        return out
+    t = ticker.upper()
+    for month_dir in sorted(p for p in EVENTS_DIR.iterdir() if p.is_dir()):
+        out.extend(row for row in iter_jsonl(month_dir / 'trades.jsonl')
+                   if str(row.get('ticker') or '').upper() == t)
+    return out
 
 
 SIDE_TO_EVENT = {
@@ -187,7 +199,8 @@ def append_new_fills_to_events(new_rows: List[dict]) -> int:
     """
     cards = _cards()
     appended = 0
-    for r in new_rows:
+    # 按成交时刻顺序落库: 成本闸要读「这笔之前」的同票成交, 同一批里早成交的必须先写盘
+    for r in sorted(new_rows, key=lambda r: str(r.get('updated_time') or r.get('create_time') or '')):
         side = (r.get('side') or '').upper()
         event_type = SIDE_TO_EVENT.get(side)
         if event_type is None:
@@ -289,6 +302,16 @@ def append_new_fills_to_events(new_rows: List[dict]) -> int:
                         event['underlying_at_fill'] = {
                             'price': None, 'basis': 'unknown',
                             'note': '成交时刻正股 bar 不可得 (60m/1d 都没有) — 期权价位归人判'}
+        if event_type == 'fill' and side == 'BUY':
+            # ── 成本闸 (成本不向下摊: 加仓只许确认后往上加) ──────────
+            # 持仓之后新下的买单成交在均价之下 = 摊低 → below_avg_cost, 出口同价位违规
+            # (brief INFRA:fill_price_breach, 规则外评 C 起步)。建仓阶梯豁免 (下单时空仓 / 与首笔同日),
+            # 判别式 core.holdings.averaging_down; 期权按合约 (权利金)。授权侧同一条闸住 sizing.entry_cap。
+            ad = averaging_down(_events_of(event['ticker']), event['ticker'],
+                                _to_iso_et(r.get('create_time')) or ts, event['price'])
+            if ad:
+                event['price_flags'] = sorted(set(event.get('price_flags') or []) | {'below_avg_cost'})
+                event['cost_at_fill'] = ad
         if r.get('parent_order_id'):
             event['parent_order_id'] = r['parent_order_id']
         if r.get('remark'):

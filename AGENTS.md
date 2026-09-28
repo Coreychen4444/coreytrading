@@ -49,6 +49,7 @@
 9. **注解只给规则外成交**（判据见 trading-discipline）；`tier` / `auth` 落库即机械盖章；增量 BUY 自动落 lots（`lot_reconcile`），部分卖出归人工，漂移走 `INFRA:lot_drift`。
 10. **决策层哲学**：Bayesian 概率优先（先验、信息价值、验证后再更新、机会成本、预先承诺触发与失效条件、process 与 outcome 分开评分），高于任何单点 thesis；process > outcome。
 11. **两种模式（试行）**：入场只有 🔁 抄底（空仓 + ✓止跌 + 止损 = 止跌低）与 🚀 趋势确认（站稳 gate 转移）两条路；card 源「常规参与 cap 40%」与卖 put / sell premium 退役；宏观·情绪不进仓位，确认度只决定工具档位；持仓票不走抄底；试行满 10 笔或 60 交易日先到即按预先锁定的判据复核（止损率 >50% 或 mean R <0 → 回原确认口径重议）。判读层 chart-read 只列两种形态已形成 / 即将形成。
+12. **成本不向下摊**：持仓后新下的买单成交价须 ≥ 均价（`holdings.cost_basis`：lots 加权，期权按合约权利金），建仓阶梯（空仓时 / 与本轮首笔成交同日挂的档）豁免；授权侧 = `sizing.entry_cap` 成本闸（钱归 0，画线与 Today 组员保留），成交侧盖 `below_avg_cost` = 规则外。加仓只剩 pyramiding up，averaging down 分支退役。
 
 ## 定时任务（示例 cadence，operator 时区；实际注册与启用以运行时清单为准）
 | 任务 | 示例 cron（SGT） | 一句话 |
@@ -57,7 +58,7 @@
 | overnight-briefing | `30 18 * * 1-5` | 盘前简报 + 开盘操作手册 + 当日挂单清单（`--mode briefing`），技术研究回执 + 代码渲染风控收据，宏观先验读发布快照 |
 | postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画（每轮 `repaint_bound`）→入场计划（`option_plans` 按同一收盘重锚）→提醒线 / 白名单→转移达标收据与简报 |
 | gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled（等待预算 = 上游 lease，不私设秒数）后推 gate 阶梯表原文 |
-| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：首段大盘状态卡（SPY / QQQ / SMH 震荡·单边·转换中 + 转移线，`quant/journal/market_regime_log.py`，只作整体参考，不进排序与授权）+ 两种模式清单（🔁 抄底 = 次日未新低 / 长下影，止损 = 止跌低，附 [FYI] 底部确认概率 / 🚀 趋势确认 gate 接近度；已形成·即将形成）原文推送，未形成不列；尾段 🧭 箱体位置（全书按 ⭐已破·单边 / 箱顶下 / 中段 / 底部分组，`quant/core/key_levels.py`；描述性标注，样本外未复现 edge，不进排序与授权）（判别式 `quant/core/setups.py`；零授权、零模型调用） |
+| chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：首段大盘状态卡（SPY / QQQ / SMH 震荡·单边·转换中 + 转移线，`quant/journal/market_regime_log.py`，只作整体参考，不进排序与授权）+ 两种模式清单（🔁 抄底 = 次日未新低 / 长下影，止损 = 止跌低，附 [FYI] 底部确认概率 / 🚀 趋势确认 gate 接近度；已形成·即将形成）原文推送，未形成不列；尾段 🧭 箱体位置（全书按 ⭐已破·单边 / ⭐突破中 / 箱顶下 / 中段 / 底部分组，`quant/core/key_levels.py`；描述性标注，样本外未复现 edge，不进排序与授权）（判别式 `quant/core/setups.py`；零授权、零模型调用） |
 | weekly-portfolio-review | `3 10 * * 6` | 周复盘（宏观 / 技术 / 风控三角色唯一时点 + Agent 层周基线；估值归独立任务） |
 | valuation-daily | 每日 08:00（示例，Codex 运行器） | 独立估值：刷新→冻结→宏观情景→计算→估值报告；规范 `tasks/codex/valuation-daily.md`，零授权效力 |
 

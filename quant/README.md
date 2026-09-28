@@ -60,7 +60,7 @@
                market_regime（大盘状态卡：ER20 自身分位档 × 短期道氏 → 单边上行/单边下行/震荡/转换中 + 转移线 + 历史频率；判读层零授权）
                reversal（抄底入场类判别式：信号 / 止跌低 / 域 / 有效期；授权归 entry_guard）· setups（两种模式判读：抄底 = 空头衰竭的价格行为 / 趋势确认 = gate 接近度；零授权）
                future_gates（卡片阶梯顶之上的远端 gate 候选：pivot 簇上沿 + 窗口最高价，与 bottom_evidence 同一把尺；零授权；两个消费者读同一个 `for_card`：price_reminder_sync 的 `gate:+N` 线 / gate_ladder_report 的远端行）
-               key_levels（⭐箱顶 = 近 20 根最高价所在的簇 × 近 60 根被从下方测 ≥2 次、⭐突破 ×2 收盘、箱体位置判读；同一把簇尺，窗口全是既有常量别名；零授权；消费者 price_reminder_sync 的 ⭐ 线）
+               key_levels（⭐箱顶 = 近 20 根最高价所在的簇 × 近 60 根被从下方测 ≥2 次、⭐突破 ×2 收盘（只站上一根 = ⭐突破中）、箱体位置判读；同一把簇尺，窗口全是既有常量别名；零授权；消费者 price_reminder_sync 的 ⭐ 线）
                market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
                agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· valuation_contracts（情景单位、期限与传导约束）· motto（可选尾行，未配置即空）
                macro_analysis / macro_evidence（宏观研究模块 schema 与逐项证据收据）· macro_playbook（事件剧本形状，零授权）· interpreter（生产入口解释器守卫）

@@ -63,7 +63,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, earnings, env, technical  # noqa: F401  (.env → os.environ; book = 组合占用真源)
-from quant.core.holdings import live_tickers, lot_gap  # noqa: E402
+from quant.core.holdings import cost_basis, live_tickers, lot_gap  # noqa: E402
 from quant.core.io_json import read_json  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import parse_occ  # noqa: E402
@@ -166,10 +166,14 @@ def grant_actual_cap(ticker: str, card: dict, nav, usage=None, quote_of=None,
     stop, stop_basis = binding_stop(
         price, [coerce_float(((card.get("agent") or {}).get("zones") or {}).get("stop_level"))],
         atr, 2.0)
+    # 成本闸 (成本不向下摊): 持仓卡的线价 / 现价在均价之下 → 钱归 0,
+    # 授权与画线保留 (同结构 VETO 的形态; z1 备注随之显 "z1:0%:0")。空仓卡 cost_basis = None 不参与。
+    avg_cost = cost_basis(card)
     ac = entry_cap(nav, card.get("agent"), atr=atr, price=price, stop=stop,
                    usage=usage, event_shrink=ev["shrink"] if ev["active"] else None,
                    gate_no=gno, power_room=(book.power_room(today) or {}).get("room"),
-                   exposure=(exposure_of or book.exposure_of)(ticker))
+                   exposure=(exposure_of or book.exposure_of)(ticker),
+                   avg_cost=avg_cost, spot=spot)
     if ac.get("cap_usd") is None:
         return None
     if vetoed:
@@ -177,7 +181,7 @@ def grant_actual_cap(ticker: str, card: dict, nav, usage=None, quote_of=None,
         # 转坏由重画/转移机收尾, 不在 grant 层改组
         ac = {**ac, "cap_usd": 0.0, "final": 0.0, "cap_frac": 0.0,
               "binding": "structure_veto"}
-    return {**ac, "price_basis": price_basis, "price": price,
+    return {**ac, "price_basis": price_basis, "price": price, "avg_cost": avg_cost, "spot": spot,
             "structure_veto": vetoed, "structure_veto_why": veto_why if vetoed else None,
             "risk_stop": stop, "risk_stop_basis": stop_basis}
 
@@ -338,6 +342,10 @@ def annotate_actual_caps(members: Dict[str, str], positions_doc: dict,
         if ac.get("structure_veto"):
             notes.append(f"{tk}: 授权在, 但结构未修复 → 实际 cap $0 "
                          f"({ac.get('structure_veto_why')}) — 重画或等结构收复")
+        elif ac["binding"] == "below_cost":
+            px = min(p for p in (ac.get("price"), ac.get("spot")) if p)
+            notes.append(f"{tk}: 授权在, 但加仓价 {px:g} < 均价 {ac['avg_cost']:.2f} → 实际 cap $0 "
+                         "(成本不向下摊; 线保留, 站回均价之上再加)")
         elif ac["cap_usd"] < 1:
             notes.append(f"{tk}: 授权在, 但组合层 {ac['binding']} 余额已用尽 — "
                          "实际 cap $0, 进组≠下得了单")

@@ -792,8 +792,21 @@ def test_detail_page_spells_out_what_the_confirmation_probability_means(report):
 from quant.core import key_levels as KL  # noqa: E402
 
 
-def _box(state, top=None, brk=None):
-    return {"state": state, "cn": KL.POSITIONS[state]["cn"], "top": top, "brk": brk}
+def _box(state, top=None, brk=None, pend=None):
+    return {"state": state, "cn": KL.POSITIONS[state]["cn"], "top": top, "brk": brk, "pend": pend}
+
+
+def test_box_block_reads_the_breakout_day_as_pending_not_no_box():
+    """⭐突破中: 第一根收盘越过 ⭐箱顶那天不能判成「无箱 / 箱体中段 / ⭐突破失败」——
+    box_top 已不「待破」、⭐突破要第二根才成立。"""
+    closes = [100.0] * 120
+    bars = _bars(closes)
+    for i, hi in ((70, 110.0), (90, 110.3)):                  # 近 60 根被打两次 → ⭐箱顶 110.3
+        bars[i] = {**bars[i], "high": hi}
+    day1 = bars + _bars([108.0, 110.6], start="2025-05-01")
+    b = CR.box_block(day1, 2.0, {"listed": False})
+    assert b["state"] == "pending" and b["pend"] == {"level": 110.3, "tests": 2, "over_pct": 0.3}
+    assert CR.box_block(bars + _bars([108.0], start="2025-05-01"), 2.0, {"listed": False})["state"] != "pending"
 
 
 def test_report_carries_a_box_position(report):
@@ -820,19 +833,30 @@ def test_box_section_lists_every_ticker_once_grouped_in_order(report):
         {**_with(report, ticker="SYNE"), "box": _box("failed", brk={"level": 119.35, "date": "2026-08-11",
                                                                    "intact": False, "gain_pct": 14.0})},
         {**_with(report, ticker="ZZ"), "box": _box("none")},
+        {**_with(report, ticker="SYNF"), "box": _box("broken", brk={
+            "level": 129.35, "date": "2026-08-11", "intact": True, "gain_pct": 12.23,
+            "rebreak": {"level": 143.88, "date": "2026-09-15"}})},
+        {**_with(report, ticker="SYNG"), "box": _box("failed", brk={
+            "level": 80.18, "date": "2026-08-28", "intact": False, "gain_pct": 6.44, "over_ceiling": 88.37})},
+        {**_with(report, ticker="SYNH"), "box": _box("pending", top={"level": 72.35, "tests": 2, "dist_pct": 30.8},
+                                                      pend={"level": 57.57, "tests": 3, "over_pct": 1.1})},
     ]
     out = CR.digest(rs)
-    sec = out[out.index("### 🧭 箱体位置（6）"):].splitlines()
+    sec = out[out.index("### 🧭 箱体位置（9）"):].splitlines()
     groups = [ln for ln in sec if ln.startswith("- **")]
-    assert [re.match(r"- \*\*(.+?)\*\*", ln).group(1) for ln in groups] == [      # 顺序写死: 单边 → 逼近顶 → 中段 → 底 → 失败 → 无箱
-        "⭐已破箱顶·单边", "箱顶下·震荡", "箱体中段·震荡", "底部", "⭐突破失败·回到震荡", "无箱"]
+    assert [re.match(r"- \*\*(.+?)\*\*", ln).group(1) for ln in groups] == [      # 顺序写死: 单边 → 突破中 → 逼近顶 → 中段 → 底 → 失败 → 无箱
+        "⭐已破箱顶·单边", "⭐突破中·待确认", "箱顶下·震荡", "箱体中段·震荡", "底部", "⭐突破失败·回到震荡", "无箱"]
     body = "\n".join(groups)
-    for t in ("SYNA", "SYNB", "SYNC", "SYND", "SYNE", "ZZ"):
+    for t in ("SYNA", "SYNB", "SYNC", "SYND", "SYNE", "ZZ", "SYNH"):
         assert len(re.findall(rf"(?<![A-Z]){t}(?![A-Z])", body)) == 1, t
     assert "SYNA ⭐142.4 +5.2%·09-22" in body and "SYNE ⭐119.35·08-11" in body      # 失败不报涨幅
     assert "SYNB ⭐288（距 +4.1%）" in body
+    assert "SYNF ⭐129.35·08-11 再破 143.88 +12.2%·09-15" in body                  # 再破: 涨幅按再破线
+    assert "SYNG ⭐80.18·08-28 今收越 88.37（×1 待确认）" in body
+    assert "SYNH ⭐57.57 今收 +1.1%（×1 待确认）" in body                           # 越过的那条, 不是上方下一个箱顶
     legend = sec[1]
     assert legend.startswith("> ⭐ = ") and "样本外" in legend and "不当信号" in legend
+    assert "突破中" in legend
     for word in ("cap", "NAV", "股数", "$", "买入", "加仓"):
         assert word not in "\n".join(sec), word
 

@@ -590,3 +590,22 @@ def test_bottom_stock_leg_joins_the_today_group_and_a_held_name_does_not():
     plan["NBIS"].pop("expiry", None)
     members, _ = desired_members({"tickers": {}}, {"tickers": {}}, "2026-09-14", option_plans=plan)
     assert list(members) == ["NBIS"]
+
+
+def test_cost_gate_zeroes_a_held_grant_below_average_cost_but_keeps_membership():
+    """成本闸 (成本不向下摊; 画线保留, 只是预算归 0): 持仓卡加仓价 (min(线价, 现价))
+    在均价之下 → 实际 cap $0, binding below_cost; 组员保留 (同结构 VETO 形态), z1 备注经同一个
+    grant 显 "z1:0%:0"。fixture 持仓 lots 均价 98.25; 空仓的候选卡不受影响。"""
+    card = POS["tickers"]["INTC"]
+    ok = tgs.grant_actual_cap("INTC", card, 20000.0, None, lambda t: (3.0, 100.0), veto_of=UP)
+    low = tgs.grant_actual_cap("INTC", card, 20000.0, None, lambda t: (3.0, 95.0), veto_of=UP)
+    assert ok["cap_usd"] > 0 and ok["binding"] != "below_cost"
+    assert low["cap_usd"] == 0.0 and low["binding"] == "below_cost"
+    assert low["avg_cost"] == pytest.approx(98.25)
+    wl = tgs.grant_actual_cap("MSFT", WL["tickers"]["MSFT"], 20000.0, None, lambda t: (3.0, 50.0), veto_of=UP)
+    assert wl["cap_usd"] == 1000.0                                  # 空仓 = 建仓, 没有成本可摊
+    members, _ = tgs.desired_members(POS, WL, TODAY)
+    assert "INTC" in members
+    notes = tgs.annotate_actual_caps(members, POS, WL, 20000.0, None, lambda t: (3.0, 95.0), veto_of=UP)
+    assert "均价之下不摊 binding" in members["INTC"] and "实际 $0" in members["INTC"]
+    assert any("成本不向下摊" in n and "INTC" in n for n in notes)

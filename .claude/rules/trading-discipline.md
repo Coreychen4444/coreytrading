@@ -49,7 +49,8 @@ Activate when the operator mentions a specific trade action, asks for an opinion
 首档 current×0.98–1.00 占 50%（买参与权）/ 二档 5d high×0.92–0.95 占 30% / 三档 10d high×0.85–0.90 占 20%；未成交档每 2 个交易日按最新高点重锚，只升不降。`shares = floor(cap/price)`：≥3 → 3 档；2 → 1+1；1 → 单档（豁免单档禁令）；0 → 买 1 股 + `decisions.jsonl` 书面例外（声称落库 ≠ 落库）。代码真源 `quant/core/sizing.py` `share_ladder()`。硬禁止：主升浪单档挂单、挂单价 < 昨日 intraday low、因 "missed $X" 拒绝今天 $Y。
 
 ### Iron Rule #2 v2（加仓）
-先按 lots 均价分流：**新价 < 均价 = averaging down**——每 thesis 最多 1 次，且 thesis 未证伪 + 在 z1 / z2 + size ≤ 原仓 50%，违反硬拦 "越跌越买是失败者陷阱"；**新价 > 均价 = pyramiding up**——允许多次：higher low 确认（违反只警告）+ size ≤ 前笔 75% + 单票 ≤ 40% 名义上限（`sizing.NOTIONAL_CAP`）+ 加仓点在 zone / 突破回测位（违反硬拦）。同一 session 不得既 average down 又 pyramid up。
+**成本不向下摊（加仓只许确认后往上加，averaging down 分支退役）**：持仓之后新下的买单，成交价须 ≥ 均价（`holdings.cost_basis`：lots 加权均价，期权按合约权利金）。想在均价之下买 → 硬拦 "越跌越买是失败者陷阱"。唯一豁免 = **建仓阶梯**：下单时本票空仓、或与本轮首笔成交同日（ET）挂的档，三档第 2、3 档本来就在第 1 档之下（ladder_entry 阶梯）。代码：授权侧 `sizing.entry_cap` 成本闸（`below_cost`：持仓后 min(线价, 现价) < 均价 → 钱归 0，画线与 Today 组员保留，z1 备注显 `z1:0%:0`）；简报持仓阶梯剔除均价下的档；成交侧 `trade_history_sync` 盖 `below_avg_cost`（`holdings.averaging_down`）→ `INFRA:fill_price_breach`，规则外评 C 起步。
+**新价 ≥ 均价 = pyramiding up**——允许多次：higher low 确认（违反只警告）+ size ≤ 前笔 75% + 单票 ≤ 40% 名义上限（`sizing.NOTIONAL_CAP`）+ 加仓点在 zone / 突破回测位（违反硬拦）。
 
 ## Sell put（已退役）
 两种模式（抄底 / 趋势确认）之外坚决不做：卖 put / sell premium 不再是入场工具。私有策略目录里的 sell-put 规则只读留档；有人提卖 put → 引本条，不跑 quick check。

@@ -18,6 +18,7 @@
   多次打到   簇内近 `TEST_BARS`(60) 根有 ≥ `MIN_TESTS`(2) 个分形**高点**（从下方被测试 ≥2 次；
             60 = setups.LH_LOOKBACK 同窗；2 = bottom_evidence.MIN_TOUCHES「≥2 触碰才算地标」）。
   ⭐箱顶     两者皆有。收盘 ×2 站上它（首日前收 ≤ 上沿）= **⭐突破**。
+  ⭐突破中   只站上了第一根、第二根还没来（中间态，定义不变：同一个越线判据 `_crossings`）。
   ⭐已破     近 `TEST_BARS` 根内最近一次 ⭐突破的那条线（突破后它翻成下方的支撑，跌回 = 假突破的事实）。
 
   近 60 根只被测过 1 次的簇（另一次触碰在窗外）按本尺**不是** ⭐。
@@ -42,7 +43,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import technical
 from .bottom_evidence import CLUSTER_TOL_ATR14, MIN_TOUCHES, PIVOT_LOOKBACK
@@ -124,73 +125,140 @@ def box_top(bars: List[dict], upto: Optional[int] = None) -> Optional[Dict]:
     return {**_view(c, i), "max_high": max_high, "bucket": cl["bucket"], "atr14": cl["atr14"]}
 
 
+def _crossings(bars: List[dict], i: int) -> Tuple[List[Dict], Optional[Dict]]:
+    """第 i 根收盘向上越过的 ⭐箱顶 → (越过的簇, i−1 当天的簇上下文) | ([], None)。
+
+    越过 = 第 i−1 根收盘 ≤ 上沿 < 第 i 根收盘，且上沿所在簇在 i−1 当天就是 ⭐箱顶（上沿 + 容差 ≥ i 之前
+    RANGE_BARS 根最高价，且被测试 ≥MIN_TESTS 次）。⭐突破（`key_breakouts`：再要第 i+1 根仍收在上沿之上）
+    与 ⭐突破中（`pending_breakout`：第 i 根就是最后一根）读这同一个判据 —— 两处各写一遍 = 同一概念双判别式。"""
+    c_prev, c_i = float(bars[i - 1]["close"]), float(bars[i]["close"])
+    if not c_i > c_prev:
+        return [], None
+    cl = _clusters(bars, i - 1)
+    if cl is None:
+        return [], None
+    max_high = max(float(b["high"]) for b in bars[i - RANGE_BARS:i])
+    return [c for c in cl["clusters"]
+            if c_prev <= c["hi"] < c_i and _is_key(c, cl["tol"], max_high, i - 1)], cl
+
+
 def key_breakouts(bars: List[dict], lookback: int = TEST_BARS) -> List[Dict]:
     """近 `lookback` 根内的 ⭐突破（时间升序）→ [{level, lo, touches, kinds, tests, test_dates, date, idx}]。
 
-    判据（无前视，逐日重放）：第 i 根收盘 > 上沿 ≥ 第 i−1 根收盘，且第 i+1 根收盘仍 > 上沿（×2）；
-    上沿所在簇在 i−1 当天就是 ⭐箱顶（上沿 + 容差 ≥ i 之前 RANGE_BARS 根最高价，且被测试 ≥MIN_TESTS 次）。
-    同一根上越过多条 ⭐ 取最高那条。`date` = 确认日（第 i+1 根）。"""
+    判据（无前视，逐日重放）：第 i 根收盘越过 ⭐箱顶（`_crossings`），且第 i+1 根收盘仍 > 上沿（×2）。
+    同一根上越过多条 ⭐ 取第二根仍站得住的最高那条。`date` = 确认日（第 i+1 根）。"""
     n = len(bars)
     out: List[Dict] = []
     for i in range(max(RANGE_BARS + 1, n - lookback - 1), n - 1):
-        c_prev, c_i, c_next = (float(bars[k]["close"]) for k in (i - 1, i, i + 1))
-        if not (c_i > c_prev and c_next > c_prev):
+        c_next = float(bars[i + 1]["close"])
+        if not c_next > float(bars[i - 1]["close"]):      # 第二根都没站上前收, 不必算簇
             continue
-        cl = _clusters(bars, i - 1)
-        if cl is None:
+        crossed, cl = _crossings(bars, i)
+        held = [c for c in crossed if c_next > c["hi"]]
+        if not held:
             continue
-        max_high = max(float(b["high"]) for b in bars[i - RANGE_BARS:i])
-        crossed = [c for c in cl["clusters"]
-                   if c_prev <= c["hi"] < c_i and c_next > c["hi"] and _is_key(c, cl["tol"], max_high, i - 1)]
-        if not crossed:
-            continue
-        c = max(crossed, key=lambda c: c["hi"])
+        c = max(held, key=lambda c: c["hi"])
         out.append({**_view(c, i - 1), "date": _day(bars[i + 1]), "idx": i + 1,
                     "bucket": cl["bucket"]})
     return out
+
+
+def pending_breakout(bars: List[dict]) -> Optional[Dict]:
+    """⭐突破中：最后一根收盘刚越过 ⭐箱顶、×2 的第二根还没来 → {level, lo, touches, kinds, tests,
+    test_dates, last_test, date, bucket} | None。越过多条取最高。
+
+    为什么要它：`box_top` 只认收盘之上的簇 —— 一根收盘越线它就不再「待破」，而 ⭐突破要到第二根才成立，
+    中间这一天没有状态：⭐ 提醒线消失、🧭 会被判成「无箱 / 箱体中段 / ⭐突破失败」。与 gate「穿过了但没 ×2
+    确认，恰恰是最该有线的时刻」同一个形状。定义不动 —— 次日仍收在上沿之上 → `key_breakouts` 记 ⭐突破；收回线下 → `box_top` 接手。"""
+    i = len(bars) - 1
+    if i < RANGE_BARS + 1:
+        return None
+    crossed, cl = _crossings(bars, i)
+    if not crossed:
+        return None
+    c = max(crossed, key=lambda c: c["hi"])
+    return {**_view(c, i - 1), "date": _day(bars[i]), "bucket": cl["bucket"]}
 
 
 def last_breakout(bars: List[dict], lookback: int = TEST_BARS) -> Optional[Dict]:
     """近 `lookback` 根内最近一次 ⭐突破 + 现状 → dict | None。
 
     `intact` = 确认日之后没有一根收盘跌破 线 − 0.5×ATR20@确认日（= 系统的转移地板 bfloor_buf，
-    定价里的止损同式）；跌破过 = 这次突破失败了（之后又站回来也是在线附近反复 = 震荡，不是单边）。
-    `first_date` = 第一根站上的日子（确认日前一根），用来判「突破之后有没有长出新箱顶」。"""
+    定价里的止损同式）；跌破过 = 这次突破失败了（之后又站回 ⭐ 线也是在线附近反复 = 震荡，不是单边）。
+    `first_date` = 第一根站上的日子（确认日前一根），用来判「突破之后有没有长出新箱顶」。
+
+    **再破**：失败之后的震荡有天花板 = 自 `first_date` 起的最高价（失败那段冲高自己画出来的顶）。收盘 ×2
+    站上它 = 离开了失败后的箱子（否则越过之后一路上行仍会被判成「回到震荡」）。再破后 `intact` / `floor` / `held` /
+    `gain_pct` / `first_date` 都按天花板重算（同一个 ×2 与 0.5N，零新旋钮），`rebreak` = {level, date}；
+    `level` / `date` 仍是原 ⭐ 线（moomoo ⭐ 线画的是它）。再破后又收破新地板 = 再失败，天花板继续累积。
+    失败中今天刚收上天花板 ×1 → `over_ceiling` = 天花板（待第二根确认，只播）。"""
     evs = key_breakouts(bars, lookback)
     if not evs:
         return None
     e = evs[-1]
     j = e["idx"]
+    n = len(bars)
     close = float(bars[-1]["close"])
-    n20 = atr20_at(bars, j)
-    # 0.5 = bfloor_buf (regime_transition 转移地板同式, 那边同样是内联 0.5×ATR20)
-    floor = (e["level"] - 0.5 * n20) if n20 else e["level"]
-    intact = all(float(b["close"]) >= floor for b in bars[j + 1:])
-    return {**e, "first_date": _day(bars[j - 1]), "floor": round(floor, 2), "intact": intact,
-            "held": close > e["level"], "bars_since": len(bars) - 1 - j,
-            "gain_pct": round((close / e["level"] - 1.0) * 100.0, 2)}
+
+    def _floor(level: float, at: int) -> float:
+        n20 = atr20_at(bars, at)
+        # 0.5 = bfloor_buf (regime_transition 转移地板同式, 那边同样是内联 0.5×ATR20)
+        return (level - 0.5 * n20) if n20 else level
+
+    start = j - 1                               # 第一根站上的那根
+    level, conf, floor = e["level"], j, _floor(e["level"], j)
+    intact, rebreak = True, None
+    k = j + 1
+    while k < n:
+        c = float(bars[k]["close"])
+        if intact:
+            if c < floor:
+                intact = False
+            k += 1
+            continue
+        ceil = max(float(b["high"]) for b in bars[start:k])
+        if c > ceil and k + 1 < n and float(bars[k + 1]["close"]) > ceil:
+            start, level, conf = k, ceil, k + 1
+            floor, intact = _floor(ceil, conf), True
+            rebreak = {"level": round(ceil, 2), "date": _day(bars[conf])}
+            k = conf + 1
+            continue
+        k += 1
+    over = None
+    if not intact:
+        ceil = max(float(b["high"]) for b in bars[start:n - 1])
+        if close > ceil:
+            over = round(ceil, 2)
+    return {**e, "first_date": _day(bars[start]), "floor": round(floor, 2), "intact": intact,
+            "held": close > level, "bars_since": n - 1 - conf, "rebreak": rebreak,
+            "over_ceiling": over, "gain_pct": round((close / level - 1.0) * 100.0, 2)}
 
 
 POSITIONS = {
+    "pending": {"cn": "⭐突破中", "desc": "最后一根收盘刚越过 ⭐箱顶，等第二根收盘确认（×2）"},
     "broken": {"cn": "⭐已破箱顶", "desc": "近 60 根 ⭐突破、此后没收破 线−0.5N、上方也还没长出新箱顶 = 单边"},
     "bottom": {"cn": "底部", "desc": "抄底框架 ✓止跌 / ⏳顶后新低 在场（调用方按 setups.bottom_setup 给）"},
     "near_top": {"cn": "箱顶下", "desc": "收盘在 ⭐箱顶之下 ≤1N（setups.NEAR_GATE_ATR，同「即将形成」）"},
     "mid": {"cn": "箱体中段", "desc": "在 ⭐箱顶之下 >1N 且不在底部 = 中间的震荡"},
-    "failed": {"cn": "⭐突破失败", "desc": "近 60 根 ⭐突破后收破过 线−0.5N，上方没有新的 ⭐箱顶 = 回到震荡"},
+    "failed": {"cn": "⭐突破失败", "desc": "近 60 根 ⭐突破后收破过 线−0.5N、还没收盘 ×2 越过失败那段的最高价，"
+                                         "上方没有新的 ⭐箱顶 = 回到震荡"},
     "none": {"cn": "无箱", "desc": "既没有待破的 ⭐箱顶，近 60 根也没有 ⭐突破"},
 }
 
 
 def position(close: Optional[float], atr20: Optional[float], top: Optional[Dict],
-             brk: Optional[Dict], at_bottom: bool = False) -> Dict:
+             brk: Optional[Dict], at_bottom: bool = False, pend: Optional[Dict] = None) -> Dict:
     """标的此刻在箱体结构里的位置（判读）→ {state, cn}。
 
+    ⭐突破中（`pending_breakout`）最先：它是今天刚发生、明天就会落定的那件事，旧的已破 / 上方的新箱顶都让位。
     ⭐已破 须同时满足：突破完好（`intact`）且收盘仍在线上，且上方的待破 ⭐箱顶不是突破**之后**
     长出来的（≥MIN_TESTS 次测试晚于 `first_date` = 突破后又被压成一个新箱子 → 按新箱子判）。
     其余按 底部 > 箱顶下 > 箱体中段 > ⭐突破失败 > 无箱。"""
     new_box = bool(top and brk and sum(d >= brk.get("first_date", "") for d in top.get("test_dates") or [])
                    >= MIN_TESTS)
-    if brk and brk.get("intact") and brk.get("held") and not new_box:
+    if pend:
+        st = "pending"
+    elif brk and brk.get("intact") and brk.get("held") and not new_box:
         st = "broken"
     elif at_bottom:
         st = "bottom"

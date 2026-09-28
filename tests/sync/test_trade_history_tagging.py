@@ -65,7 +65,32 @@ def written(monkeypatch):
     monkeypatch.setattr(th.state_io, "append_trade_event", lambda e: out.append(e))
     monkeypatch.setattr(th, "_cards", lambda: CARDS)
     monkeypatch.setattr(th, "_option_plans", lambda: {})     # 反转探针授权文件: 默认空
+    # 成本闸读「这笔之前」的同票事件 —— 读的是本测试写进 `out` 的, 永远不读 live 账本
+    monkeypatch.setattr(th, "_events_of",
+                        lambda t: [e for e in out if str(e.get("ticker")).upper() == t.upper()])
     return out
+
+
+def _fill(ts, qty, price, ticker="INTC", side="BUY"):
+    return {"event_type": "fill" if side == "BUY" else "close", "timestamp": ts, "ticker": ticker,
+            "side": side, "qty": qty, "price": price}
+
+
+def test_cost_gate_flags_a_later_order_below_average_cost_but_not_the_opening_ladder(written):
+    """成本闸 (成本不向下摊): 建仓 20 @52 之后几天新下单 10 @49 = 摊低 → below_avg_cost + 均价收据;
+    同一轮建仓计划的低档 (空仓时下的单, 或与首笔同日补挂) 成交在首档之下 = 豁免 (三档阶梯本来就逐档向下)。"""
+    written.append(_fill("2025-03-10T09:41:00-04:00", 20.0, 52.0))
+    th.append_new_fills_to_events([
+        {**_row(qty=10.0, price=49.0, order_id="LATE"), "create_time": "2025-03-14 11:41:00",
+         "updated_time": "2025-03-14 11:42:00"},
+        {**_row(qty=5.0, price=50.5, order_id="OPEN3"), "create_time": "2025-03-10 06:40:00",
+         "updated_time": "2025-03-12 10:00:00"},                    # 建仓那天挂的第三档, 两天后成交
+    ])
+    late, open3 = (next(e for e in written if e.get("order_id") == k) for k in ("LATE", "OPEN3"))
+    assert "below_avg_cost" not in (open3.get("price_flags") or [])
+    assert "below_avg_cost" in late["price_flags"]
+    assert late["cost_at_fill"]["avg_cost"] == pytest.approx((20 * 52 + 5 * 50.5) / 25, abs=1e-3)
+    assert [e["order_id"] for e in written[1:]] == ["OPEN3", "LATE"]       # 按成交时刻落库, 早的先写盘
 
 
 def test_buy_fill_gets_both_tags(written):

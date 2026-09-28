@@ -23,6 +23,8 @@ Applied when: 讨论仓位、加仓、减仓、止损、止盈、portfolio revie
        剩余冲击预算 ÷ (1.88 × ATR20/价),                            # SHOCK_BUDGET 15% NAV
        GROSS_CAP 110% NAV − 已用 gross,
        购买力余额 book.power_room() )                                # 不用 cash 字段
+  ⓪ 成本闸 (成本不向下摊): 持仓后 min(线价, 现价) < 均价 (holdings.cost_basis) → 0,
+     binding below_cost —— 同结构 VETO 形态: 授权 / Today 组员 / 画线保留, 钱归 0 (z1 备注 z1:0%:0)
   ```
   stop 距离 = 真 stop（卡 stop / 棘轮地板 / 趋势死亡线取 max，`sizing.binding_stop`）；2N 只兜底不进 max。
 - **档位 = `gate_count(card)`** = 卡上 `regime_history` 里**给了 cap 的** up 转移条数；down 转移 / 平仓归第一档（平仓日读 `exit_info.closed_at` 与 `readd_from_position.closed_at` 两处）。同一 gate 内可分多笔，余额 = 上限 − 敞口市值。「轮」/ r1 r2 r3 已退役。

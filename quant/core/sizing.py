@@ -180,7 +180,21 @@ def binding_label(cap: dict) -> str:
         "gross": "gross 余额",
         "power": "现金购买力",
         "regime": "regime cap",
+        "below_cost": "均价之下不摊",
     }.get(binding, str(binding))
+
+
+def below_cost(price: Optional[float], spot: Optional[float],
+               avg_cost: Optional[float]) -> bool:
+    """成本闸（成本不向下摊：加仓只许 pyramiding up，averaging down 退役）: 持仓之后这一笔加仓
+    会不会把成本往下摊。
+
+    成交价 = min(线价, 现价) —— 现价已在线下时, 线上的限价单按现价成交。`avg_cost` None
+    (空仓 / 成本未知, 见 `holdings.cost_basis`) → False: 空仓没有成本可摊, 建仓阶梯不受限。"""
+    if not avg_cost:
+        return False
+    px = [float(p) for p in (price, spot) if p]
+    return bool(px) and min(px) < float(avg_cost)
 
 
 def risk_notional_cap(nav: Optional[float], risk_frac: Optional[float],
@@ -595,8 +609,10 @@ def entry_cap(nav: Optional[float], agent: Optional[dict] = None, *,
               stop: Optional[float] = None, usage: Optional[Dict] = None,
               event_shrink: Optional[float] = None, gate_no: int = 1,
               power_room: Optional[float] = None,
-              exposure: Optional[float] = None) -> Dict:
-    """**「这一笔实际能下多少」的单一真源**—— 六条约束取小。
+              exposure: Optional[float] = None,
+              avg_cost: Optional[float] = None,
+              spot: Optional[float] = None) -> Dict:
+    """**「这一笔实际能下多少」的单一真源**—— 成本闸 + 六条约束取小。
 
     用户 : 「available cap 无论是画线还是 entry guard 都要以
     available cap 显示」—— 四个消费者 (entry_guard / today_group /
@@ -608,6 +624,9 @@ def entry_cap(nav: Optional[float], agent: Optional[dict] = None, *,
         ④ 冲击预算余额       NAV × (0.15 − used) / (X × ATR20/价)
         ⑤ gross 余额        NAV × (1.10 − used_gross)
         ⑥ 购买力余额        power 快照 − 当日已成交 BUY
+        ⓪ 成本闸            持仓之后 min(价, 现价) < 均价 → 0 (`below_cost`, 成本不向下摊;
+                            `avg_cost` 由持仓侧调用方给 `holdings.cost_basis`,
+                            空仓 None = 不参与。binding 名 `below_cost`, 同结构 VETO: 授权与画线保留, 钱归 0)
 
     **① 的唯一来源 = regime cap**(分类轴退役): 无 regime / cap 缺失
     → **0.0 fail-closed**(schema 同生同死保证活跃正股卡必有 regime, 无 regime =
@@ -640,7 +659,8 @@ def entry_cap(nav: Optional[float], agent: Optional[dict] = None, *,
     if nunit is not None:
         nunit = max(nunit - float(exposure or 0.0), 0.0)
     at_risk = at_risk_nominal_cap(nav, price, stop)
-    named = [("regime", ac["regime_cap"]), ("n_unit", nunit),
+    cost_gate = 0.0 if below_cost(price, spot, avg_cost) else None
+    named = [("regime", ac["regime_cap"]), ("below_cost", cost_gate), ("n_unit", nunit),
              ("at_risk", at_risk), ("shock_budget", ac["shock_budget_cap"]),
              ("gross", ac["gross_cap"]), ("power", ac["power_cap"])]
     live = [(k, v) for k, v in named if v is not None]

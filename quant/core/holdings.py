@@ -238,6 +238,72 @@ def lot_gap(body: dict) -> float:
     return float(broker.get("qty") or 0) - lot_qty(body)
 
 
+def cost_basis(body: dict) -> float | None:
+    """「成本不向下摊」的成本 = 这张卡**受管层**持仓的加权均价 → float | None。
+
+    lots.position (lot_reconcile 按实际成交落的) 优先 —— broker.avg_cost 是 moomoo 把 base 与
+    position 合并的均价, 不作 PnL 参考 (position-tiers); lots 缺 (期权 lot 只报不写 / 未落账)
+    → 回落 broker.avg_cost (期权卡按合约, 即权利金成本)。broker.qty 为 0 / synthetic 行 → None:
+    空仓没有成本可摊, 建仓不受此约束。"""
+    broker = body.get("broker") or {}
+    if broker.get("synthetic") or not float(broker.get("qty") or 0):
+        return None
+    lots = [lot for lot in ((body.get("lots") or {}).get("position") or [])
+            if float(lot.get("qty") or 0) > 0 and float(lot.get("avg_cost") or 0) > 0]
+    q = sum(float(lot["qty"]) for lot in lots)
+    if q > 0:
+        return sum(float(lot["qty"]) * float(lot["avg_cost"]) for lot in lots) / q
+    ac = float(broker.get("avg_cost") or 0)
+    return ac if ac > 0 else None
+
+
+def averaging_down(prior_events, ticker: str, order_created: str,
+                   fill_price: float) -> dict | None:
+    """成交侧判据: 这笔 BUY 是不是把成本往下摊了 → {avg_cost, qty, campaign_start} | None (不算)。
+
+    成本不向下摊: 加仓只许确认后往上加 (Iron Rule #2 v2 的 averaging down 分支退役)。`prior_events` = 本票在这笔成交之前的全部事件 (trades.jsonl 行); 时间一律比 ET 墙钟
+    前 19 位 (事件 ISO 与 moomoo 下单时刻同为 ET, 夏冬令 offset 不参与比较)。
+
+      campaign  最近一次持仓归零之后的成交 (平均成本法: 卖出按均价减量, 归零重开; expire / assign 归零)
+      豁免      建仓阶梯 —— 下单时本票没有持仓, 或下单日 (ET) = 本 campaign 首笔成交日 (同一轮计划
+                补挂的档)。三档阶梯的第 2、3 档本来就挂在第 1 档下面 (ladder_entry 阶梯)
+      摊低      之后新下的买单, 成交价 < 当时均价
+
+    期权按合约 (ticker = OCC code, 价 = 权利金), 与正股同一套。"""
+    t, created = ticker.upper(), str(order_created or "")[:19]
+    qty = cost = 0.0
+    start = None
+    at_create = 0.0                              # 下单那一刻的持仓量 (之前的事件处理完的 qty)
+    for e in sorted((e for e in prior_events if str(e.get("ticker") or "").upper() == t),
+                    key=lambda e: str(e.get("timestamp") or "")[:19]):
+        ts = str(e.get("timestamp") or "")[:19]
+        kind = e.get("event_type")
+        side = str(e.get("side") or "").upper()
+        q, p = float(e.get("qty") or 0), float(e.get("price") or 0)
+        if kind in ("expire", "assign"):
+            qty = cost = 0.0
+        elif side == "BUY" and q > 0:
+            if qty <= 1e-9:
+                qty, cost, start = 0.0, 0.0, ts
+            qty, cost = qty + q, cost + q * p
+        elif side in ("SELL", "SELL_SHORT") and qty > 0:
+            avg = cost / qty
+            qty = max(0.0, qty - q)
+            cost = avg * qty
+        if created and ts < created:
+            at_create = qty
+    if qty <= 1e-9 or not start:
+        return None
+    if created and not at_create:
+        return None                              # 下单时还是空仓 = 建仓阶梯
+    if created and created[:10] == start[:10]:
+        return None                              # 与首笔成交同一天下的单 = 同一轮建仓计划
+    avg = cost / qty
+    if float(fill_price) >= avg:
+        return None
+    return {"avg_cost": round(avg, 4), "qty": qty, "campaign_start": start[:10]}
+
+
 def flat_with_lots(doc: dict) -> list[str]:
     """已平仓 (不在 live) 但 lots 还挂着的 ticker —— 平仓清理没做完。
 

@@ -308,6 +308,19 @@ def test_option_budget_never_mixes_premium_with_notional(env):
     assert with_delta["cap_usd"] < NAV * 0.03
 
 
+def test_option_budget_zeroes_when_premium_is_below_the_contract_cost(env):
+    """成本闸按合约: 现价权利金 < 该合约持仓均价 = 往下摊 → cap 0 / below_cost。"""
+    occ = "MU270115C900000"
+    env([_fill(ticker=occ, qty=1.0, price=35.0, cls="confirmed")])
+    _ohlc()
+    item = {"ticker": occ, "qty": 1.0, "current_price": 30.0, "is_option": True, "synthetic": False}
+    card = {"broker": {"qty": 1, "avg_cost": 35.0}, "lots": {"position": []}}
+    b = pb.position_budget(occ, item, pb._latest_nav(), CFG_FULL, None, card=card)
+    assert b["cap_usd"] == 0.0 and b["portfolio_binding"] == "below_cost"
+    up = pb.position_budget(occ, {**item, "current_price": 40.0}, pb._latest_nav(), CFG_FULL, None, card=card)
+    assert up["cap_usd"] > 0
+
+
 # ── 2. dual stop lines ────────────────────────────────────────
 
 GUARD = {"trail": {"trail": 750.8403, "mode": "normal"},
@@ -650,6 +663,39 @@ def test_position_card_renders_ladder_line_in_entry_guard_format(env):
     card = pb.build_position_card(item, SYN_CFG, b, None)
     assert "阶梯 [normal] 3档: $100×5股($500) / $90×3股($270) / $75×2股($150)" in card
     assert "⛔" not in card
+
+
+def test_position_ladder_drops_rungs_below_average_cost(env):
+    """成本闸 (成本不向下摊): 持仓后的加仓档位在均价之下的一律不挂 —— 阶梯价
+    降序, 剔的是尾档; 全在均价之下 = 今日无合规加仓价, 卡上一行说清楚 (不是悄悄消失)。"""
+    env()
+    _write_bars("SYN", 115.0)
+    held = lambda cost: {"agent": {}, "broker": {"qty": 10, "avg_cost": cost}}   # noqa: E731
+    lad = pb.position_ladder("SYN", SYN_CFG, _budget(1000.0), held(88.0), today="2030-01-21")
+    assert [t["price"] for t in lad["tiers"]] == [100.0, 90.0]                   # 75 < 88 剔掉
+    assert "88.00" in lad["cost_note"] and "75" in lad["cost_note"]
+    blocked = pb.position_ladder("SYN", SYN_CFG, _budget(1000.0), held(101.0), today="2030-01-21")
+    assert blocked["tiers"] == [] and "成本不向下摊" in blocked["blocked"]
+    b = {**_budget(1000.0), "ladder": blocked}
+    item = {"ticker": "SYN", "qty": 10.0, "current_price": 99.0, "avg_cost": 101.0,
+            "is_option": False, "synthetic": False, "zone_hints": []}
+    assert "今日无合规加仓价" in pb.build_position_card(item, SYN_CFG, b, None)
+
+
+def test_position_budget_is_zero_when_the_add_would_average_down(env):
+    """同一条闸在预算行: 算钱的价 (z1 上沿) 或现价在均价之下 → cap 0, binding below_cost,
+    卡上写「成本不向下摊」而不是「买不起 1 股」。与授权侧 grant_actual_cap 同一个 entry_cap 臂。"""
+    env([_fill(ticker="TSTX", qty=5.0, price=200.0)])
+    item = {**HELD, "ticker": "TSTX", "qty": 5.0, "current_price": 200.0}
+    cfg = {**CFG_FULL, "stop_level": 150.0, "accumulation_zone_1": [190.0, 195.0]}
+    card = {"broker": {"qty": 5, "avg_cost": 200.0}, "agent": {}}
+    b = pb.position_budget("TSTX", item, pb._latest_nav(), cfg, card=card)
+    assert b["cap_usd"] == 0.0 and b["portfolio_binding"] == "below_cost" and b["exhausted"] is True
+    free = pb.position_budget("TSTX", item, pb._latest_nav(), cfg,
+                              card={"broker": {"qty": 5, "avg_cost": 180.0}, "agent": {}})
+    assert free["cap_usd"] > 0 and free["portfolio_binding"] != "below_cost"
+    text = pb.build_position_card({**item, "avg_cost": 200.0, "zone_hints": []}, cfg, b, None)
+    assert "成本不向下摊" in text and "买不起 1 股" not in text
 
 
 def test_position_card_has_no_ladder_line_when_budget_exhausted(env):
