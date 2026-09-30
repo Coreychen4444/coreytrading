@@ -27,7 +27,7 @@ CLI:
 
 数据缺口(诚实):
   - RSI/ATR/MA/量/K线/见底 = OpenD 今天就能算
-  - VIX = OpenD 取不稳; 自动取数走 macro_fetch (FRED), 取不到用 --vix / --vix-chg 手动传入
+  - VIX = OpenD 取不稳; 自动取数走宏观日线缓存 (data/macro_series ^VIX), 取不到用 --vix / --vix-chg 手动传入
   - 期权 IV = 取的是 spot IV;真正的 IV Rank(历史百分位)OpenD 无历史,
     需另攒数据,当前只能用 spot + 经验阈值粗判(会大声标注)
 """
@@ -432,13 +432,14 @@ def main():
     defensives_list = [p.strip().upper() for p in args.defensives.split(",") if p.strip()]
 
     if args.vix is None:
-        from quant.data.macro_fetch import fetch_vix
-        v = fetch_vix()
-        if v:
-            args.vix = v["vix"]
+        # 宏观日线缓存（data/macro_series，VIX 的唯一取数口）；缺 → --vix 手动传入
+        from quant.data.macro_series import load
+        rows = load("VIX")
+        if len(rows) >= 2:
+            args.vix = rows[-1][1]
             if args.vix_chg is None:
-                args.vix_chg = v["vix_chg_pct"]
-            print(f"[regime] VIX auto: {v['vix']} ({v['date']}, {v['source']})", file=sys.stderr)
+                args.vix_chg = round((rows[-1][1] / rows[-2][1] - 1) * 100, 2)
+            print(f"[regime] VIX auto: {args.vix} ({rows[-1][0]}, macro_daily ^VIX)", file=sys.stderr)
 
     # OpenD SDK logs to stdout (fd 1) both via a handler bound to the original
     # stream AND from background threads (async disconnect) — so neither a

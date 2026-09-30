@@ -12,7 +12,7 @@ POLICY = {"max_parallel": 3, "window_s": 3600, "max_calls": 24, "lease_grace_s":
 
 
 def reserve(root, number, *, now=10000, policy=None, **kwargs):
-    return health.acquire_call(root, policy or POLICY, provider="claude", role="macro",
+    return health.acquire_call(root, policy or POLICY, provider="claude", role="valuation",
                                run_id=f"{number:032x}", timeout_s=60, now=now, **kwargs)
 
 
@@ -46,7 +46,7 @@ def test_contended_real_clock_is_sampled_inside_lock(tmp_path):
 
 def test_runtime_claim_exposes_same_owner_deadline_to_health(tmp_path):
     from quant.ops import agent_runtime as runtime
-    record, claimed = runtime._claim(tmp_path, "synthetic", {"role": "macro"}, 7200)
+    record, claimed = runtime._claim(tmp_path, "synthetic", {"role": "valuation"}, 7200)
     job = json.loads((tmp_path / "jobs/synthetic.json").read_text())
     assert claimed and record["pid"] == job["pid"] == os.getpid()
     assert record["started_at"] == job["started_at"]
@@ -72,7 +72,7 @@ def test_same_run_provider_cannot_be_charged_or_invoked_twice(tmp_path):
     assert reserve(tmp_path, 1)["status"] == "duplicate_call"
     health.release_call(tmp_path, first["lease_id"], status="success", now=10001)
     assert reserve(tmp_path, 1, now=10002)["status"] == "duplicate_call"
-    other = health.acquire_call(tmp_path, POLICY, provider="codex", role="macro",
+    other = health.acquire_call(tmp_path, POLICY, provider="codex", role="valuation",
                                 run_id=f"{1:032x}", timeout_s=60, now=10002)
     assert other["status"] == "acquired" and other["window_calls"] == 2
 
@@ -122,6 +122,25 @@ def test_clock_rollback_and_corrupt_ledger_fail_closed(tmp_path):
     assert json.loads(path.read_text()) == {"secret": "not-a-ledger"}
 
 
+def test_retired_role_in_ledger_stays_charged_then_ages_out(tmp_path):
+    # A retired role (macro) left ROLES while a released call was still in the
+    # ledger; the reader rejected it before _reap could prune it, so every later
+    # acquire failed with control_state_invalid.
+    policy = {**POLICY, "window_s": 3600, "max_calls": 1}
+    claim = reserve(tmp_path, 1, policy=policy)
+    health.release_call(tmp_path, claim["lease_id"], status="success", now=10001)
+    path = tmp_path / "global-calls.json"
+    ledger = json.loads(path.read_text())
+    ledger["calls"][0]["role"] = "retired_role"
+    path.write_text(json.dumps(ledger))
+    assert reserve(tmp_path, 2, policy=policy, now=10020)["status"] == "window_budget"
+    assert reserve(tmp_path, 3, policy=policy, now=10000 + health.MAX_WINDOW_S + 1)["status"] == "acquired"
+    assert [c["role"] for c in json.loads(path.read_text())["calls"]] == ["valuation"]
+    with pytest.raises(health.HealthError, match="invalid_call_metadata"):
+        health.acquire_call(tmp_path, POLICY, provider="claude", role="retired_role",
+                            run_id=f"{4:032x}", timeout_s=60, now=10000 + health.MAX_WINDOW_S + 2)
+
+
 def test_window_policy_increase_cannot_erase_old_charges(tmp_path):
     policy = {**POLICY, "window_s": 10, "max_calls": 1}
     claim = reserve(tmp_path, 1, policy=policy)
@@ -159,7 +178,7 @@ def test_health_is_quiet_without_explicit_cadence_and_is_read_only(tmp_path, cap
     assert health.main(["--run-dir", str(missing)]) == 0
     assert json.loads(capsys.readouterr().out)["healthy"]
     assert not missing.exists()
-    explicit = health.scan_health(missing, now=10000, expected_roles=["macro"],
+    explicit = health.scan_health(missing, now=10000, expected_roles=["valuation"],
                                   expected_jobs={"weekly": {"max_age_s": 604800}})
     assert len(explicit["issues"]) == 2
     assert all(i["code"] == "expected_completion_missing" for i in explicit["issues"])
@@ -385,16 +404,18 @@ def test_same_role_unlinked_run_is_not_recovered(tmp_path):
 @pytest.mark.parametrize("block", [None, "missing_workflow", "partial_workflow", "failed_role",
                                     "missing_card", "uncertain_card"])
 def test_partial_parent_requires_completed_research_and_every_card_resolved(tmp_path, block):
-    reports = {role: {"status": "succeeded"} for role in ("macro", "technical", "risk")}
+    reports = {role: {"status": "succeeded"} for role in ("technical", "risk")}
     if block == "failed_role":
         reports["risk"]["status"] = "failed"
     card = {"ticker": "TEST", "bucket": "watchlist", "status": "failed"}
     if block == "uncertain_card":
         card["submission"] = {"status": "uncertain"}
+    # missing_workflow = the job references a workflow that is gone (workflow-era briefing)
+    extra = {"workflow_artifact": "workflows/parent.json"} if block == "missing_workflow" else {}
     write(tmp_path, "task-jobs", "parent", job_kind="briefing", stage="finished",
           status="partial", started_at_ts=900, finished_at_ts=1060, reports=reports,
           cards=[card], pending_cards=[{"ticker": "OTHER", "bucket": "watchlist"}]
-          if block == "missing_card" else [])
+          if block == "missing_card" else [], **extra)
     if block != "missing_workflow":
         write(tmp_path, "workflows", "parent", status="partial" if block == "partial_workflow" else "completed",
               result="secret-workflow")
@@ -405,3 +426,91 @@ def test_partial_parent_requires_completed_research_and_every_card_resolved(tmp_
     assert "secret-workflow" not in json.dumps(result)
     if block is None:
         assert result["new_events"][0]["issue"]["recovered_by"] == ["task_job:new"]
+
+
+def parent_job(root, identity, *, kind="briefing", start=900, finish=1060, research="succeeded",
+               cards=(), pending=(), status="partial"):
+    reports = {"technical": {"status": research}, "risk": {"status": "succeeded"}}
+    return write(root, "task-jobs", identity, job_kind=kind, stage="finished", status=status,
+                 started_at_ts=start, finished_at_ts=finish, reports=reports,
+                 research_status="completed" if research == "succeeded" else "partial",
+                 cards=list(cards), pending_cards=list(pending))
+
+
+def test_briefing_without_workflow_recovers_once_cards_resolve(tmp_path):
+    # briefing 不走 workflow; 旧判据把「没有 workflow 文件」当失败, 永不恢复
+    parent_job(tmp_path, "parent", cards=[{"ticker": "TEST", "bucket": "watchlist", "status": "failed"}])
+    assert not health.update_health(tmp_path, now=1070)["healthy"]
+    applied_card(tmp_path)
+    result = health.update_health(tmp_path, now=1200)
+    assert result["healthy"]
+    assert result["new_events"][0]["issue"]["recovered_by"] == ["task_job:new"]
+
+
+def abstained(ticker="TEST", bucket="positions"):
+    return dict(job_kind="card", ticker=ticker, bucket=bucket, status="needs_review", reason="model_abstained")
+
+
+def test_model_abstention_is_neutral_and_clears_an_open_issue(tmp_path):
+    write(tmp_path, "task-jobs", "abst", started_at_ts=1000, finished_at_ts=1050, **abstained())
+    write(tmp_path, "task-jobs", "blocked", job_kind="card", ticker="TEST", bucket="watchlist",
+          status="needs_review", reason="submission_preview_blocked", started_at_ts=1000, finished_at_ts=1050)
+    result = health.scan_health(tmp_path, now=1100)
+    assert [i["source_id"] for i in result["issues"]] == ["task_job:blocked"]   # 真待判的仍报
+    assert result["observed"]["task_job:abst"] == "no_effect"
+    # 旧版本已把弃权记成 active issue → 升级后转 recovered, 不永久挂着
+    state = {"version": 1, "sequence": 1, "outbox": [], "issues": {}}
+    old = {"source": "task_job", "source_id": "task_job:abst", "code": "needs_review", "issue_id": "e" * 64}
+    state["issues"]["e" * 64] = {"active": True, "issue": old}
+    (tmp_path / "health.json").write_text(json.dumps(state))
+    kinds = {e["issue"]["source_id"]: e["kind"] for e in health.update_health(tmp_path, now=1100)["new_events"]}
+    assert kinds["task_job:abst"] == "recovered"
+
+
+def test_parent_with_abstained_card_recovers(tmp_path):
+    parent_job(tmp_path, "parent", cards=[abstained(bucket="watchlist"),
+                                          {"ticker": "OK", "bucket": "watchlist", "status": "applied",
+                                           "run_id": "b" * 32, "submission": {
+                                               "status": "applied", "applied": True,
+                                               "after_revision": "c" * 64, "run_id": "b" * 32}}])
+    result = health.scan_health(tmp_path, now=1100)
+    assert result["healthy"]
+    assert result["recoveries"]["task_job:parent"] == ["no_effect:model_abstained"]
+
+
+def test_research_failed_parent_superseded_by_later_same_kind_job(tmp_path):
+    parent_job(tmp_path, "old", kind="postclose", research="failed",
+               cards=[{"ticker": "TEST", "bucket": "watchlist", "status": "failed"}],
+               pending=[{"ticker": "GONE", "bucket": "positions"}])
+    applied_card(tmp_path)                                               # TEST 之后落卡
+    parent_job(tmp_path, "rerun", kind="postclose", start=1160, finish=1180, status="completed",
+               cards=[{"ticker": "TEST", "bucket": "watchlist", "status": "applied"}])  # 不再排 GONE
+    parent_job(tmp_path, "other", kind="briefing", start=1160, finish=1180, research="failed")
+    result = health.scan_health(tmp_path, now=1200)
+    assert result["recoveries"]["task_job:old"] == ["task_job:new", "task_job:rerun"]
+    assert "task_job:other" not in result["recoveries"]                 # 自己研究失败且无后继
+
+
+def test_research_failure_needs_a_later_same_kind_completion(tmp_path):
+    parent_job(tmp_path, "old", kind="postclose", research="failed")
+    parent_job(tmp_path, "briefing", kind="briefing", start=1160, finish=1180, status="completed")
+    assert "task_job:old" not in health.scan_health(tmp_path, now=1200)["recoveries"]
+
+
+def test_failed_research_run_recovered_by_later_same_task_success_but_not_card_runs(tmp_path):
+    write(tmp_path, "runs", "1" * 32, run_id="1" * 32, role="valuation", status="failed",
+          task="daily valuation", started_at_ts=1000, finished_at_ts=1001)
+    write(tmp_path, "runs", "2" * 32, run_id="2" * 32, role="valuation", status="succeeded",
+          task="daily valuation", started_at_ts=1100, finished_at_ts=1150)
+    write(tmp_path, "runs", "3" * 32, run_id="3" * 32, role="technical", status="failed",
+          task="card task", started_at_ts=1000, finished_at_ts=1001)
+    write(tmp_path, "task-jobs", "cardjob", job_kind="card", ticker="AAA", bucket="watchlist",
+          status="failed", run_id="3" * 32, started_at_ts=1000, finished_at_ts=1002)
+    write(tmp_path, "runs", "4" * 32, run_id="4" * 32, role="technical", status="succeeded",
+          task="card task", started_at_ts=1100, finished_at_ts=1150)
+    write(tmp_path, "runs", "5" * 32, run_id="5" * 32, role="valuation", status="failed",
+          task="another task", started_at_ts=1000, finished_at_ts=1001)
+    rec = health.scan_health(tmp_path, now=1200)["recoveries"]
+    assert rec["run:" + "1" * 32] == "run:" + "2" * 32
+    assert "run:" + "3" * 32 not in rec                                  # 别的票的单卡成功不算
+    assert "run:" + "5" * 32 not in rec

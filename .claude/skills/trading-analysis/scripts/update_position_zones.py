@@ -39,7 +39,7 @@ from quant.core.agent_contracts import card_revision  # noqa: E402
 from quant.core.io_json import atomic_write_json, read_json, state_lock  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
 from quant.core.occ import is_option_ticker  # noqa: E402
-from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, VALUATION_INPUTS_PATH, WATCHLIST_PATH  # noqa: E402
+from quant.core.paths import KLINE_CACHE_DIR, POSITIONS_PATH, WATCHLIST_PATH  # noqa: E402
 from quant.core import structure  # noqa: E402
 from quant.core.structure import derive_card_regime  # noqa: E402
 from quant.core import thesis_frame  # noqa: E402
@@ -720,29 +720,6 @@ def warn_missing_next_gate(ticker: str, agent: Dict[str, Any]) -> None:
           f"provisional; 范本 AMZN R_突破_279)")
 
 
-def warn_missing_archetype(ticker: str, *, inputs_path: Optional[Path] = None) -> bool:
-    """画卡写盘后: 估值层人工区没有这票 → ⚠️ 提醒 (不拦截)。→ True = 缺。
-
-    归原型是画卡的一部分, 不是事后让人手填的
-    步骤。不拦截: 判断层零授权, 缺它不影响 zone/gate/cap; 缺着由 brief `INFRA:card_missing_archetype`
-    每轮点名 (与 next_gate 同款)。期权卡不查 (估的是 underlying)。
-    """
-    if is_option_ticker(ticker) or not str(ticker).isalpha():
-        return False
-    p = Path(inputs_path or VALUATION_INPUTS_PATH)
-    try:
-        have = {str(k).upper() for k in ((read_json(p) if p.exists() else {}) or {}).get("tickers") or {}}
-    except Exception:                                              # noqa: BLE001  坏文件不拖垮画卡
-        have = set()
-    if ticker.upper() in have:
-        return False
-    print(f"⚠️ {ticker} 卡已写盘但估值层未归原型 (inputs.json 无条目) — 画卡一并做:\n"
-          f"   python3 quant/valuation/archetypes.py set {ticker} --archetype "
-          f"<platform|semi_cyclical|ai_infra_capex|software_growth|not_applicable> "
-          f"--rationale \"<商业模式一句话>\"   (原型参数见 ARCHETYPES; 判断层零授权)")
-    return True
-
-
 def merge_position(
     existing: Dict[str, Any], args: argparse.Namespace, *, ticker: str
 ) -> Dict[str, Any]:
@@ -1007,7 +984,6 @@ def main(argv: Optional[list[str]] = None, *, precommit_check: Optional[Callable
         if wl_dirty:
             atomic_write_json(WATCHLIST_PATH, wl)
 
-    warn_missing_archetype(ticker)
 
     if args.print_json:
         print(

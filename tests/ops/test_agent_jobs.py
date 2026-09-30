@@ -17,7 +17,7 @@ def capture(**kwargs):
     data = {"ticker": "DEMO", "bucket": "watchlist", "card": card,
             "card_revision": card_revision(card), "repaint_targets": []}
     snap = make_snapshot(data)
-    return {"snapshot": snap, "snapshots": {r: snap for r in ("macro", "technical", "risk", "valuation")},
+    return {"snapshot": snap, "snapshots": {r: snap for r in ("technical", "risk", "valuation")},
             "freshness": {"market": {"DEMO": {"status": "current"}}},
             "summary": {"scope": kwargs.get("scope"), "repaint_targets": []}}
 
@@ -119,13 +119,13 @@ def test_production_job_persists_workflow_and_leaves_unknowns_visible(tmp_path):
     def workflow(*args, **kwargs):
         return {"status": "partial", "reports": {"risk": {"run_id": "a" * 32,
                 "status": "failed", "result": {"summary": None, "unknowns": ["missing receipt"]}}},
-                "total_calls": 4, "macro_research": {"initial": {"status": "unavailable"}, "followup": None}}
+                "total_calls": 3}
     out = jobs.run_job("weekly", run_dir=tmp_path, control_dir=tmp_path / "control",
                        capture_fn=capture, workflow_fn=workflow)
     assert out["status"] == "partial" and out["reports"]["risk"]["unknowns"]
-    assert out["macro_research"]["initial"]["status"] == "unavailable"
+    assert "macro_research" not in out                   # 宏观不是模型角色
     assert read_json(next((tmp_path / "task-jobs").glob("*.json")))["status"] == "partial"
-    assert read_json(next((tmp_path / "workflows").glob("*.json")))["total_calls"] == 4
+    assert read_json(next((tmp_path / "workflows").glob("*.json")))["total_calls"] == 3
 
 
 @pytest.mark.parametrize("queue_len, expected", [
@@ -282,3 +282,38 @@ def test_chart_is_no_longer_a_model_job(tmp_path):
     from quant.core.market_sessions import scheduled_session_due
     due = scheduled_session_due("chart", datetime(2026, 9, 9, 20, 40, tzinfo=timezone.utc))
     assert due["due"] is True and due["session"] == "2026-09-09"
+
+
+def test_macro_is_a_due_only_kind(tmp_path, capsys, monkeypatch):
+    """The macro-lens task gates itself on the calendar (close+30m) but is never a model job."""
+    assert "macro" not in jobs.TASKS
+    with pytest.raises(ValueError, match="unknown domain job kind"):
+        jobs.run_job("macro", run_dir=tmp_path, control_dir=tmp_path / "control")
+    from quant.core import interpreter
+    monkeypatch.setattr(interpreter, "require_project_interpreter", lambda *a, **k: None)
+    jobs.main(["due", "--kind", "macro"])                  # the CLI the task spec calls must accept the kind
+    assert set(json.loads(capsys.readouterr().out)) >= {"due", "reason", "session", "close"}
+    from quant.core.market_sessions import scheduled_session_due
+    assert scheduled_session_due("macro", datetime(2026, 9, 9, 20, 30, tzinfo=timezone.utc))["due"] is True
+    assert scheduled_session_due("macro", datetime(2026, 9, 9, 20, 29, 59, tzinfo=timezone.utc))["due"] is False
+
+
+def test_task_specs_call_due_kinds_the_cli_accepts_with_matching_cron_minute(capsys, monkeypatch):
+    """规范里写的 `due --kind X` 必须被 CLI 接受；盘后任务的唤醒 cron 分钟必须等于时钟偏移 ——
+    分钟早于偏移 = 每个槽都 due:false，任务每晚静默跳过（监控变黑最直接的形状）。"""
+    import re
+    from pathlib import Path
+    from quant.core import interpreter, market_sessions
+    monkeypatch.setattr(interpreter, "require_project_interpreter", lambda *a, **k: None)
+    seen = {}
+    for spec in sorted((Path(__file__).resolve().parents[2] / "tasks" / "claude").glob("*.md")):
+        text = spec.read_text(encoding="utf-8")
+        for kind in sorted(set(re.findall(r"agent_jobs\.py due --kind (\w+)", text))):
+            jobs.main(["due", "--kind", kind])
+            assert "due" in json.loads(capsys.readouterr().out), spec.name
+            seen[spec.stem] = kind
+            if kind in market_sessions.POSTCLOSE_OFFSET_MIN:
+                minute = re.search(r"`(\d+) 1,2,4,5 \* \* 2-6`", text)
+                assert minute and int(minute.group(1)) == market_sessions.POSTCLOSE_OFFSET_MIN[kind], spec.name
+    assert seen and set(seen.values()) <= market_sessions.SCHEDULED_KINDS
+

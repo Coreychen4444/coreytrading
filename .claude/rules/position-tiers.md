@@ -52,7 +52,7 @@ gate→cap 升级只在修复路径与促升持仓的加仓授权（cap 由 `nex
 
 ## 卖出 / 买入落账（对账式，幂等，漏跑一轮下轮补上）
 - 卖出：operator 下单 → `trade_history_sync` 落 SELL → `stock_fetch` 刷 qty → `close_reconcile` 全平收尾（清 lots、标 closed、落 `exit_info` 含 realized_pnl 与 `closed_lots`）。部分平仓归人工。券商合并均价不作 PnL 参考。
-- 买入：`lot_reconcile` 自动落增量 BUY（tier 恒 position，stop / target 派生自卡片 zones，order_id 去重）；部分卖出 / 数量对不上 / 期权只报不写 → `INFRA:lot_drift`。
+- 买入：`lot_reconcile` 自动落增量 BUY（tier 恒 position，stop / target 派生自卡片 zones，order_id 去重）；期权同样自动落（qty = 张、avg_cost = 权利金，stop 连卡上 `stop_level_basis` 一起抄、未标基准不抄，区位取成交章正股读数；G-01 逐 lot 计算，lots 空 = G-01 静默失效）；部分卖出 / 数量对不上只报不写 → `INFRA:lot_drift`。
 - lots 不是注解：规则内外都要与 broker 数量对齐。
 
 ## Concentration Override Protocol

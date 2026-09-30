@@ -1,6 +1,6 @@
 # Desktop research handoff
 
-Use this protocol when `agents/routing.json` sets `execution_transport` to `desktop`. The current desktop session is the model executor. `agent_jobs`, the pipeline and `valuation_daily` keep ownership of the calendar gate, leases, frozen evidence, role dependencies, mechanical calculations, submission and receipts. Never call the zone writer directly to bypass `agent_submit`, and never start another model CLI or sub-model. A Claude session claims only `claude` requests and a Codex session claims only `codex` requests; the default split is Claude for technical and risk, Codex for macro and valuation. An independent review request is answered for the target the host names.
+Use this protocol when `agents/routing.json` sets `execution_transport` to `desktop`. The current desktop session is the model executor. `agent_jobs`, the pipeline and `valuation_daily` keep ownership of the calendar gate, leases, frozen evidence, role dependencies, mechanical calculations, submission and receipts. Never call the zone writer directly to bypass `agent_submit`, and never start another model CLI or sub-model. A Claude session claims only `claude` requests and a Codex session claims only `codex` requests; the default split is set per role in `agents/routing.json` (technical, risk and valuation; macro is not a model role — the macro lens is rendered by code, so there are no macro requests). An independent review request is answered for the target the host names.
 
 ## Launching a business task
 
@@ -20,7 +20,7 @@ Run the task's calendar gate exactly as its own prompt specifies. Where the prom
 4. Run `.venv/moomoo/bin/python3 quant/ops/agent_desktop.py complete --provider <claude|codex> --request-id <id> --claim-token <token> --result <json file>`. `answered` means the result was handed over, **not** that a card was applied. A contract or preview rejection may be corrected in the same result file and resubmitted; never edit the packet, policy, old snapshot or run records to get past validation. Insufficient evidence yields `unknown` or a valid abstention. If the request cannot be completed, pass `--error '<short reason>'` instead of `--result` so the controller records the failure instead of waiting.
 5. Keep claiming later requests for the same provider (for example risk after technical, or single-card repaints) until this round's completion file appears. Then read the controller output and finish the original task prompt: quote reports, cards and pending cards, deliver the verbatim sections and close out. Only `cards[].status` or `submission.status` equal to `applied` counts as a written card. Result files are kept even when the controller fails.
 
-A standalone Codex macro-intake task does not launch a business job: it waits for and serves `codex` requests, exits after completing one macro request, and reports that nothing arrived if no request appears within its intake window. It never fabricates a report or starts a model CLI. Business failures are reported by the original controller's receipt.
+There is no macro-intake task: the macro model role is retired. Business failures are reported by the original controller's receipt.
 
 ## Time limits and verification
 

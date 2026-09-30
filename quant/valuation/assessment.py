@@ -226,6 +226,13 @@ def build(data: dict, *, as_of: str, macro_scenarios=None, evidence_refs=None) -
                   "data_readiness": evidence.readiness(bundle),
                   "short_term": _short_term(value, ticker, bundle, cutoff=cutoff, as_of=as_of)}
         output["tickers"][ticker] = result
+        # Price evidence is useful even when a company model abstains; it is
+        # neither a valuation nor a fallback to the archetype methodology.
+        try:
+            _, quote = with_quote(bundle or {}, (value.get('quotes') or {}).get(ticker), as_of=as_of)
+            result['reference_quote'] = {'status': 'observed', **quote}
+        except ValueError as exc:
+            result['reference_quote'] = {'status': 'unknown', 'reason': str(exc)}
         try:
             # A company package owns its methodology. Failure/expiry cannot fall
             # back to the rejected archetype model. It does not require US10Y to

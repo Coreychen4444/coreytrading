@@ -32,6 +32,17 @@ def test_annual_reports_are_excluded_and_restatement_keeps_newest():
     assert rows[-1]["revenue"] == 123.0
 
 
+def test_sdk_named_quarters_match_legacy_captures_and_exclude_cumulative_flows():
+    inc, bal, cf = make_reports(n_q=8)
+    expected = F.parse_quarters(inc, bal, cf)
+    for reports in (inc, bal, cf):
+        for report in reports:
+            report["financial_type"] = f"Q{report['financial_type']}"
+        for kind in ("ANNUAL", "Q6", "Q9", "QUARTERLY", True, 1.0, "1", None):
+            reports.append(dict(reports[-1], financial_type=kind, period_text=f"bad-{kind}"))
+    assert F.parse_quarters(inc, bal, cf) == expected
+
+
 def test_capex_coalesce_prefers_direct_then_net_ppe():
     inc, bal, cf = make_reports(n_q=4)
     cf[-1]["item_list"] = [it for it in cf[-1]["item_list"] if it["field_id"] != 8044]   # 只有净 PPE

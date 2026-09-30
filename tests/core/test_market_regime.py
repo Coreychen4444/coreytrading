@@ -100,3 +100,12 @@ def test_short_history_is_unknown():
     card = M.state(_bars([100 + i for i in range(50)]))
     assert card["state"] == M.UNKNOWN
     assert card["rates"] == {}
+
+
+def test_with_distance_suffixes_level_vs_close():
+    line = "跌破 749.6 = 下跌恢复；候选 HL 762.35（2026-09-29）：一根阳线收上 766.98 = 回踩守住"
+    out = M.with_distance(line, 764.2)
+    assert "跌破 749.6（-1.9%）" in out
+    assert "收上 766.98（+0.4%）" in out
+    assert "762.35（2026-09-29）" in out          # 候选价不是转移线，不加距离
+    assert M.with_distance(line, None) == line

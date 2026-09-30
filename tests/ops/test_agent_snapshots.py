@@ -101,16 +101,9 @@ def _capture_with_macro(tmp_path, macro, *, now):
                                   kline_dir=tmp_path / "missing_klines", macro_path=path, now=now)
 
 
-MACRO_EXAMPLE = Path("trade/intelligence/examples/macro-state.example.json")
-
-
 def _macro_example():
-    from quant.core.paths import MACRO_SCHEMA_PATH
-    if not MACRO_EXAMPLE.exists() or not MACRO_SCHEMA_PATH.exists():
-        pytest.skip("optional intelligence workspace schema is not part of this repository")
-    macro = json.loads(MACRO_EXAMPLE.read_text())
-    macro["example_only"] = False
-    return macro
+    from tests.ops.test_agent_inputs import lens_doc
+    return lens_doc(generated_at="2099-09-09T00:00:00+00:00")
 
 
 @pytest.mark.parametrize("macro", ["{bad JSON", {"risk_environment": {"level": "supportive"}},
@@ -123,9 +116,9 @@ def test_malformed_macro_is_unavailable_instead_of_becoming_fresh_evidence(macro
     validate_snapshot(output)
 
 
-def test_macro_schema_authority_failure_is_rejected_at_capture(tmp_path):
+def test_macro_authority_other_than_none_is_rejected_at_capture(tmp_path):
     macro = _macro_example()
-    macro["authority"]["may_write_caps"] = True
+    macro["authority"] = "may_write_caps"
     output = _capture_with_macro(tmp_path, macro, now=datetime(2099, 9, 10, tzinfo=timezone.utc))
     assert output["data"]["macro"] is None
     assert "macro_prior_invalid" in output["data"]["capture_warnings"]
@@ -133,37 +126,40 @@ def test_macro_schema_authority_failure_is_rejected_at_capture(tmp_path):
 
 def test_future_macro_is_not_accepted_even_if_its_schema_is_valid(tmp_path):
     macro = _macro_example()
-    generated = datetime.fromisoformat(macro["generated_at"]["utc"].replace("Z", "+00:00"))
+    generated = datetime.fromisoformat(macro["generated_at"])
     output = _capture_with_macro(tmp_path, macro, now=generated - timedelta(seconds=1))
     assert output["data"]["macro"] is None
     assert "macro_prior_future" in output["data"]["capture_warnings"]
 
 
 def test_capture_preserves_source_clocks_without_inventing_a_ttl_policy(tmp_path):
+    from quant.core.macro_lens import prior_view
     macro = _macro_example()
-    generated = datetime.fromisoformat(macro["generated_at"]["utc"].replace("Z", "+00:00"))
+    generated = datetime.fromisoformat(macro["generated_at"])
     # Keeping an old prior does not make its contents new; no new age threshold
     # or trading veto is invented by the adapter.
     now = generated + timedelta(days=4)
     output = _capture_with_macro(tmp_path, macro, now=now)
     times = output["data"]["source_times"]
-    assert output["data"]["macro"] == macro
+    assert output["data"]["macro"] == prior_view(macro)
     assert times["macro_status"] == "valid"
     assert times["captured_at"] == output["as_of"] == now.isoformat()
-    assert times["macro_generated_at"] == macro["generated_at"]["utc"]
-    assert times["macro_evidence_cutoff"] == macro["data_quality"]["cutoff_utc"]
+    assert times["macro_generated_at"] == macro["generated_at"]
+    assert times["macro_asof"] == macro["asof"]
     assert times["valuation_as_of"] == "2099-08-31"
     assert times["cache_not_refreshed"] is times["snapshot_as_of_is_capture_time"] is True
 
 
-def test_example_marker_and_nonfinite_macro_never_become_real_evidence(tmp_path):
+def test_old_schema_and_nonfinite_macro_never_become_real_evidence(tmp_path):
     macro = _macro_example()
-    generated = datetime.fromisoformat(macro["generated_at"]["utc"].replace("Z", "+00:00"))
-    macro["example_only"] = True
+    generated = datetime.fromisoformat(macro["generated_at"])
+    macro["schema"] = "macro-state/0.9"
     output = _capture_with_macro(tmp_path, macro, now=generated)
     assert output["data"]["source_times"]["macro_status"] == "invalid"
-    macro["example_only"] = False
-    macro["risk_environment"]["score"] = float("nan")
+    macro["schema"] = "macro_lens/1"
+    macro["drivers"]["M"] = float("nan")
     output = _capture_with_macro(tmp_path, macro, now=generated)
     assert output["data"]["macro"] is None
     assert "macro_prior_invalid" in output["data"]["capture_warnings"]
+
+

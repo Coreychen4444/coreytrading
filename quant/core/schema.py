@@ -211,39 +211,15 @@ def _validate_company_profile(agent: dict, p: str) -> list[str]:
     return errs
 
 
-# ── valuation (, 用户: 估值结果落卡片机器区) ─────────────────
+# ── valuation 镜像 (已退役) ─────────────────────────────────────────
 #
-# agent.valuation = 估值层 (quant/valuation) 最新一行账本的摘要, 由 sync/valuation_sync 从
-# valuations.jsonl 镜像到卡上 (卡片是简报/trading-analysis 读的地方)。**判断层零授权效力**:
-# 不被 sizing/entry_guard/exit_guard/today_group 读; 低估 ≠ GO, 高估 ≠ SELL。
-# 这里只拦结构性破坏: 判定/置信词表、数值类型、as_of/source 出处。
-_VALUATION_VERDICTS = ("低估", "偏低", "合理", "偏高", "高估", "无法判定")
-_VALUATION_CONFIDENCE = ("高", "中", "低")
-_VALUATION_NUMERIC = ("price", "fair_value", "ratio", "implied_cagr", "implied_horizon_years",
-                      "implied_target_margin", "implied_cagr_at_current_margin", "news_applied")
-
-
+# agent.valuation 曾由旧估值栈把预测账本最新行镜像到卡上, 简报逐票挂「低估 / 高估」类结论;
+# 方法判不可用后镜像仍在简报露出 → 随旧估值栈整体退役。
+# 估值只读估值日更的研究级目标 (valuation/research_target), 不落卡。卡上再出现 = 有人绕回旧路径 → 报错。
 def _validate_valuation(agent: dict, p: str) -> list[str]:
-    v = agent.get("valuation")
-    if v is None:
-        return []
-    if not isinstance(v, dict):
-        return [f"{p}.agent.valuation must be a dict"]
-    errs: list[str] = []
-    if not _iso_date_ok(v.get("as_of")):
-        errs.append(f"{p}.agent.valuation.as_of must be YYYY-MM-DD (无 as-of 的估值不许落卡)")
-    if v.get("verdict") not in _VALUATION_VERDICTS:
-        errs.append(f"{p}.agent.valuation.verdict must be one of {_VALUATION_VERDICTS} (got {v.get('verdict')!r})")
-    if v.get("confidence") not in _VALUATION_CONFIDENCE:
-        errs.append(f"{p}.agent.valuation.confidence must be one of {_VALUATION_CONFIDENCE}")
-    for key in _VALUATION_NUMERIC:
-        val = v.get(key)
-        if val is not None and not _is_num(val):
-            errs.append(f"{p}.agent.valuation.{key} must be numeric/null (got {val!r})")
-    for key in ("source", "fyi"):
-        if not str(v.get(key) or "").strip():
-            errs.append(f"{p}.agent.valuation.{key} missing (机器区必须带出处与 FYI 行)")
-    return errs
+    if "valuation" in agent:
+        return [f"{p}.agent.valuation retired (估值不落卡; 读 var/valuation-daily 研究级目标)"]
+    return []
 
 
 def _validate_card_regime(agent: dict, p: str, tk: str) -> list[str]:

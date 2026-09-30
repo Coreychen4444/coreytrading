@@ -10,7 +10,6 @@ from quant.core.agent_contracts import (
     CONTRACT_VERSION, ROLES, ContractError,
     canonical_hash, card_revision, result_schema, validate_result, validate_snapshot,
 )
-from tests.core.test_macro_analysis import macro_fields
 
 NOW = "2026-09-05T12:30:00+08:00"
 
@@ -27,7 +26,6 @@ def snapshot():
 def result(role, snapshot):
     return {
         "schema_version": result_schema(role)["properties"]["schema_version"]["const"],
-        **({"valuation_scenarios": [], **macro_fields()} if role == "macro" else {}),
         "contract_version": CONTRACT_VERSION,
         "role": role, "snapshot_id": snapshot["snapshot_id"],
         "input_hash": snapshot["input_hash"],
@@ -116,7 +114,7 @@ def test_valid_role_result_is_detached(role, snapshot):
     assert payload["observations"]
 
 
-@pytest.mark.parametrize("role", ["macro", "risk", "valuation"])
+@pytest.mark.parametrize("role", ["risk", "valuation"])
 def test_information_roles_cannot_propose_state_changes(role, snapshot):
     payload = result(role, snapshot)
     payload["proposal"] = {"kind": "zone_update", "zone_update_args": ["--ticker", "SYN"]}
@@ -138,10 +136,10 @@ def test_information_roles_cannot_propose_state_changes(role, snapshot):
     lambda p: p.pop("unknowns"),
 ])
 def test_invalid_or_overreaching_result_is_rejected(mutation, snapshot):
-    payload = result("macro", snapshot)
+    payload = result("risk", snapshot)
     mutation(payload)
     with pytest.raises(ContractError):
-        validate_result("macro", payload, snapshot=snapshot)
+        validate_result("risk", payload, snapshot=snapshot)
 
 
 def test_technical_proposal_is_only_an_argument_list(snapshot):
@@ -183,10 +181,10 @@ def test_binding_and_evidence_fail_closed(mutation, snapshot):
     ("expires_at", NOW),
 ])
 def test_result_time_bounds(field, value, snapshot):
-    payload = result("macro", snapshot)
+    payload = result("risk", snapshot)
     payload[field] = value
     with pytest.raises(ContractError):
-        validate_result("macro", payload, snapshot=snapshot, now=NOW)
+        validate_result("risk", payload, snapshot=snapshot, now=NOW)
 
 
 @pytest.mark.parametrize("mutation", [
@@ -206,13 +204,13 @@ def test_snapshot_tampering_and_expiry(mutation, snapshot):
 
 def test_cross_role_requests_are_bounded(snapshot):
     payload = result("valuation", snapshot)
-    request = {"role": "macro", "question": "Check the source period.", "evidence_refs": ["price-1"]}
+    request = {"role": "technical", "question": "Check the source period.", "evidence_refs": ["price-1"]}
     payload["requests"] = [request]
     validate_result("valuation", payload, snapshot=snapshot)
     request["role"] = "valuation"
     with pytest.raises(ContractError, match="another role"):
         validate_result("valuation", payload, snapshot=snapshot)
-    request["role"] = "macro"
+    request["role"] = "technical"
     payload["requests"] = [request] * 13
     with pytest.raises(ContractError, match="item count"):
         validate_result("valuation", payload, snapshot=snapshot)
@@ -235,10 +233,17 @@ def test_structured_review_is_not_an_execution_approval(snapshot):
 
 
 def test_timezone_comparison_and_naive_clock(snapshot):
-    payload = result("macro", snapshot)
-    assert validate_result("macro", payload, snapshot=snapshot, now="2026-09-05T04:30:00Z")
+    payload = result("risk", snapshot)
+    assert validate_result("risk", payload, snapshot=snapshot, now="2026-09-05T04:30:00Z")
     with pytest.raises(ContractError, match="timezone"):
-        validate_result("macro", payload, snapshot=snapshot, now=datetime(2026, 9, 5, 12, 30))
+        validate_result("risk", payload, snapshot=snapshot, now=datetime(2026, 9, 5, 12, 30))
+
+
+def test_macro_model_role_is_retired():
+    """宏观层是纯代码判读（core/macro_lens），没有模型宏观角色。"""
+    assert "macro" not in ROLES
+    with pytest.raises(ContractError, match="unknown role"):
+        result_schema("macro")
 
 
 def test_schemas_and_registry_have_exactly_the_business_roles():

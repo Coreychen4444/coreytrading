@@ -52,6 +52,7 @@ import json
 from quant.core.io_json import state_lock  # noqa: E402
 from quant.core.occ import is_option_ticker  # noqa: E402
 from quant.core.timeutil import now_utc_iso, et_today  # noqa: E402
+from quant.core.financials import discrete_quarter  # noqa: E402
 from quant.sync import state_io  # noqa: E402
 
 # ── OpenD 财报字段 taxonomy (field_id 是 moomoo 归一化 key, 跨公司稳定) ──
@@ -87,7 +88,6 @@ CF_FIELDS = {
 # coalesce, 口径写进 capex_basis, 消费侧不用猜。
 CAPEX_DIRECT = 8044     # Capital Expenditure (真 capex, 负数)
 CAPEX_NET_PPE = 8046    # Net PPE Purchase and Sale (净额含处置, 负数)
-DISCRETE_QUARTER_TYPES = {1, 2, 3, 4}
 TTM_QUARTERS = 4
 _M = 1e6
 
@@ -106,7 +106,7 @@ def _discrete_quarters(reports: list[dict]) -> list[dict]:
     seen: set[str] = set()
     rows: list[dict] = []
     for r in sorted(reports or [], key=lambda r: r.get("date_time") or 0, reverse=True):
-        if r.get("financial_type") not in DISCRETE_QUARTER_TYPES:
+        if discrete_quarter(r.get("financial_type")) is None:
             continue
         period = str(r.get("period_text") or r.get("date_time_str") or "")
         if not period or period in seen:

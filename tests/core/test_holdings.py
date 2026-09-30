@@ -7,7 +7,7 @@
 import pytest
 
 from quant.core.holdings import (
-    cards_missing_archetype, coverage_universe, flat_with_lots, held_bare, held_incl_option_underlyings, intel_universe, is_candidate,
+    coverage_universe, flat_with_lots, held_bare, held_incl_option_underlyings, intel_universe, is_candidate,
     is_scannable_card,
     live_tickers, lot_gap, lot_qty, underlying_cards_missing_zones, watchlist_candidates)
 
@@ -282,24 +282,6 @@ def test_scannable_card_drops_watchlist_tombstones_and_keeps_position_semantics(
     assert not is_scannable_card({"status": "passed", "moomoo_listed": True})     # 非候选
     assert is_scannable_card({"status": "active"}) and is_scannable_card({})
     assert not is_scannable_card({"status": "closed"})
-
-
-def test_cards_missing_archetype_flags_painted_cards_only():
-    """新候选卡画完一周, 估值人工区没有它们。空 stub / 墓碑 / 纪念仓 / 期权都不进。"""
-    zones = {"agent": {"zones": {"accumulation_zone_1": [1.0, 2.0]}}}
-    pos = _doc(BBB={**_t(qty=20.0), **zones},
-               KEEP={**_t(qty=1.0, role="commemorative_hold"), **zones},
-               AAA270319C220000=_t(qty=1.0),
-               AAA={**_t(synthetic=True), **zones},
-               FLATA={**_t(qty=0.0, status="active"), **zones})
-    wl = _doc(CAND={**_wl(moomoo_listed=True), **zones}, FRESH={**_wl(), **zones},
-              GONEA={**_wl(moomoo_listed=False), **zones},
-              STUB=_wl(),                                                  # 空 stub → autopaint 会一并归
-              REF={**_wl(instrument={"role": "volume_reference"}), **zones})
-    inputs = {"tickers": {"BBB": {"archetype": "ai_infra_capex"}, "aaa": {}}}
-    assert cards_missing_archetype(pos, wl, inputs) == ["CAND", "FRESH"]
-    assert cards_missing_archetype(pos, wl, {}) == ["AAA", "BBB", "CAND", "FRESH"]
-    assert cards_missing_archetype({}, {}, {}) == []
 
 
 # ── 成本不向下摊: 加仓只许确认后往上加 ────────────────────────────────────────

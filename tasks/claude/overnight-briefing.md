@@ -10,9 +10,17 @@ Produce a human-reviewed operating brief before the US session.
    does not fetch news, social posts or macro data itself: read the operator's
    authorized intelligence archive under `trade/intelligence/reports/` if one is
    configured, and otherwise state that there is no intelligence input rather
-   than searching for one. The macro `[FYI]` line reads the published `trade/intelligence/macro/current.json` (phase, risk environment, summary and `generated_at`); when it is missing or invalid, write that there is no valid macro prior. This task does not call the macro model;
-   valuation belongs to the independent daily valuation task and is neither run
-   nor spliced into this briefing. Amounts and authorization come only from the
+   than searching for one. The 🌐 macro `[FYI]` lines come from `python3 quant/journal/macro_lens_log.py --brief`,
+   pasted verbatim (the macro lens as of the previous close: environment band and what the
+   market is trading / strongest driver of the last 40 sessions and its reading / hand-over
+   and calendar / overnight futures move); when the command fails or `current.json` is not
+   `macro_lens/1`, write that there is no valid macro prior. It is zero-authority context: it
+   never changes an action, PLAN / VETO, cap or share count. This task calls no macro model
+   and adds no macro reasoning of its own. Valuation belongs to the independent daily
+   valuation task and is not run here; when the brief carries a `valuation_fyi[ticker]`
+   line (the latest research-grade 12-month target, unvalidated), append it verbatim to that
+   ticker's basis line as zero-authority `[FYI]` (an upside midpoint is not 🟢, a negative
+   FCF flag is not 🔴); a missing or stale daily run means no line and no fallback. Amounts and authorization come only from the
    mechanical reports.
 5. Carry the local earnings calendar as `[FYI]`: which holdings and candidates
    report, the session (before or after the close), the reaction day, and the

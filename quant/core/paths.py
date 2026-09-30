@@ -25,6 +25,7 @@ ANALYSIS_DIR = PORTFOLIO_ROOT / "analysis"
 PORTFOLIO_OBSERVATIONS_DIR = PORTFOLIO_ROOT / "observations"
 CATALYSTS_PATH = PORTFOLIO_OBSERVATIONS_DIR / "catalysts.jsonl"
 STRUCTURE_DRIFT_PATH = PORTFOLIO_OBSERVATIONS_DIR / "structure_drift.jsonl"
+VALUATION_FORWARD_PATH = PORTFOLIO_OBSERVATIONS_DIR / "valuation_forward.jsonl"   # 研究级 12 个月目标前向账本 (valuation/research_target, 每日逐票一行, 12 月后对账)
 
 RESEARCH_DIR = ROOT / "trade" / "knowledge" / "research"
 STRATEGY_DIR = ROOT / "trade" / "strategy"
@@ -39,17 +40,20 @@ EARNINGS_DEEP_DIR = MARKET_DIR / "earnings_deep"   # 历史财报事件存档 <T
 # 单文件入 git: entry_guard/brief/备注都在 needs_opend=False 的路径上读它。
 EARNINGS_CALENDAR_PATH = MARKET_DIR / "earnings_calendar.json"
 MARKET_REGIME_PATH = MARKET_DIR / "market_regime.jsonl"   # 大盘状态卡每日快照 = 可对账的预测账本 (journal/market_regime_log, 判读层)
+MACRO_EVENT_CALENDAR_PATH = MARKET_DIR / "macro_event_calendar.json"   # 可选: FOMC / CPI / 非农 官方公布日 (journal/macro_lens_log 日历段读, 缺失即空)
+MACRO_DAILY_DIR = MARKET_DIR / "macro_daily"   # 跨资产宏观日线缓存 <KEY>.jsonl (data/macro_series, 尾部覆盖式, 可重拉不入 git)
 PREMIUM_DIR = MARKET_DIR / "premium"          # ADR/跨市场溢价追踪, <TICKER>.jsonl ()
 SKHY_PREMIUM_PATH = PREMIUM_DIR / "SKHY.jsonl"
 FUNDAMENTALS_DIR = MARKET_DIR / "fundamentals"   # OpenD 三表/快照/估值分位缓存 <TICKER>.json (可重拉, 不入 git; 估值层)
 VALUATION_DIR = ROOT / "trade" / "valuation"           # 估值层 (判断层, 零授权效力)
 VALUATION_INPUTS_PATH = VALUATION_DIR / "inputs.json"               # 人工区: 商业模式原型 + 覆盖 + 增量新闻 overlay
-VALUATIONS_PATH = VALUATION_DIR / "valuations.jsonl"                # 每次估值一行 = 可校准的预测账本
-VALUATION_CALIBRATION_PATH = VALUATION_DIR / "calibration.jsonl"    # 对账/回测校准结果 (每条预测 vs 实际一行)
+# valuations.jsonl / calibration.jsonl (旧估值账本与财报对账) 已随旧估值栈退役, 不再有代码读写
 VALUATION_RESPONSE_EVENTS_PATH = VALUATION_DIR / "response_events.jsonl"
 VALUATION_RESPONSE_QUERIES_PATH = VALUATION_DIR / "response_queries.json"
 VALUATION_COMPANY_MODELS_PATH = VALUATION_DIR / "company_models.json"  # explicit company research inputs; no publishing authority
+VALUATION_EPS_MODELS_PATH = VALUATION_DIR / "eps_models.json"  # 精简版 EPS 包 (valuation/eps_model: 未来 8 季三情景利润表, 财报后机械滚动 + 复核; 研究级目标 EPS 源)
 VALUATION_RELEASES_PATH = VALUATION_DIR / "releases.json"  # persistent release journal and immutable artifacts
+VALUATION_RELEASE_POLICY_PATH = VALUATION_DIR / "release_policy.json"  # host rollout and verified exact review identities
 VALUATION_RELEASE_LOCK_PATH = ROOT / "var" / "valuation-daily" / ".release.lock"
 NAV_HISTORY_PATH = EVENTS_DIR / "nav_history.jsonl"
 # 外部现金流账本: 只收银证转账 (出入金),
@@ -67,23 +71,24 @@ AGENT_RUNS_DIR = ROOT / "var" / "agent-runs"
 AGENT_CONTROL_DIR = ROOT / "var" / "agent-control"
 ZONE_WRITER_PATH = ROOT / ".claude" / "skills" / "trading-analysis" / "scripts" / "update_position_zones.py"
 
-# Market intelligence data.  The collection/publication workflow is optional and
-# user-owned; this repository ships only the README and a synthetic example below
-# INTELLIGENCE_DIR.  Trading code may only READ these paths and must degrade
-# gracefully when they are absent.  Nothing here grants authorization.
+# Market intelligence data.  The news collection/publication workflow is optional
+# and user-owned; this repository ships only the README below INTELLIGENCE_DIR.
+# The macro-lens publisher (journal/macro_lens_log) is the only in-repo writer and
+# writes only its own macro/ outputs; everything else is read-only and must degrade
+# gracefully when absent.  Nothing here grants authorization.
 INTELLIGENCE_DIR = ROOT / "trade" / "intelligence"
 INTELLIGENCE_STATE_DIR = ROOT / "var" / "intelligence"
 INTELLIGENCE_REPORTS_DIR = INTELLIGENCE_DIR / "reports"
 INTELLIGENCE_SOURCES_DIR = INTELLIGENCE_DIR / "sources"
 INTELLIGENCE_DELIVERY_PATH = INTELLIGENCE_STATE_DIR / "delivery.json"
 MACRO_DIR = INTELLIGENCE_DIR / "macro"
-MACRO_CURRENT_PATH = MACRO_DIR / "current.json"
-MACRO_HISTORY_DIR = MACRO_DIR / "history"
-MACRO_EVENTS_DIR = MACRO_DIR / "events"
-MACRO_SNAPSHOTS_DIR = MACRO_DIR / "snapshots"
-MACRO_SCHEMA_PATH = INTELLIGENCE_DIR / "schema" / "macro-state.schema.json"
+MACRO_CURRENT_PATH = MACRO_DIR / "current.json"   # 宏观透镜最新读数 (schema macro_lens/1, authority none)
+INTELLIGENCE_CALENDAR_PATH = MACRO_DIR / "calendar.json"  # optional independently verified release queue; not a trading calendar
+MACRO_LEDGER_PATH = MACRO_DIR / "ledger.jsonl"   # 宏观透镜每日快照账本 = 可对账的判读记录 (journal/macro_lens_log)
+MACRO_REPORTS_DIR = MACRO_DIR / "reports"      # 宏观透镜全文 YYYY-MM/YYYY-MM-DD.md
 VALUATION_OVERLAYS_PATH = INTELLIGENCE_DIR / "valuation" / "overlays.jsonl"   # 新闻→估值驱动 overlay (情报层经 quant/valuation/overlays.py add 写, 估值层只读)
 MACRO_LOCK_PATH = INTELLIGENCE_STATE_DIR / ".macro-state.lock"
+MACRO_LENS_LOCK_PATH = INTELLIGENCE_STATE_DIR / ".macro-lens.lock"   # 宏观透镜发布锁 (journal/macro_lens_log.publish: 账本查重+追加原子化, 同一 asof 两个发布者不写两行)
 
 
 def resolve_intelligence_reference(reference: str | Path) -> Path:

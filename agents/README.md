@@ -4,7 +4,7 @@
 
 ## 一句话
 
-宿主（Python 控制器）冻结证据、派发研究、校验结果、经既有 writer 受控写卡；模型只读冻结数据包、只返回契约 JSON。**每个交易日只有 technical 一个模型角色在跑**；风控收据由代码渲染；宏观与估值退到周复盘与独立估值日更。订单永远人工。
+宿主（Python 控制器）冻结证据、派发研究、校验结果、经既有 writer 受控写卡；模型只读冻结数据包、只返回契约 JSON。**每个交易日只有 technical 一个模型角色在跑**；风控收据由代码渲染；估值退到独立估值日更。**宏观不是模型角色**：由代码判读的宏观透镜 `quant/core/macro_lens.py` 产出，零模型调用；其精简先验随每次冻结输入进入 technical / valuation 视图。订单永远人工。
 
 市场情报采集是这些角色的上游，属于用户自有的可选工作流，本仓不包含其采集与投递流程：证据与发布数据在 `trade/intelligence/`（公开仓只有 README 与合成示例），共用方法（若配置）在 `agents/methods/`，缺失时角色政策把它们记为 `optional_methods_missing`，不臆造。
 
@@ -14,17 +14,17 @@
 |---|---|---|---|
 | postclose（收盘 +10m） | technical（组合视图 1 次 + 单卡 ≤ `repaint_bound`） | risk 收据 | 机械转移之后、提醒线之前 |
 | chart（收盘 +35m） | 无（零模型调用） | 两种模式清单（`chart_read.py` 代码渲染） | 0 |
-| briefing（盘前） | technical（卡片或成交有变才新跑，否则复用同收盘同卡片版本的 run） | risk 收据 + 宏观 FYI 读 `macro/current.json` | 不调用 macro 角色 |
-| weekly（周复盘） | macro + technical + risk 三角色工作流 | 阶梯 / NAV / 基线表 | 唯一全量研究时点 |
-| valuation-daily（独立运行器） | macro → 宿主情景计算 → valuation | 估值报告 | 独立任务 |
+| briefing（盘前） | technical（卡片或成交有变才新跑，否则复用同收盘同卡片版本的 run） | risk 收据 + 宏观透镜 `--brief` | 宏观 = 代码判读 |
+| weekly（周复盘） | technical + risk 工作流 | 阶梯 / NAV / 基线表 + 宏观透镜 `--week` | 唯一全量研究时点 |
+| valuation-daily（独立任务） | 宿主计算 → valuation → 研究级目标 | 估值报告 | rf = 宏观日线缓存 10Y |
 | heartbeat | 无 | 健康扫描 + 缺卡派发 | 不调用模型 |
 
-角色契约真源 `quant/core/agent_contracts.py`；职责文本 `agents/{macro,technical,risk,valuation}.md`，角色注册 `roles.json`。只有 technical 可提 `zone_update` 提案，其余 `analysis_only`。`repaint_bound`（`agent_jobs.repaint_bound`）= 每轮至少 5 张，队列更长时取 ⌈N/2⌉，任何队列两轮排空（失败卡不计入保证）。
+角色契约真源 `quant/core/agent_contracts.py`；职责文本 `agents/{technical,risk,valuation}.md`，角色注册 `roles.json`。只有 technical 可提 `zone_update` 提案，其余 `analysis_only`。`repaint_bound`（`agent_jobs.repaint_bound`）= 每轮至少 5 张，队列更长时取 ⌈N/2⌉，任何队列两轮排空（失败卡不计入保证）。
 
 ## 路由（`routing.json` v2）
 
 - `model_profiles`：`anthropic` = Claude runtime，`openai` = Codex runtime；每个 profile 显式模型 + effort，fallback 列表可为空。
-- `roles.<role>.profile / reviewer_profile`：技术、风控走 anthropic；宏观、估值走 openai。`reviewer_profile` 在 `autopaint.review=false` 时**不生效**（配置保留，行为关闭）。
+- `roles.<role>.profile / reviewer_profile`：技术、风控、估值的主用 profile 与复核 profile 以 `routing.json` 为准（默认主用 anthropic、复核 openai）。`reviewer_profile` 在 `autopaint.review=false` 时**不生效**（配置保留，行为关闭）。
 - `execution_transport = desktop`：不起模型 CLI；控制器把数据包写进 `var/agent-runs/desktop/`，各自厂商的 Desktop 会话按 `tasks/desktop-research.md` 领取并回写。`cli` 仍可选：Claude 使用无工具 safe mode，Codex 使用隔离配置、macOS 沙箱及限定模型域名的 TLS 代理；CLI 解析顺序 = `CLAUDE_BIN` / `CODEX_BIN` 显式路径（无效即失败）→ PATH → 已知安装位置。
 - `limits` 约束单次 workflow（并行、调用、追问轮数）；`global_limits` 约束所有任务共享额度（窗口调用数、并行、租约宽限）。这是系统自己的调用保护，不代表账户剩余额度或实际金额。
 - `autopaint`：`enabled` 缺卡派发；`apply` 允许受控写入；`review` 要求另一厂商复核。当前取值见 `routing.json` 与 [MODEL_POLICY.md](MODEL_POLICY.md)。

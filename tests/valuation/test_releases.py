@@ -21,6 +21,7 @@ def fixture():
               'created_at': '2026-09-08T09:00:00+00:00', 'valid_until': '2026-09-09T09:00:00+00:00',
               'input_hash': 'a'*64, 'code_hash': 'b'*64, 'evidence': evidence,
               'output': {'low': 10, 'point': 20, 'high': 30, 'currency': 'USD',
+                         'unit': 'USD_per_common_share', 'share_basis': 'Synthetic unsplit common shares',
                          'value_at': NOW, 'interval_kind': 'conditional_scenarios', 'basis': 'Synthetic'}}
     digest = put(packet)
     review = put({'candidate_hash': digest, 'decision': 'accepted', 'reviewer_id': 'synthetic-reviewer',
@@ -91,6 +92,22 @@ def test_new_invalid_candidate_cannot_fall_back_to_prior_success():
     new.update(event_id='two', candidate_hash='f'*64, at=NOW)
     events = append_event(events, new, expected_head=events[-1]['event_hash'])
     assert select(events, store)['status'] == 'withheld'
+
+
+def test_rehashed_enterprise_value_cannot_be_published_as_a_share_price():
+    events, store = fixture()
+    event = {k: v for k, v in events[0].items() if k not in ('event_hash', 'previous_hash', 'sequence')}
+    packet = deepcopy(store[event['candidate_hash']])
+    packet['output']['unit'] = 'USD_millions_operating_value'
+    digest = canonical_hash(packet)
+    store[digest] = packet
+    review = deepcopy(store[event['review_hash']])
+    review['candidate_hash'] = digest
+    review_hash = canonical_hash(review)
+    store[review_hash] = review
+    event.update(candidate_hash=digest, review_hash=review_hash)
+    fresh = append_event([], event, expected_head=None)
+    assert 'common-share price unit' in select(fresh, store)['reason']
 
 
 @pytest.mark.parametrize('change', ['self_review', 'descriptive_evidence', 'wrong_scope', 'future_evidence'])

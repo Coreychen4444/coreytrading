@@ -1,0 +1,340 @@
+{
+ "EXMPL": {
+  "ticker": "EXMPL",
+  "schema": 1,
+  "basis": "gaap",
+  "known_at": "2030-01-15T00:00:00+00:00",
+  "origin": "review:2030-01-15",
+  "reviewed": true,
+  "last_reported_end": "2029-12-31",
+  "sources": [
+   "https://example.invalid/issuer-earnings-release"
+  ],
+  "notes": [
+   "Synthetic example: every number is invented. Replace with the issuer's own reported figures and guidance before use."
+  ],
+  "history": [],
+  "quarters": [
+   {
+    "id": "FY30Q1",
+    "start": "2030-01-01",
+    "end": "2030-03-31",
+    "revenue": {
+     "downside": 900.0,
+     "base": 1000.0,
+     "upside": 1100.0
+    },
+    "operating_profit": {
+     "downside": 162.0,
+     "base": 200.0,
+     "upside": 242.0
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY30Q2",
+    "start": "2030-04-01",
+    "end": "2030-06-30",
+    "revenue": {
+     "downside": 918.0,
+     "base": 1020.0,
+     "upside": 1122.0
+    },
+    "operating_profit": {
+     "downside": 165.2,
+     "base": 204.0,
+     "upside": 246.8
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY30Q3",
+    "start": "2030-07-01",
+    "end": "2030-09-30",
+    "revenue": {
+     "downside": 936.4,
+     "base": 1040.4,
+     "upside": 1144.4
+    },
+    "operating_profit": {
+     "downside": 168.5,
+     "base": 208.1,
+     "upside": 251.8
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY30Q4",
+    "start": "2030-10-01",
+    "end": "2030-12-31",
+    "revenue": {
+     "downside": 955.1,
+     "base": 1061.2,
+     "upside": 1167.3
+    },
+    "operating_profit": {
+     "downside": 171.9,
+     "base": 212.2,
+     "upside": 256.8
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY31Q1",
+    "start": "2031-01-01",
+    "end": "2031-03-31",
+    "revenue": {
+     "downside": 974.2,
+     "base": 1082.4,
+     "upside": 1190.7
+    },
+    "operating_profit": {
+     "downside": 175.4,
+     "base": 216.5,
+     "upside": 261.9
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY31Q2",
+    "start": "2031-04-01",
+    "end": "2031-06-30",
+    "revenue": {
+     "downside": 993.7,
+     "base": 1104.1,
+     "upside": 1214.5
+    },
+    "operating_profit": {
+     "downside": 178.9,
+     "base": 220.8,
+     "upside": 267.2
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY31Q3",
+    "start": "2031-07-01",
+    "end": "2031-09-30",
+    "revenue": {
+     "downside": 1013.5,
+     "base": 1126.2,
+     "upside": 1238.8
+    },
+    "operating_profit": {
+     "downside": 182.4,
+     "base": 225.2,
+     "upside": 272.5
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   },
+   {
+    "id": "FY31Q4",
+    "start": "2031-10-01",
+    "end": "2031-12-31",
+    "revenue": {
+     "downside": 1033.8,
+     "base": 1148.7,
+     "upside": 1263.6
+    },
+    "operating_profit": {
+     "downside": 186.1,
+     "base": 229.7,
+     "upside": 278.0
+    },
+    "other_pretax": {
+     "downside": 5.0,
+     "base": 5.0,
+     "upside": 5.0
+    },
+    "tax_rate": {
+     "downside": 0.18,
+     "base": 0.18,
+     "upside": 0.18
+    },
+    "other_after_tax": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "special_expense": {
+     "downside": 0.0,
+     "base": 0.0,
+     "upside": 0.0
+    },
+    "diluted_shares": {
+     "downside": 100.0,
+     "base": 100.0,
+     "upside": 100.0
+    }
+   }
+  ]
+ }
+}

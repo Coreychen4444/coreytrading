@@ -12,29 +12,32 @@
    │           pipeline · card_autopaint · tg_notify · tg_rich（报告文本 → Rich Message blocks 编译器）
    │           agent_runtime / agent_runners / agent_workflow（角色与模型解耦，研究与提交分离）
    │           agent_jobs / agent_inputs / agent_dependency（生产入口、冻结证据与角色视图、同 session 上游屏障）
-   │           valuation_daily（独立日更估值：刷新/冻结/宏观→估值/去重/归档）
+   │           valuation_daily（独立日更估值：刷新/冻结/计算→估值复核/研究级目标/去重/归档）
    │           agent_snapshots / agent_submit / agent_doctor / agent_health（快照、受控写卡、任务元数据盘点、健康与租约）
    │           agent_evidence（显式冻结组合输入 → 既有机械 sizing 收据，零取数/写入）
-   │           agent_desktop（Desktop 交接：后台启动原控制器，会话领取 / 提交研究请求）· macro_state（宏观文档校验与原子发布；pre_event 必须从事件剧本编译）
+   │           agent_desktop（Desktop 交接：后台启动原控制器，会话领取 / 提交研究请求）
    ├── report  报告层（读时计算，不产生新状态）
    │           portfolio_brief · perf_report · gate_ladder_report · gate_audit
    │           chart_read（每日收盘判读 = 两种模式已形成/即将形成清单，**判读层零授权效力**）
    │           transition_report（转移达标条件收据）· risk_receipt（机械风控收据）· agent_metrics（Agent 层周基线）
-   │           macro_report（宏观研究只读摘要）· macro_playbook_report（事件剧本校验 / 渲染 / 编译）
    │           nav_report（NAV 区间变动剔除外部现金流，周复盘 NAV 变动的唯一口径）
    │           valuation_report（冻结估值收据 → 当轮 FYI，缺口不回退到旧价）
    ├── journal 账本写入层（prose-only 不算落库）
    │           annotate_event · decision_log · market_regime_log（大盘状态卡每日快照账本 + chart-read 首段，判读层）
-   ├── valuation 估值层（**判断层零授权效力**：读三表/快照/K 线/宏观快照，写自己的账本）
+   │           macro_lens_log（宏观透镜：刷新 → 读数 → current/ledger/全文；--digest 推送 / --brief 简报 / --week 周回顾 / --explain 单日归因；判读层零授权）
+   ├── valuation 估值层（**判断层零授权效力**：读三表/快照/K 线/宏观日线缓存 10Y，写自己的账本）
    │           fundamentals（OpenD 三表+快照+PE 分位+目标价 → market/fundamentals 缓存）
    │           archetypes（商业模式原型缺省 + 人工区 inputs.json 校验）
-   │           model（FCFF-DCF · EPS×PE · 反向隐含 · 情景 · 久期，纯函数）
-   │           valuate（CLI 编排/渲染/valuations.jsonl 账本）
-   │           overlays（新闻→驱动契约: 校验/生效筛选/CLI append）· calibrate（财报后对账 + 非 PIT 的历史近似诊断）
+   │           model（FCFF-DCF · EPS×PE · 情景，纯函数；只作每日 assessment 内部诊断，无对外出口）
+   │           research_target（研究级 12 个月目标：EPS 包 × 本股核心 PE + FCF / 反向 DCF 旁注 + 前向账本）
+   │           eps_model（精简 EPS 包：未来 8 季三情景利润表，财报后机械滚动 + 一手披露复核）
+   │           overlays（新闻→驱动契约: 校验/生效筛选/CLI append）
    │           assessment（冻结输入的每日计算收据）· scenarios（宏观/公司情景传导）· response（短期事件样本与滚动检验）
    │           evidence（财报补充证据、前瞻时效和利息传导）· event_data（按真实交易日构建消息后日线样本）
    │           universe（估值层默认范围 = 持仓 ∪ 候选，只有名字，零授权效力）
    │           company_model / company_eps（公司级模型与显式证券级 EPS 算术，无现金/债务换算）
+   │           company_share_settlements（普通股毛增发/回购与现金代理同账；不替代员工权益估值）
+   │           company_content_capital（内容账面资产/应付款/现金联动；CFO与DCF分类分开，不认定内容权利价值）
    ├── decision 决策层（机械闸门）
    │           entry_guard · exit_guard · regime_transition · regime_score
    │           structure_drift · level_map · catalyst_check · tape_check
@@ -45,9 +48,8 @@
    │           watchlist_sync · watchlist_migrate · price_reminder_sync
    │           lot_reconcile（买入落账） · close_reconcile（平仓收尾） · today_group_sync
    │           company_profile_sync（券商财报 → agent.company_profile 机器区：商业模式/资产负债表/TTM 资本强度）
-   │           valuation_sync（valuations.jsonl 最新行 → agent.valuation 机器区；估值层不写 state，镜像归 sync）
    ├── data    把外部世界读进本地
-   │           market_data · macro_fetch · earnings_calendar
+   │           market_data · macro_series（跨资产宏观日线，公开结构化端点，尾部覆盖缓存 → trade/market/macro_daily；宏观透镜与估值 rf 的唯一取数口）· earnings_calendar
    │           sec_facts（显式 CIK 的 SEC 财务事实读取和披露日期筛选，不推断字段映射）
    │           sec_inline（缓存财报离线数字抽取，精确期间/实体/单位/分部，冲突或不支持格式保留未知）
    │           kline_cache · iv_logger · nav_snapshot · skhy_premium
@@ -62,8 +64,9 @@
                future_gates（卡片阶梯顶之上的远端 gate 候选：pivot 簇上沿 + 窗口最高价，与 bottom_evidence 同一把尺；零授权；两个消费者读同一个 `for_card`：price_reminder_sync 的 `gate:+N` 线 / gate_ladder_report 的远端行）
                key_levels（⭐箱顶 = 近 20 根最高价所在的簇 × 近 60 根被从下方测 ≥2 次、⭐突破 ×2 收盘（只站上一根 = ⭐突破中）、箱体位置判读；同一把簇尺，窗口全是既有常量别名；零授权；消费者 price_reminder_sync 的 ⭐ 线）
                market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
-               agent_contracts（四领域角色的 JSON 契约、权限与证据绑定）· valuation_contracts（情景单位、期限与传导约束）· motto（可选尾行，未配置即空）
-               macro_analysis / macro_evidence（宏观研究模块 schema 与逐项证据收据）· macro_playbook（事件剧本形状，零授权）· interpreter（生产入口解释器守卫）
+               macro_lens（宏观透镜：六盏风险灯 / 近 40 日最强驱动与读法 / 市场在交易什么 / 未来方向与情景 β / 单日归因；判读层零授权）
+               agent_contracts（领域角色的 JSON 契约、权限与证据绑定）· valuation_contracts（情景单位、期限与传导约束）· motto（可选尾行，未配置即空）
+               interpreter（生产入口解释器守卫）
 
   research     验证层（可复用机械件/合成脚手架）—— 旁路，不参与实时决策
 ```
@@ -86,11 +89,12 @@
 
 ## 约定
 
-**市场情报**——本仓不采集新闻 / 宏观；情报数据目录 `trade/intelligence/`（公开仓只有 README 与合成示例）与运行状态 `var/intelligence/` 由用户自有的可选采集流程维护，交易代码只读。不把报告、任务或数据整包放进 quant；现有 `valuation/event_data.py` 继续服务估值，出现第二个实际消费者再提取通用实现。新代码层仍须通过依赖与测试镜像守卫，不预建空层。
-`core/macro_analysis.py` 定义宏观因果与市场结构研究模块的 schema 及证据约束，由 agent_contracts 验证，不是新决策层；宏观 worker 的结构化研究不改变宏观发布 schema、数据采集或交易授权。`core/macro_evidence.py` 将已有捕获整理为逐项时间与来源收据，只计算同源样本变化和同日官方利率差；不取数、不宣称实时或因果。`report/macro_report.py` 从验证后的结果派生摘要和只读报告；ops 负责把初始 / 追问分别保留在工作流与任务回执中，报告层不修改交易或宏观发布状态。
+**市场情报**——本仓不采集新闻；情报数据目录 `trade/intelligence/`（公开仓只有 README 与合成示例）与运行状态 `var/intelligence/` 由用户自有的可选采集流程维护，交易代码只读（宏观透镜发布路径除外，见下）。不把报告、任务或数据整包放进 quant；现有 `valuation/event_data.py` 继续服务估值，出现第二个实际消费者再提取通用实现。新代码层仍须通过依赖与测试镜像守卫，不预建空层。
+
+**宏观透镜**——`data/macro_series`（取数）→ `core/macro_lens`（纯判别式）→ `journal/macro_lens_log`（发布 `trade/intelligence/macro/` 下的 current / ledger / 全文与推送）。零模型调用、零授权；旧宏观状态发布器、快照采集、事件剧本与宏观研究角色已退役。
 
 **领域 Agent**——职责定义在 `agents/`，运行方式见 `agents/README.md`。角色不拥有文件/券商写权限；
-`ops` 控制器选择 Claude/Codex 执行通道（`routing.json` 的 `execution_transport`：Desktop 交接或 CLI），验证冻结输入与研究结果；技术提案仅经现有 writer 和 revision 检查落卡。每日循环只跑 technical 模型（同收盘同卡片版本复用 run），风控收据由 `report/risk_receipt` 代码渲染，三角色工作流只在 weekly；基线指标 `report/agent_metrics`；入口解释器守卫 `core/interpreter`。
+`ops` 控制器选择 Claude/Codex 执行通道（`routing.json` 的 `execution_transport`：Desktop 交接或 CLI），验证冻结输入与研究结果；技术提案仅经现有 writer 和 revision 检查落卡。每日循环只跑 technical 模型（同收盘同卡片版本复用 run），风控收据由 `report/risk_receipt` 代码渲染，technical + risk 工作流只在 weekly；基线指标 `report/agent_metrics`；入口解释器守卫 `core/interpreter`。
 现有 `decision/risk/sync` 的机械规则不迁入模型 prompt。`card_autopaint` 与 `agent_jobs` 保留跨模型复核后的受控自动写卡能力，是否要求复核由 `routing.json` 的 `autopaint.review` 决定；金额、退出、CAS 与最终开关均由宿主检查。
 
 **运行**——每个模块既能 import 也能直接跑：

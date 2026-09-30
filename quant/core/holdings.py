@@ -242,7 +242,7 @@ def cost_basis(body: dict) -> float | None:
     """「成本不向下摊」的成本 = 这张卡**受管层**持仓的加权均价 → float | None。
 
     lots.position (lot_reconcile 按实际成交落的) 优先 —— broker.avg_cost 是 moomoo 把 base 与
-    position 合并的均价, 不作 PnL 参考 (position-tiers); lots 缺 (期权 lot 只报不写 / 未落账)
+    position 合并的均价, 不作 PnL 参考 (position-tiers); lots 缺 (未落账)
     → 回落 broker.avg_cost (期权卡按合约, 即权利金成本)。broker.qty 为 0 / synthetic 行 → None:
     空仓没有成本可摊, 建仓不受此约束。"""
     broker = body.get("broker") or {}
@@ -340,74 +340,6 @@ def cardless_tickers(positions_doc: dict, watchlist_doc: dict) -> list[str]:
                 continue
             if not ((body.get("agent") or {}).get("zones")):
                 out.add(ticker)
-    return sorted(out)
-
-
-def cards_missing_archetype(positions_doc: dict, watchlist_doc: dict, inputs_doc: dict) -> list[str]:
-    """画了卡 (有 zones) 却没归估值原型的**正股**票 → [ticker] (排序, 两桶合并去重)。
-
-    新候选进了自选、卡都画完了, 估值层人工区 inputs.json 没有它们, 周复盘估值一览只能印 ✗。
-    归原型是画卡的一部分 (trading-analysis
-    skill 与 card_autopaint 同一条命令), 漏了要有人点名: update_position_zones 写盘后 ⚠️ +
-    brief `INFRA:card_missing_archetype` 每轮报, 都**不拦截** (判断层零授权, 缺它不影响 zone/gate/cap)。
-
-    收谁: 与 `cardless_tickers` 同一套选卡 (持仓 live / 候选 is_candidate; 结构豁免与参考票不进),
-    但要求**已有 zones** —— 空 stub 归 autopaint, 它建卡时会一并归原型。期权卡不进 (估的是 underlying)。
-    纯函数: inputs_doc = 人工区文件内容 ({"tickers": {T: {...}}}), 由调用方读。
-    """
-    have = {str(k).upper() for k in ((inputs_doc or {}).get("tickers") or {})}
-    out: set[str] = set()
-    for doc, live_only in ((watchlist_doc, False), (positions_doc, True)):
-        tickers = (doc or {}).get("tickers") or {}
-        live = live_tickers(doc or {}) if live_only else None
-        for t, body in tickers.items():
-            if not t.isalpha():
-                continue
-            if live is not None:
-                if t not in live:
-                    continue
-            elif not is_candidate(body):
-                continue
-            if not is_managed(body) or not is_traded(body):
-                continue
-            if not ((body.get("agent") or {}).get("zones")):
-                continue
-            if t.upper() not in have:
-                out.add(t.upper())
-    return sorted(out)
-
-
-def cards_missing_archetype(positions_doc: dict, watchlist_doc: dict, inputs_doc: dict) -> list[str]:
-    """画了卡 (有 zones) 却没归估值原型的**正股**票 → [ticker] (排序, 两桶合并去重)。
-
-    新候选进了自选、卡都画完了, 估值层人工区 inputs.json 没有它们, 周复盘估值一览只能印 ✗。
-    归原型是画卡的一部分 (trading-analysis
-    skill 与 card_autopaint 同一条命令), 漏了要有人点名: update_position_zones 写盘后 ⚠️ +
-    brief `INFRA:card_missing_archetype` 每轮报, 都**不拦截** (判断层零授权, 缺它不影响 zone/gate/cap)。
-
-    收谁: 与 `cardless_tickers` 同一套选卡 (持仓 live / 候选 is_candidate; 结构豁免与参考票不进),
-    但要求**已有 zones** —— 空 stub 归 autopaint, 它建卡时会一并归原型。期权卡不进 (估的是 underlying)。
-    纯函数: inputs_doc = 人工区文件内容 ({"tickers": {T: {...}}}), 由调用方读。
-    """
-    have = {str(k).upper() for k in ((inputs_doc or {}).get("tickers") or {})}
-    out: set[str] = set()
-    for doc, live_only in ((watchlist_doc, False), (positions_doc, True)):
-        tickers = (doc or {}).get("tickers") or {}
-        live = live_tickers(doc or {}) if live_only else None
-        for t, body in tickers.items():
-            if not t.isalpha():
-                continue
-            if live is not None:
-                if t not in live:
-                    continue
-            elif not is_candidate(body):
-                continue
-            if not is_managed(body) or not is_traded(body):
-                continue
-            if not ((body.get("agent") or {}).get("zones")):
-                continue
-            if t.upper() not in have:
-                out.add(t.upper())
     return sorted(out)
 
 

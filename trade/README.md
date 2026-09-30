@@ -31,8 +31,8 @@ Business data is organized directly by responsibility: there is no per-market wr
 |---|---|
 | `portfolio/` | Account state, candidates, fills, NAV, cash flows, scores, journals and derived observations; not a rebuildable cache |
 | `market/` | Prices, earnings and raw market observations; refreshable caches and non-rebuildable historical snapshots have different retention needs |
-| `intelligence/` | Optional news sources, macro evidence, publication history, event plans/results and reports written by a user-owned collection workflow; trading code only reads them |
-| `valuation/` | Manual valuation inputs, prediction ledgers and calibration records |
+| `intelligence/` | Optional news sources and reports written by a user-owned collection workflow (trading code only reads them), plus the code-rendered macro-lens readings under `macro/` |
+| `valuation/` | Manual valuation inputs, compact EPS packages and release records |
 | `strategy/` | User-specific decision rules and option policies; the public repository holds schemas only |
 | `knowledge/` | Private research cards and evidence |
 

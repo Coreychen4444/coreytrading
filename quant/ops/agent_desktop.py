@@ -27,7 +27,7 @@ from quant.core.paths import AGENT_RUNS_DIR, ROOT
 # would wait for the whole evidence TTL (up to 3600 s) when the other
 # provider's session never showed up. A missed deadline is a failed attempt the
 # workflow reports as a missing role; it never extends or reuses evidence.
-REQUEST_DEADLINES_S = {"macro": 900, "valuation": 1200, "technical": 1200, "risk": 900}
+REQUEST_DEADLINES_S = {"valuation": 1200, "technical": 1200, "risk": 900}
 DEFAULT_DEADLINE_S = 900
 # A claimed request whose session died is reclaimable after this lease.
 CLAIM_LEASE_S = 1200

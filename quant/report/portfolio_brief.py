@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 
 from quant.core import book, earnings, sizing, structure  # noqa: E402  组合占用 + 财报缩仓 + gate 结构完整性
 from quant.core.holdings import (
-    UNMANAGED_ROLES, cards_missing_archetype, cost_basis, flat_with_lots, is_candidate, is_managed,
+    UNMANAGED_ROLES, cost_basis, flat_with_lots, is_candidate, is_managed,
     is_reference_role, live_tickers, lot_gap, lot_qty, managed_tickers, underlying_cards_missing_zones)
 from quant.core.io_json import atomic_write_json, iter_jsonl, read_json
 from quant.core.occ import is_option_ticker
@@ -34,7 +34,7 @@ from quant.core.num import coerce_float as normalize_num
 from quant.core.occ import parse_occ
 from quant.core.paths import (
     EVENTS_DIR, HEARTBEAT_STATE_PATH, PORTFOLIO_ROOT, IV_HISTORY_DIR,
-    KLINE_CACHE_DIR, NAV_HISTORY_PATH, SCORES_PATH, VALUATION_INPUTS_PATH,
+    KLINE_CACHE_DIR, NAV_HISTORY_PATH, SCORES_PATH,
 )
 from quant.core.sizing import regime_lines
 from quant.core.technical import atr, resample_weekly
@@ -1744,21 +1744,21 @@ def iv_signal(ticker: str) -> Optional[str]:
     return None
 
 
-def valuation_fyi_map(pos_doc: Optional[dict], wl_doc: Optional[dict]) -> Dict[str, str]:
-    """卡片机器区 `agent.valuation.fyi` → {ticker: 一行}。判断层零授权效力: 简报只把这一行**原样**
-    挂在该票依据行尾 (📐[FYI]), 不进动作判定、不进预算、不进任何告警。来源 = valuation_sync 镜像的
-    valuations.jsonl 最新行 ( 用户: 「估值结果在哪里呈现」→ 卡片是简报读的地方)。
+def valuation_fyi_map(pos_doc: Optional[dict], wl_doc: Optional[dict], research: Optional[dict] = None) -> Dict[str, str]:
+    """最近一次估值日更的研究级 12 个月目标 → {ticker: 一行}。判断层零授权效力: 简报只把这一行**原样**
+    挂在该票依据行尾 (📐[FYI]), 不进动作判定、不进预算、不进任何告警。
+    不读卡片镜像 agent.valuation (已退役); 日更缺失 / 失败 / 超 3 天 = 不挂 (不回退旧估值)。
     positions 只取 active 正股卡, watchlist 只取 watching; 期权卡归 underlying。"""
+    from quant.valuation import research_target
+    result = research if research is not None else research_target.load_latest()
+    rows = (result or {}).get("tickers") or {}
     out: Dict[str, str] = {}
     for doc, want in ((pos_doc, "active"), (wl_doc, "watching")):
         for tk, card in ((doc or {}).get("tickers") or {}).items():
-            if is_option_ticker(tk) or str((card or {}).get("status")) != want:
+            key = str(tk).upper()
+            if is_option_ticker(tk) or str((card or {}).get("status")) != want or key in out or key not in rows:
                 continue
-            v = ((card or {}).get("agent") or {}).get("valuation") or {}
-            line = str(v.get("fyi") or "").strip()
-            if line and tk not in out:
-                out[str(tk).upper()] = (line + f" · 历史镜像 {v.get('model_version') or '旧版/版本未标注'}"
-                                       f" · 估值日 {v.get('as_of') or '未知'}（本次未重算）")
+            out[key] = research_target.fyi_line(rows[key]) + f" · 估值日 {str(result.get('as_of'))[:10]}"
     return out
 
 
@@ -2276,27 +2276,8 @@ def build_brief(rows: List[dict], ticker_col: str, *, mutate_state: bool = True)
             triggers.append({"ticker": "INFRA", "type": "bottom_card_unstamped",
                              "value": len(unstamped)})
 
-    # 画了卡没归估值原型 : 新候选卡画完
-    # 一周, 估值层人工区没有它们, 周复盘估值一览只能印 ✗。判断层零授权 —— 只报不拦, 与
-    # card_missing_next_gate 同款出口; 修法一条命令 (archetypes.py set), 不是让人手填 JSON。
-    try:
-        _inputs = read_json(VALUATION_INPUTS_PATH) if VALUATION_INPUTS_PATH.exists() else {}
-    except Exception:                                              # noqa: BLE001  坏文件不拖垮 brief
-        _inputs = {}
-    no_arch = cards_missing_archetype(
-        pos_doc_infra, _load_state_doc(STATE_WATCHLIST_PATH), _inputs or {})
-    if no_arch:
-        active_keys.add(alert_key("INFRA", "card_missing_archetype"))
-        all_conditions.append({"ticker": "INFRA", "type": "card_missing_archetype",
-                               "value": len(no_arch)})
-        if emit_gate("INFRA", "card_missing_archetype"):
-            alerts.append("⚠️ 卡已画但估值层未归原型 (inputs.json 无条目, 画卡一并做): "
-                          + ", ".join(no_arch)
-                          + " → `python3 quant/valuation/archetypes.py set <T> --archetype "
-                            "<platform|semi_cyclical|ai_infra_capex|software_growth|not_applicable> "
-                            "--rationale \"<商业模式一句话>\"` (判断层零授权, 只影响估值一览覆盖)")
-            triggers.append({"ticker": "INFRA", "type": "card_missing_archetype",
-                             "value": len(no_arch)})
+    # INFRA:card_missing_archetype 已退役: 研究级目标的 EPS 源 = 精简 EPS 包 (valuation/eps_model),
+    # 不再依赖原型; 旧估值栈 (valuate / valuation_sync / 卡片 agent.valuation 镜像) 一并退役。
 
     # 转移装上来的 zones 没有锚 → anchor_date() 用 thesis.last_reviewed 凭空补新鲜度,
     # 财报重画 SLA 与同锚层一并消音 (用户 , NBIS 快车道前夜)。

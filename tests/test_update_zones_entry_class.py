@@ -41,7 +41,6 @@ def upz(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "WATCHLIST_PATH", wl)
     monkeypatch.setattr(mod, "POSITIONS_PATH", pos)
     monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
-    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
     return mod, wl
 
 

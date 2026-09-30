@@ -19,9 +19,10 @@ flowchart TD
     Rules["结构、仓位与退出规则的代码真源"] --> Inputs
     Inputs --> Jobs
     Routes["角色与模型路由：Codex / Claude"] --> Jobs
-    Jobs --> Workflow["宏观 + 技术 → 风控 → 有限追问"]
+    Jobs --> Workflow["技术 → 风控 → 有限追问"]
+    Lens["宏观透镜（代码判读，零模型）"] --> Inputs
     Workflow --> Reports["研究报告、分歧与未知项"]
-    ValTask["独立估值任务"] --> ValFlow["刷新与冻结 → 宏观情景 → 估值计算与研究"]
+    ValTask["独立估值任务"] --> ValFlow["刷新与冻结 → 估值计算与研究"]
     ValFlow --> ValReport["独立估值报告"]
     Jobs --> Card["单卡技术提案"]
     Card --> Review["另一运行器独立复核"]
@@ -40,12 +41,13 @@ flowchart TD
 
 | Agent | 运行器（运行时点） | 独立复核运行器 | 职责 |
 |---|---|---|---|
-| **宏观** | **Codex**（周复盘 / 估值日更） | Claude | 解读既有宏观证据、相位与不确定性，提供环境先验；每日简报直接读情报流程发布的 `macro/current.json` |
 | **技术分析** | **Claude**（每日唯一模型角色；同收盘同卡片版本复用 run） | Codex | 判读价格结构、gate 与 zone，提出单卡更新提案 |
 | **风控／仓位管理** | 每日 = 代码渲染（`quant/report/risk_receipt.py`）；周复盘 = **Claude** | Codex | 检查全组合敞口、购买力、退出约束和机械 sizing 收据 |
-| **估值** | **Codex**（独立日更） | Claude | 解读财务报表、估值账本、情景和隐含预期 |
+| **估值** | **Claude**（独立日更） | Codex | 解读财务报表、精简 EPS 包、研究级目标和隐含预期 |
 
-[agents/routing.json](agents/routing.json) 是配置真源。领域角色、运行器、模型提供方和模型 ID 是四个概念：宏观是角色，Codex CLI 是运行器，OpenAI 是模型提供方，某个具体 GPT 版本才是模型。路由 v2 通过 `model_profiles` 集中定义具体模型，各角色引用主用 profile 与独立复核 profile。
+宏观不是模型角色：**宏观透镜**由代码每个收盘判读 —— 六盏风险灯（预告波动与回撤深度，不预告方向）、近 40 日最强驱动与市场读法、市场在交易什么、未来方向与情景 β，零模型调用、零授权效力；判别式 [quant/core/macro_lens.py](quant/core/macro_lens.py)，发布器 [quant/journal/macro_lens_log.py](quant/journal/macro_lens_log.py)。其精简先验随每次冻结输入进入技术与估值视图。
+
+[agents/routing.json](agents/routing.json) 是配置真源。领域角色、运行器、模型提供方和模型 ID 是四个概念：估值是角色，Codex CLI 是运行器，OpenAI 是模型提供方，某个具体 GPT 版本才是模型。路由 v2 通过 `model_profiles` 集中定义具体模型，各角色引用主用 profile 与独立复核 profile。
 
 | 模型 profile | 首选模型 | 次选模型 | 明确指定的 effort |
 |---|---|---|---|
@@ -59,13 +61,13 @@ flowchart TD
 ## Agent 如何协作
 
 1. **捕获证据。** 宿主读取既有状态与缓存，记录 owner、时间和内容 hash，冻结共享快照及各角色视图。捕获不等于刷新，缺失和失效信息会保留。
-2. **并行研究。** 交易流程中的宏观与技术角色分别分析自己的领域输入；独立估值流程按宏观情景、宿主计算、估值研究的顺序执行。输出区分事实观察、假设、风险和未知项，引用绑定捕获时的原始证据。
-3. **组合复核。** 风控读取自己的原始输入与本轮宏观、技术报告。风控视图覆盖全部受管持仓，包括期权自身退出规则与可用 Greeks；金额来自既有机械计算。
+2. **领域研究。** 交易流程中技术角色分析自己的领域输入（宏观先验由宏观透镜代码提供）；独立估值流程按宿主计算、估值研究的顺序执行。输出区分事实观察、假设、风险和未知项，引用绑定捕获时的原始证据。
+3. **组合复核。** 风控读取自己的原始输入与本轮技术报告。风控视图覆盖全部受管持仓，包括期权自身退出规则与可用 Greeks；金额来自既有机械计算。
 4. **定向追问。** 跨领域请求按接收角色合并，最多追加一轮，未解决的问题留在记录中。同一结论经另一模型转述，不增加独立证据。
 
 当前配置允许单次 workflow 最多 2 个并行调用、8 次模型调用，不自动追问。宿主另设所有任务共享的上限：原生调用并发最多 2 个，滚动一小时内最多 12 次。备用同样消耗预算，并发排队有超时。这些额度约束本系统的工作量，不代表任一模型账户的剩余额度或费用。
 
-`execution_transport = desktop` 时宿主不启动模型 CLI：数据包写入 `var/agent-runs/desktop/`，各运行器的 Desktop 会话按 [tasks/desktop-research.md](tasks/desktop-research.md) 领取、作答并提交；编排、冻结证据、受控提交与 applied 回执仍归宿主。每日循环只跑技术角色，风控收据由代码渲染，三角色工作流只在周复盘。
+`execution_transport = desktop` 时宿主不启动模型 CLI：数据包写入 `var/agent-runs/desktop/`，各运行器的 Desktop 会话按 [tasks/desktop-research.md](tasks/desktop-research.md) 领取、作答并提交；编排、冻结证据、受控提交与 applied 回执仍归宿主。每日循环只跑技术角色，风控收据由代码渲染，技术 + 风控工作流只在周复盘。
 
 ## 复核后的自动写卡
 
@@ -86,18 +88,19 @@ flowchart TD
 
 ## 日常运行
 
-任何能让编码 Agent 执行 prompt 的调度器（桌面任务运行器、配合 CLI Agent 的 cron）都可以触发六个交易任务，Python 控制器独立于调度器选择各领域使用的运行器。
+任何能让编码 Agent 执行 prompt 的调度器（桌面任务运行器、配合 CLI Agent 的 cron）都可以触发六个交易任务与宏观透镜发布，Python 控制器独立于调度器选择各领域使用的运行器。
 
 | 任务 | 领域工作 |
 |---|---|
 | `heartbeat` | 券商与状态同步、机械风控和退出告警、健康检查、非阻塞缺卡派发 |
-| `overnight-briefing` | 刷新每日输入，运行技术角色（同收盘同卡片版本复用）并附代码渲染风控收据，处理重画队列并生成入场计划 |
+| `overnight-briefing` | 刷新每日输入，运行技术角色（同收盘同卡片版本复用）并附代码渲染风控收据，贴宏观透镜几行，处理重画队列并生成入场计划 |
 | `postclose-transition` | 先评估退出，再执行完整收盘后的机械转移，渲染转移达标收据，运行技术研究并附代码渲染风控收据，处理重画 |
 | `gate-ladder-report` | 等待同交易日 postclose 完结后，输出机械 gate 阶梯表 |
+| `macro-lens` | 实际收盘后 30 分钟，不等盘后处理：刷新跨资产日线，发布代码判读的宏观透镜（读数、账本、全文）并单独推送；当日日线没取到则不发布 |
 | `chart-read` | 代码渲染两种可交易形态（抄底 / 趋势确认）已形成或即将形成的清单；零模型调用 |
-| `weekly-portfolio-review` | 用既有绩效、宏观与技术证据完成组合风控复盘，NAV 周变剔除外部现金流 |
+| `weekly-portfolio-review` | 用既有绩效、技术证据与宏观透镜周回顾完成组合风控复盘，NAV 周变剔除外部现金流 |
 
-独立的 `valuation-daily` 任务（[tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)）自行刷新数据并运行宏观情景与估值链，报告归档在 `var/valuation-daily/`。盘前与周复盘不运行估值角色。
+独立的 `valuation-daily` 任务（[tasks/claude/valuation-daily.md](tasks/claude/valuation-daily.md)；Codex 运行器版 [tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)）自行刷新数据并运行估值链（含未验证的研究级 12 个月目标），报告归档在 `var/valuation-daily/`。盘前与周复盘不运行估值角色。
 
 盘前与盘后流程的关键顺序是：
 
@@ -154,8 +157,8 @@ flowchart TD
 |---|---|
 | `trade/portfolio/` | 当前持仓与候选、成交/NAV/现金流账本、评分、人工日志和派生观察 |
 | `trade/market/` | 行情、财报与原始市场输入；可重拉缓存和历史快照分别保留 |
-| `trade/intelligence/` | 新闻来源、宏观快照、事件计划/结果与发布报告 |
-| `trade/valuation/` | 人工估值输入、预测账本与校准记录 |
+| `trade/intelligence/` | 可选的新闻来源与报告归档、宏观透镜读数 / 账本 / 全文 |
+| `trade/valuation/` | 人工估值输入、精简 EPS 包与发布记录 |
 | `trade/strategy/` | 交易规则与方法合同 |
 | `trade/knowledge/` | 知识资料与冻结只读的研报库 |
 
@@ -193,7 +196,7 @@ python3 quant/ops/pipeline.py --mode briefing --read-only --json
 
 该命令只渲染缓存，跳过同步、转移、通知、journal、Agent 调用和 entry 阶段，不会刷新数据。
 
-要基于已有输入发起宏观、技术与风控组合研究：
+要基于已有输入发起技术与风控组合研究：
 
 ```bash
 python3 quant/ops/agent_jobs.py run --kind weekly --json

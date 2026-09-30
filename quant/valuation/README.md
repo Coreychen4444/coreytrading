@@ -4,6 +4,40 @@ This is a judgement layer with 零授权效力. It cannot change trading permiss
 The numerical implementation is authoritative; a successful research response
 does not establish forecast accuracy.
 
+The current methodology is not accepted for valuation publication.
+`model.publication_policy()` withholds fair-value and twelve-month target publication;
+daily receipts retain raw calculations for diagnostics and report publishable coverage
+separately from computed coverage. The daily renderer applies this policy even to old
+receipts without publication metadata. No company input or worker approval can lift it.
+
+## Research-grade twelve-month target
+
+EPS source: `eps_model.py` compact packages (`trade/valuation/eps_models.json`) — eight future quarters of
+three-scenario revenue, operating profit, other pretax, tax rate, other after-tax items, one-off expense and
+diluted shares. Packages can be seeded from the company packages (numbers identical), are rolled mechanically
+by the daily job when a reported quarter matches the first model quarter (surprise ratio carried to later
+quarters, margins kept, one quarter appended by the last year-over-year growth; `reviewed=false`), and are then
+reviewed by the daily session from primary issuer disclosures via `set` / `review`. Company packages are only a
+fallback.
+
+The legacy stack is retired: the valuate CLI, the calibrate backtest, the card-mirror sync, the card mirror
+`agent.valuation` (the schema now rejects it), the card-time archetype requirement and its brief alert. `model.py`
+stays only as the daily assessment's internal, withheld diagnostic engine. Paragraphs below that mention the
+valuate CLI, the prediction ledger or the calibrate backtest describe history.
+
+`research_target.py` gives an unvalidated, zero-authority twelve-month price per ticker,
+separate from the acceptance/release channel: next-four-quarter EPS (three scenarios) × the
+stock's own current core trailing PE, with a band from its own three-year PE quartiles. Core
+EPS removes securities gains after a 21% tax. It withholds for non-positive forward/trailing
+EPS and for near-breakeven PE without history. The daily job writes `research_targets.json`
+and places the rendered block at the top of the report. It also adds back issuer-guided
+one-off expenses carried in the packages, a cash lens (TTM FCF yield, own three-year
+percentile, FCF/core earnings, flags for negative FCF or conversion below 0.5), a
+consensus-gap flag (>25%, provider horizon unverified) and a reverse-DCF implied growth: the
+ten-year core-EPS growth rate (3% terminal, 10Y + model ERP, beta 1) that justifies the
+current price, withheld for PE above 100. None of these changes the center. Each run appends
+one row per ticker to the forward ledger `trade/portfolio/observations/valuation_forward.jsonl`
+for later reconciliation.
 ## Outputs and meaning
 
 The current intrinsic value is an FCFF valuation of the operating business plus
@@ -284,7 +318,7 @@ newly fetched share count. Neither prices nor profiles rewrite broker caches.
 
 Daily assessment and the weekly CLI share financial identity, disclosure/capture
 cutoff, latest-period age, SEC supplementation and market-assumption checks.
-The macro snapshot's generated_at_utc and US10Y-specific unusable/stale
+The risk-free rate document's generated_at_utc and US10Y-specific unusable/stale
 flags are enforced. Official daily yields remain background, not verified
 historical release vintages. Other unusable assets do not invalidate a usable
 US10Y. Manual overlays also need fixed expiry; visibility, baseline and finite
@@ -308,7 +342,7 @@ notes into rate exposures, or measure announcement-minute price jumps.
 ## Company reconstruction pilot
 
 `company_model.py` is a separate explicit company engine, currently
-`company-v5.4.1-research`. It does not inherit archetype growth, margins, a share
+`company-v5.4.5-research`. It does not inherit archetype growth, margins, a share
 count inferred from EPS, or the old cash-flow-derived PE. The private input
 catalog is `trade/valuation/company_models.json`, keyed by ticker; capture adds
 it to the frozen evidence with ownership/hash checks. Assessment routes a ticker
@@ -454,21 +488,44 @@ an explicit analyst assumption where supplied, not a missing-field default.
 `company_equity.py` supplies a pure bridge at a single settlement date. The
 optional scenario `business_equity` case declares USD/millions, full consolidated
 operating value before financial claims, a complete list of `required_business_ids`
-and `businesses`, `nonoperating_assets`, and a complete `required_claim_ids`/`claims`
-inventory. Each row has `economic_id`, `date`, `basis`, and `source_refs`. Repeated
+and `businesses`, an explicit `required_asset_ids`/`nonoperating_assets` inventory,
+and a complete `required_claim_ids`/`claims` inventory. Empty asset inventories
+must be declared explicitly; omission is rejected. Each row has `economic_id`,
+`date`, `basis`, and `source_refs`. Repeated
 economic IDs across any component are rejected. Corporate operating values may
 be negative; nonoperating additions must be excess unrestricted cash or separately
-valued nonoperating equity, never restricted cash or consolidated subsidiary EV.
+valued nonoperating equity/financial assets, never restricted cash or consolidated
+subsidiary EV. Every asset selects `valuation_status=valued` with a finite value,
+or `unresolved` without a placeholder value. Unknown assets hold the per-share
+result and report `unresolved_assets`; partial known additions are separately
+labelled `known_nonoperating_assets`, not assumed to be the complete asset value.
+This validation contract is versioned `company-v5.4.2-research`; historical
+forecasts pinned to previous versions remain unchanged.
 
 Claims select exactly one treatment: `cash` with a cash amount; `shares` with
 incremental `new_shares` and incremental `cash_proceeds`; `net_share_warrant` or
 `net_cash_warrant` with underlying shares/strike; `not_triggered` with explicit
-false trigger state and rationale; or `unresolved`, which withholds the value.
+false trigger state and rationale; `pari_passu_equivalents` for separately
+outstanding equal-distribution classes; or `unresolved`, which withholds the value.
 Incompatible settlement fields are rejected. Net warrants require
 `exercise_basis=immediate_exercise_at_bridge_date`. The monotone settlement equation
 solves the common price without taking today's market price as an input. It does
 not price an unexpired option's time value. Nonpositive residual wealth stays
 unknown pending a restructuring model, rather than publishing a negative target.
+
+`company-v5.4.5-research` distinguishes an already issued participating class
+from a future share issuance. `pari_passu_equivalents` requires explicit
+`participating_shares`, positive `common_share_ratio`,
+`participation_basis=pari_passu_dividends_and_liquidation`,
+`already_in_common_shares=false`, `has_senior_or_redemption_rights=false`, and
+`rights_basis`. These units allocate residual wealth without raising new cash or
+deducting the historical issuance proceeds as debt. Senior/redeemable classes
+need their own economic model. Weighted EPS dilution cannot supply the closing
+class population. The result reports `participating_common_equivalents`; a
+solved case reports `total_common_units` and `allocated_participating_equity`,
+not `total_shares` as if the class were legal common. The participation units
+also enter the circular warrant equation. These are conditional allocations,
+not evidence of actual legal conversion or independently verified class scope.
 
 The company host binds the date to an explicit forecast quarter end and the
 outstanding share anchor to that quarter's closing shares, validates every source
@@ -512,6 +569,60 @@ contract. Missing long-term inputs remain unknown. No consolidated
 DCF assumptions have been accepted; this connection alone does not approve
 valuation publication or establish forecast accuracy.
 
+### Opening finance-lease runoff
+
+`company_leases.project` models only the explicitly identified opening commenced
+finance-lease liability. Contractual cash buckets require dated caption mappings;
+calendar-day allocation, period-end payment and an effective annual interest rate
+are explicit scenario assumptions. Unknown rates/payments, overlapping buckets,
+negative amortization and overpayments are rejected. The opening current and
+noncurrent amounts must reconcile and be excluded from the separate note/loan
+debt population.
+
+A scenario's optional `finance_lease_runoff` must match every forecast quarter.
+The host binds its principal to `cash.lease_principal` and its interest allocation
+to combined net nonoperating income. The remaining book liability is separately
+reported as `ending_opening_population_finance_lease_liability`; it does not alter
+note/loan debt or create new capital. The bounded worker view retains the partial
+population, assumptions, unresolved scope and ending liability.
+
+### Finite acquired-intangible runoff
+
+The optional `population_scope: definite_lived_intangibles_only` selects a finite
+subset and requires a separate `excluded_nonamortizing_assets` inventory. Its
+zero selected IPRD means exclusion from this subset, rather than an assertion
+about company-wide IPRD. An excluded indefinite balance remains unvalued and
+receives no readiness date or amortization. The host checks its evidence; the
+worker view retains its scope and exclusions. Asset and lease ledger rows use
+separate bindings when both are attached to the same scenario.
+
+`company_amortization.py` projects separately disclosed amortizable and IPRD
+book pools, never their fair value. A scenario's `acquired_intangible_runoff`
+starts at the company opening balance date; its two opening pools must sum to
+`reported_total`. Explicit no-new-acquisition/no-impairment conditions do not
+establish that acquisitions or impairments cannot happen. IPRD is either
+`not_ready_in_projection`, with no date/life, or `scenario_assumption`, with a
+future readiness date and useful life. Amortization uses actual elapsed days
+after readiness and cannot consume more than the remaining asset pool.
+
+Each consecutive quarter/rolling-year period supplies existing amortization,
+other D&A, EBIT before acquired amortization, cash new assets, new financed
+technology licenses and existing license principal paid, plus its source/basis.
+The host binds quarter EBIT, D&A and the declared cash investment/repayment
+population to the calculated ledger. Overlapping and later DCF periods must
+match ledger EBIT, total D&A and gross new capital; license principal is excluded
+from that new capital. Other D&A includes any unseparated license/software
+charges and must not be called audited physical depreciation. Future new license
+amounts require explicit assumptions or source evidence, not an inference from
+the net liability change alone. Tax basis, capacity prepayments, lease population
+and replacement needs remain independent model requirements.
+
+Version `company-v5.4.3-research` adds this optional validation without changing
+old packets' numerical paths. A packet that adopts it changes its own future
+EPS/cash path; existing frozen predictions and prior research remain unchanged.
+This calculation is conditional research, not method acceptance or price
+publication.
+
 ### Market-target evaluation protocol
 
 `market_validation.py` evaluates explicitly frozen predictive prices separately
@@ -549,9 +660,9 @@ been accepted and no real price forecast is invented to populate the evaluator.
 最新发布失效不会回退旧价；重新发布旧候选须在此前发布事件之后重新复核，
 并继续满足当前输入/代码与到期约束。条件公允价值范围与概率预测区间分开显示。
 
-此接口默认关闭，尚未替代日更的全局停用边界。持久化控制器还需提供专用锁、
-原子日志存储、可信复核来源、实时输入/代码摘要以及上线开关；纯函数CAS不等于
-跨进程锁。哈希与不同reviewer_id不证明复核者身份、证据真实性或统计验收正确。
+此接口默认关闭，原始计算的停用边界保持。持久化控制器提供专用锁、原子日志、
+实时输入/代码摘要和逐公司输出开关；纯函数CAS不等于跨进程锁。
+哈希与不同reviewer_id不证明复核者身份、证据真实性或统计验收正确。
 本地合成演练不能作为真实模型验收证据。现有市场评价的not_determined不得转换为passed。
 
 持久化接口现由 `quant/ops/valuation_release.py` 提供：submit默认预览，apply时专用锁内
@@ -559,7 +670,13 @@ been accepted and no real price forecast is invented to populate the evaluator.
 同event_id同请求重试只返回已有提交，内容不同拒绝；already_applied是历史写入事实，
 不表示目前仍获准发布。读取端每次检查当前撤回、输入/代码与可信review hash集合。
 current_context应由宿主从真实当前状态提供，固定参数仅适合已冻结上下文和合成演练。
-控制器不自行认证reviewer；可信复核来源的装配和生产日更接线仍待完成。全局目标价停用不变。
+控制器不自行认证reviewer；独立复核身份只能来自宿主单独保存的verified_reviews，
+当前没有真实可信复核或验收记录。日更接入production_release，锁内与读取端
+均重读宿主策略/公司包，测量当前代码与依赖hash，核对精确reviewer身份与模型版本。
+每日报告额外归档publication.json及released_counts，冻结公司输入hash不一致即停用。
+缺策略默认关闭，坏输入逐票停用；撤回不依赖仍有效的公司输入。CLI status只读核验当前有效性，
+submit默认预览，--apply才写专用发布账本。完整策略形状与边界见trade/valuation/README.md。
+没有真实价格上线，也不能拿工程演练取代独立验收。
 
 DCF期间可提供lease_details，明确同合同范围经营租赁费用/现金、本金/利息、新融资租赁资产和
 已包含的融资租赁折旧。只有营运资本排除租赁应计、现金经营税已含经营租赁扣除且排除融资
@@ -578,6 +695,12 @@ interest_cash_received须成对输入，且明确不含已有capitalized_interes
 推断利息。必须声明WC、noncash_adjustments与other_cash_flows均排除这些选定项目；该声明
 不证明源数据范围正确，仍需独立勾稽。未提供时收据为not_separately_bridged，不声称已核实
 付款时间；本桥不生成税负债或应计利息余额，也不替代无杠杆DCF的经营现金税。
+
+可选 `tax_cash_basis="modeled_provision_cash_equivalence"` 只声明分析情景中的
+现金税等于已算出的GAAP税费用；金额不一致或缺现金金额时拒绝。它不证明实际付款。
+宿主 `native_cash_tax_basis` 列出选定/全部季度数及税费用、现金、调整加总，worker
+保留未知范围，日报明确当前/递延税、NOL使用及缴税未核实。总税费用减应付税变动
+不自动成为付款或退税，来源caption与taxonomy的群体差异也须保留。
 
 DCF期间可提供capital_details，按有形资产、无形资产（两者均排除融资租赁）、融资租赁、
 其他经营资本分拆新增投资与已在EBIT扣除的D&A。四类必须齐备、分别说明依据，合计须与
@@ -631,9 +754,126 @@ reported actuals and future quarters, not backdating or forward-validation credi
 Existing prospective validation still requires freezing before the period starts.
 An expired bridge must be rechecked against issuer disclosure, not silently extended.
 
+`company-v5.4.4-research` treats fiscal period end dates as inclusive. In the
+calendar of the supplied timezone-aware cutoff, a quarter containing that date
+is `current_period_projection`, including its final day. Only an earlier end
+date triggers the first-quarter unreported bridge requirement. Later periods
+remain `future_projection`. This date convention does not infer an issuer's
+reporting timezone, prove results are available, or turn estimates into actuals.
+Cash settlement requires dated evidence independently of a contractual maturity.
+
 `company-v5.4.1-research` tests ordinary dilution against continuing earnings
 allocated to common, including participating-class dividends. Positive total
 continuing income alone does not establish dilution when common earnings are
 negative. Debt trials use the same allocated control EPS. Existing frozen
 numerical fields are unchanged; the fix covers an additional boundary
 case, not a new forecast or validation approval.
+
+`company-v5.4.8-research` optionally binds cash PPE purchases to consecutive
+annual budgets, reported opening-year cash and exactly covered forecast quarters.
+Issuer ranges retain an explicit cash-metric interpretation; future percentage
+growth and allocations remain scenario assumptions. A partial final year declares
+cash outside the forecast horizon. Financed principal and existing lease payments
+are excluded from this cash-purchase metric. This limited population requires an
+operating-path hold and cannot establish economic capital, readiness or depreciation.
+FYI reports distinguish negative cash balances from a larger minimum-liquidity
+buffer shortfall; neither is described as confirmed issuer financing demand.
+
+`company-v5.4.9-research` optionally links one equity asset of type
+`excess_unrestricted_cash` with `valuation_status=scenario_linked` and a
+`forecast_liquidity_surplus` declaration to the host quarter at the equity date.
+It requires `pool_basis=scenario_unrestricted_liquidity`, explicit interpretation
+`unrestricted_pool_basis`, nonnegative `operating_reserve`, `reserve_status=scenario_assumption`
+and `reserve_basis`. No manual `value` or second excess-cash asset is allowed.
+The host computes max(0, ending_liquidity - operating_reserve), records both terms
+and converts the asset to a conditional value for the bridge. This is no ownership
+or reserve-adequacy certification. Unknown assets/claims and funding gaps still
+prevent a per-share result; the zero floor never fills cash or debt. The bounded
+worker and FYI show the linkage and its unverified assumptions, with publication
+unchanged. Existing packets without this optional declaration keep their numbers.
+
+`company-v5.4.10-research` supports optional `operating_capital` on an acquired
+intangible ledger period for deferred contract acquisition costs. It requires
+explicit cash investment, amortization, the quarter's noncash adjustment key,
+other working-capital cash change, source references and an operating-working-
+capital classification. Normal quarterly D&A excludes this separate amortization;
+the cash adjustment must match it, and combined quarterly WC must equal other WC
+less the declared investment. In DCF, that investment moves to capital once,
+amortization joins D&A once, and WC excludes it. All three are bound to the same
+ledger. Missing amounts or a supplied unknown declaration are rejected.
+
+This optional classification does not verify contract cohorts, capital scope,
+tax deductibility or new acquisitions. A selected finite acquired pool uses the
+disclosed schedule with declared timing assumptions; later acquisitions and their
+purchase accounting remain outside that pool and unresolved. The selected pool is
+exhausted before any stable terminal, with no perpetual amortization of the old
+asset. Worker/FYI retain the partial scope.
+Existing inputs without the optional contract capital preserve their numerical
+results; changing source assumptions produces separate forecasts, never rewrites
+the original prospective validation sample.
+
+`company_equity` 的 `promised_cashflow_component` 只折现桥日之后的具名本金/票息，使用显式情景有效年率与ACT/365.25；要求所有本金还清于声明到期日。它保留承诺腿付款收据，必须引用另一个`unresolved`残余处理信用/回收/内嵌期权等完整金融经济，不能当作债务公平价值或通过移除残余生成股价。嵌套付款来源由host逐项核对，现金/新股标量与此模式冲突被拒绝。它不自动修改季度还款、票息、账面债务或DCF；公司来源和付款重叠仍需独立审查。
+
+company-v5.4.12：`promised_cashflow_component` 可选 `translation` 只接受 `contract_currency=EUR`、`valuation_currency=USD`、`status=scenario_assumption`、positivefinite `usd_per_eur`、`contract_remaining_principal` 与显式 basis/source_refs；每笔须同时给 `contract_coupon`/`contract_principal`（EUR）及 `coupon`/`principal`（USD），两者按共同固定汇率严格匹配。全付款还清本币及美元本金，缺翻译的本币字段或不一致金额被拒；host核对翻译来源可得时点。收据保留本币与翻译，worker保留假设及完整收据hash/日期计数，FYI标明固定汇率数量。固定汇率不是FXforward/creditcurve，金融残余仍强制unresolved；本金/应计券息/对冲不另行重复扣。承诺腿之外的全公司完整经济与独立价格验收仍须单独完成。
+## Selected note issuance costs
+
+Optional scenario `debt_cost_runoff` uses a finite opening note cost pool, nominal
+face and clean carrying value. `company_debt_costs.project` allocates that pool by
+calendar days to an exact contractual maturity under an explicit scenario
+assumption. This is not the issuer's effective-interest calculation or note fair
+value. Full consecutive periods must exhaust the pool at maturity; native
+forecast quarters match its prefix. The host binds net nonoperating expense,
+one named noncash addback, noncash carrying debt change and separate other
+principal repayments. Opening carrying plus explicitly supplied other debt must
+match company opening debt. New financing costs and actual early settlement
+remain outside this selected population; other claim residuals and price
+publication rules continue to apply.
+
+## Selected existing finance ROU
+
+`company_ppe_runoff.py` bounds selected opening finance-ROU depreciation by its finite book pool. It links expense and cash D&A, keeps acquired amortization separate, and archives only cost exhaustion outside native company quarters. Excluded owned/CIP/new lease capital is unresolved; this partial ledger requires the full operating-path hold and does not add assets, debt or financing cash. Source-quarter rate and allocation are explicit assumptions, not asset remaining life. Worker summaries distinguish native ending balance from final cost-ledger exhaustion.
+
+`company_contract_costs.py`：选定短期容量服务有限费用/付款假设账，保持实际条款与完整成本范围未知。宿主强制EBIT与经营现金付款配对及非重复键；局部账必须保留full operating hold，不解除估值或交易授权。
+
+`company_model.income_cash_timing` 可选选定法律运营计提/付款桥，强制expense/payment与EBIT勾稽、声明WC非重叠及同名键排除；真实判决、准备金与税务未知不能因分类修复变成已接受估值。
+
+`company_model.note_principal_cash`：选定名义债券原生期到期本金账，按合同季度强制cash.debt_repaid=选定+其他本金，有限金额必须耗尽、来源时点和未结账面/票息/融资范围保留；不充当债务公平值或普通股价格。
+
+
+Finite intangible ledgers can explicitly separate physical financed ROU capital
+from financed technology licenses. `other_non_cash_operating_capital` names
+`new_physical_finance_lease_ROU` and one of two binding scopes. Native cash/debt
+rows require principal and the disjoint other noncash debt change, mechanically
+matched to quarterly cash inputs. Operating-capital-only rows omit those
+financing fields; a tail cost projection does not manufacture a corporate debt
+forecast. Opted-in `require_exhaustion_before_terminal` rejects an undepleted
+selected pool and requires its final date to match the DCF terminal. These
+contracts enforce arithmetic and scope, not source completeness or a valid
+long-run economic margin. Legacy ledgers keep their existing schema/results.
+
+`cash.financing_obligation_cash` 单列已存在且排除于recourse/nonrecourse debt
+roll-forward的融资义务现金。必须给出群体basis、非负cash_paid/cash_received，以及
+excluded_from_debt_rollforward/not_new_operating_capital/other_entries_exclude_this_population
+三项true；未知/不一致拒绝。净现金只在融资层计一次，不进CFO、新资本或该债务桥。
+宿主`native_financing_obligation_cash`按实际选定季度汇总，部分期间不冒充全覆盖；
+book_rollforward_verified固定false，不把标签声明视为源群体无重叠、合同付款、本金/利息或FV验证。
+
+### Original reported fiscal-year multiple research
+
+`company_multiples.calculate_reported_annual_panel` is a separate research entry
+point. It uses original annual filings and fixed first January session prices
+within ninety days of the reported fiscal-year end, retains complete consecutive
+fiscal years, and partitions explicit accounting epochs. Prices must be unadjusted OpenD regular-session closes; realized annual
+EPS cannot be labelled a forward estimate. A target epoch needs eight valid
+nonoverlapping years before descriptive quartiles are returned; this is an
+engineering history floor, not statistical or publication acceptance. Missing,
+duplicate, restated-later, unavailable or differently normalized observations
+withhold the range. Other accounting epochs cannot pad its sample count.
+
+The entry point produces no twelve-month target and is not routed through the
+company model's forward PE API. Original SEC publication metadata and current
+source capture remain separate; source declarations require independent review.
+Transferring a reported-year multiple to future earnings needs a separate
+methodology and validation. Later comparative columns cannot replace historical
+vintages: a retrospective accounting adoption restates the earlier EPS, so the
+pre-adoption years belong to a different epoch.

@@ -2,7 +2,6 @@
   "contract_version": "1.0.0",
   "contract_module": "quant.core.agent_contracts",
   "roles": {
-    "macro": "agents/macro.md",
     "technical": "agents/technical.md",
     "risk": "agents/risk.md",
     "valuation": "agents/valuation.md"

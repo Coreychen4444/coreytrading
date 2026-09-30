@@ -50,6 +50,16 @@ _TERMINAL = _SUCCESS | {"complete", "skipped", "no_effect"}
 _FAILURES = {"failed", "timeout", "timed_out", "invalid_result", "unavailable"}
 
 
+def _abstained(doc: dict) -> bool:
+    """单卡研究合法弃权 (证据与现卡同源 / 不足就不重述旧卡): 没写、确定没写。
+
+    它是中性终态, 不是「待人判」: 卡片仍 stale 的事实归 brief 的 stale 清单与重画队列
+    (下一轮照常派发), 这里再挂一条 needs_review 只会永久响 —— 票平仓后 positions 桶再无
+    重画, 弃权会一直挂着, 没有任何合法动作能清掉它们。"""
+    return (doc.get("job_kind") == "card" and doc.get("status") == "needs_review"
+            and doc.get("reason") == "model_abstained" and not doc.get("submission"))
+
+
 class HealthError(ValueError):
     """A stable error code with no raw file contents or provider diagnostics."""
 
@@ -144,8 +154,12 @@ def _control(path: Path, now: float) -> dict:
             raise HealthError("control_state_invalid")
         if (not isinstance(item["lease_id"], str) or not _RUN_ID.fullmatch(item["lease_id"])
                 or not isinstance(item["run_id"], str) or not _RUN_ID.fullmatch(item["run_id"])
-                or item["lease_id"] in known or not isinstance(item["role"], str)
-                or item["role"] not in ROLES or not isinstance(item["provider"], str)
+                # Ledger rows are history: a role retired after its call (e.g. macro)
+                # stays charged until it ages out. Membership in the
+                # current ROLES is enforced where new calls are acquired, not here —
+                # checking it on read failed closed before _reap could prune.
+                or item["lease_id"] in known or _label(item["role"]) is None
+                or not isinstance(item["provider"], str)
                 or item["provider"] not in {"claude", "codex"}
                 or type(item["pid"]) is not int or item["pid"] <= 0
                 or not isinstance(item["status"], str)
@@ -458,45 +472,95 @@ def _card_recoveries(records: dict, instant: float, root: Path) -> dict:
                 and (_label(run.get("status")) in _FAILURES | {"needs_review"} or aborted(run))
                 and run_finish is not None and run_finish <= finish):
             recovered[run_source] = replacement
-    # A finished parent can remain partial solely because its card queue failed.
-    # Require successful research evidence and resolution of every queued card.
+    # Later same-kind jobs whose research completed. Their full queue
+    # (cards + pending_cards) is the controller's own list of cards still needing a
+    # repaint at that time; a target absent from it no longer needs one (closed /
+    # moved bucket / repainted elsewhere).
+    later_jobs = []
+    for source_id, doc in records.items():
+        begin, end = stamp(doc, "started_at"), stamp(doc, "finished_at")
+        if (source_id.startswith("task_job:") and doc.get("job_kind") in ("briefing", "postclose")
+                and doc.get("stage") == "finished" and doc.get("research_status") == "completed"
+                and isinstance(doc.get("cards"), list) and isinstance(doc.get("pending_cards"), list)
+                and begin is not None and end is not None and end <= instant):
+            queue = {target(c) for c in doc["cards"] + doc["pending_cards"] if isinstance(c, dict)}
+            later_jobs.append((begin, source_id, doc["job_kind"], queue))
+    later_jobs.sort(key=lambda item: (item[0], item[1]))
+    # A finished parent can remain partial because its research or card queue failed.
+    # Research counts when the parent's own technical/risk reports succeeded or a later
+    # same-kind job completed its research (the old session's report is obsolete then).
+    # Every queued card must be resolved: applied later, abstained, or no longer queued
+    # by a later same-kind job.
     for source_id, doc in records.items():
         if (not source_id.startswith("task_job:") or doc.get("status") != "partial"
                 or doc.get("job_kind") not in ("briefing", "postclose")
                 or doc.get("stage") != "finished" or not certain(doc)):
             continue
         finish = stamp(doc, "finished_at")
-        reports = doc.get("reports")
-        roles = {"technical", "risk"} | ({"macro"} if doc["job_kind"] == "briefing" else set())
-        if (finish is None or not isinstance(reports, dict) or set(reports) != roles
-                or any(not isinstance(r, dict) or r.get("status") != "succeeded"
-                       for r in reports.values())):
+        if finish is None:
             continue
-        if doc["job_kind"] == "briefing":
+        reports = doc.get("reports")
+        own_research = (isinstance(reports, dict) and {"technical", "risk"} <= set(reports)
+                        and all(isinstance(r, dict) and r.get("status") == "succeeded"
+                                for role, r in reports.items() if role in ROLES))
+        # briefing 不走 workflow (只跑 technical + 代码渲染 risk), 没有
+        # workflows/<id>.json; 旧判据把「文件不在」当失败, 此后每条 briefing partial 永不恢复。
+        # 只有 job 自己引用了 workflow (或文件在) 时才要求它 completed。
+        workflow_path = root / "workflows" / (source_id.split(":", 1)[1] + ".json")
+        if own_research and (doc.get("workflow_artifact") or workflow_path.exists()):
             try:
-                workflow = _read(root / "workflows" / (source_id.split(":", 1)[1] + ".json"),
-                                 max_bytes=32 * 1024 * 1024)
+                own_research = _read(workflow_path, max_bytes=32 * 1024 * 1024).get("status") == "completed"
             except HealthError:
-                continue
-            if workflow.get("status") != "completed":
-                continue
+                own_research = False
+        later = [(begin, identity, queue) for begin, identity, kind, queue in later_jobs
+                 if kind == doc["job_kind"] and begin > finish]
+        if not own_research and not later:
+            continue
         cards, pending = doc.get("cards"), doc.get("pending_cards")
         if not isinstance(cards, list) or not isinstance(pending, list):
             continue
-        unresolved = [c for c in cards if not isinstance(c, dict) or not confirmed(c)] + pending
-        if not unresolved:
+        unresolved = [c for c in cards if not isinstance(c, dict)
+                      or not (confirmed(c) or _abstained(c))] + pending
+        abstentions = any(isinstance(c, dict) and _abstained(c) for c in cards)
+        if not unresolved and own_research and not abstentions:
             continue
-        replacements = []
+        replacements = ([] if own_research else [later[0][1]]) + (
+            ["no_effect:model_abstained"] if abstentions else [])
         for card in unresolved:
+            if not isinstance(card, dict) or not target(card) or not certain(card):
+                break
             replacement = next((identity for start, identity, new in applied
-                                if isinstance(card, dict) and target(card)
-                                and target(card) == target(new) and start > finish
-                                and certain(card)), None)
+                                if target(card) == target(new) and start > finish), None)
+            if replacement is None:
+                replacement = next((identity for begin, identity, queue in later
+                                    if target(card) not in queue), None)
             if replacement is None:
                 break
             replacements.append(replacement)
-        if len(replacements) == len(unresolved):
+        else:
             recovered[source_id] = sorted(set(replacements))
+    # Failed portfolio / valuation research: a later success of the same role with the
+    # identical task text is the same job retried (daily valuation --retry, the next
+    # briefing). Card runs share one task text across tickers, so they are excluded
+    # here and recover only through their own card target above.
+    card_runs = {doc.get("run_id") for source_id, doc in records.items()
+                 if source_id.startswith("task_job:") and doc.get("job_kind") == "card"}
+    successes = sorted((stamp(doc, "started_at"), source_id, doc.get("role"), doc.get("task"))
+                       for source_id, doc in records.items()
+                       if source_id.startswith("run:") and doc.get("status") in _SUCCESS
+                       and isinstance(doc.get("task"), str) and doc.get("task")
+                       and stamp(doc, "started_at") is not None)
+    for source_id, doc in records.items():
+        finish, task = stamp(doc, "finished_at"), doc.get("task")
+        if (not source_id.startswith("run:") or source_id in recovered
+                or _label(doc.get("status")) not in _FAILURES or not certain(doc)
+                or doc.get("run_id") in card_runs or finish is None
+                or not isinstance(task, str) or not task):
+            continue
+        replacement = next((identity for begin, identity, role, text in successes
+                            if begin > finish and role == doc.get("role") and text == task), None)
+        if replacement is not None:
+            recovered[source_id] = replacement
     return recovered
 
 
@@ -572,6 +636,8 @@ def scan_health(run_dir: Path, *, now=None, stale_after_s=1800,
                 timed_out = status in {"timeout", "timed_out"} or any(
                     isinstance(a, dict) and a.get("status") == "timeout" for a in attempts)
                 issues.append(_issue(meta, "run_timeout" if timed_out else "run_failed", age_s=age))
+            elif status == "needs_review" and _abstained(doc):
+                observed[meta["source_id"]] = "no_effect"
             elif status == "needs_review":
                 counts["needs_review"] += 1
                 issues.append(_issue(meta, "needs_review", severity="warning", age_s=age))

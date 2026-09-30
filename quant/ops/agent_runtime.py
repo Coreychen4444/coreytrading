@@ -23,21 +23,17 @@ import uuid
 from quant.core.agent_contracts import (CONTRACT_VERSION, ROLES, canonical_hash, card_revision,
                                         result_schema, validate_result, validate_snapshot)
 from quant.core.io_json import atomic_write_json, read_json, state_lock
-from quant.core.macro_analysis import usable_evidence_refs
 from quant.core.paths import (AGENT_CONTROL_DIR, AGENT_ROUTES_PATH, AGENT_RUNS_DIR,
                               AGENT_SPEC_DIR, ROOT)
 from quant.ops.agent_snapshots import capture_card, make_snapshot
 
 PROVIDERS = ("claude", "codex")
 _RULES = {
-    "macro": ("macro-context-check.md",),
     "technical": ("zone-maintenance.md", "position-tiers.md", "macro-context-check.md"),
     "risk": ("position-tiers.md", "trading-discipline.md"),
     "valuation": (),
 }
 _METHODS = {
-    "macro": ("agents/methods/macro-inference-contract.md",
-              "agents/methods/market-structure-analysis.md", "quant/valuation/README.md"),
     # trading-rules.md (24 KB master index of the whole
     # decision stack) was sent on every technical/risk call; the operative
     # painting rules are zone-maintenance / position-tiers. The host session
@@ -111,7 +107,7 @@ def _resolve_profiles(routes: dict) -> dict:
     if routes.get("execution_transport", "cli") not in ("cli", "desktop"):
         raise ValueError("invalid execution transport")
     if type(routes["roles"]) is not dict or set(routes["roles"]) != set(ROLES):
-        raise ValueError("routing must define exactly four roles")
+        raise ValueError("routing must define exactly the contract roles")
     normalized = {key: deepcopy(value) for key, value in routes.items() if key != "model_profiles"}
     normalized.update(version=1, roles={})
     for role, route in routes["roles"].items():
@@ -154,7 +150,7 @@ def validate_routes(routes: dict) -> dict:
     if routes.get("execution_transport", "cli") not in ("cli", "desktop"):
         raise ValueError("invalid execution transport")
     if type(routes["roles"]) is not dict or set(routes["roles"]) != set(ROLES):
-        raise ValueError("routing must define exactly four roles")
+        raise ValueError("routing must define exactly the contract roles")
     for role, route in routes["roles"].items():
         required = {"provider", "model", "fallback", "reviewer", "timeout_s"}
         if (type(route) is not dict or not required <= set(route)
@@ -253,7 +249,7 @@ def execution_schema(role: str, snapshot: dict, review_target=None, *, bind_inpu
         else:
             properties["review"] = {"type": "null"}
         return schema
-    allowed_refs = usable_evidence_refs(snapshot) if role == "macro" else snapshot["evidence_refs"]
+    allowed_refs = snapshot["evidence_refs"]
     for key in ("snapshot_id", "input_hash"):
         properties[key] = {"type": "string", "const": snapshot[key]}
     for key, value in (("generated_at", snapshot["as_of"]), ("expires_at", snapshot["expires_at"])):
@@ -265,50 +261,12 @@ def execution_schema(role: str, snapshot: dict, review_target=None, *, bind_inpu
             refs["items"] = {"type": "string", "enum": allowed_refs}
         else:
             refs["maxItems"] = 0
-    if role == "macro":
-        # Bind every nested research reference, including future schema additions.
-        def bind_references(node):
-            if isinstance(node, dict):
-                for name, child in node.items():
-                    if name == "evidence_refs" and isinstance(child, dict):
-                        if allowed_refs:
-                            child["items"] = {"type": "string", "enum": allowed_refs}
-                        else:
-                            child["maxItems"] = 0
-                    else:
-                        bind_references(child)
-            elif isinstance(node, list):
-                for child in node:
-                    bind_references(child)
-        for field in ("macro_diagnosis", "market_structure"):
-            bind_references(properties[field])
-        scenarios = properties["valuation_scenarios"]
-        if allowed_refs:
-            scenarios["items"]["properties"]["evidence_refs"]["items"] = {
-                "type": "string", "enum": allowed_refs}
-        else:
-            scenarios["maxItems"] = 0
     if review_target:
         properties["proposal"] = {"type": "null"}
         properties["review"] = properties["review"]["anyOf"][1]
         properties["review"]["properties"]["run_id"] = {"type": "string", "const": review_target["run_id"]}
     else:
         properties["review"] = {"type": "null"}
-    if role == "macro" and allowed_refs:
-        # One enum instead of repeating every long source ID at every node.
-        # Wire-only factoring; result_schema and host validation stay unchanged.
-        schema["$defs"] = {"evidence_ref": {"type": "string", "enum": allowed_refs}}
-        def share_reference_items(node):
-            if isinstance(node, dict):
-                for name, child in node.items():
-                    if name == "evidence_refs" and isinstance(child, dict):
-                        child["items"] = {"$ref": "#/$defs/evidence_ref"}
-                    else:
-                        share_reference_items(child)
-            elif isinstance(node, list):
-                for child in node:
-                    share_reference_items(child)
-        share_reference_items(properties)
     return schema
 
 
@@ -331,8 +289,7 @@ def build_prompt(role: str, task: str, snapshot: dict, policy: dict,
         "and do not request it unless it is necessary for your own conclusion. "
         "Requests may target OTHER roles only, never yourself. Every evidence_refs value must "
         "be copied exactly from snapshot.evidence_refs; no file paths, invented subreferences "
-        "or duplicates. All claim IDs must be globally unique across observations/hypotheses/risks "
-        "and macro_diagnosis.causal_hypotheses when present."
+        "or duplicates. All claim IDs must be globally unique across observations/hypotheses/risks."
     )
     # Stable policy comes before per-call task/evidence. Both native runners
     # already transmit the schema; duplicating it here wastes input tokens.
@@ -685,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--snapshot", type=Path, required=True)
     run.add_argument("--task", required=True)
     run.add_argument("--review", action="store_true")
-    workflow = sub.add_parser("workflow", help="run four roles with bounded handoffs")
+    workflow = sub.add_parser("workflow", help="run research roles with bounded handoffs")
     workflow.add_argument("--snapshot", type=Path, required=True)
     workflow.add_argument("--task", required=True)
     capture = sub.add_parser("capture", help="capture cached card evidence; no network")

@@ -120,15 +120,22 @@ def calendar_metadata() -> dict:
             "verified_on": "2026-09-05", "emergency_closures_refreshed": False}
 
 
+# Minutes after the actual close at which each post-close host job may start (window ends close+60m).
+# A task's SGT wake-up cron minute must equal its offset (tests/ops/test_agent_jobs.py pins the specs).
+POSTCLOSE_OFFSET_MIN = {"postclose": 10, "ladder": 20, "macro": 30, "chart": 35}
+SCHEDULED_KINDS = frozenset({"heartbeat", "briefing", "weekly", *POSTCLOSE_OFFSET_MIN})
+
+
 def scheduled_session_due(kind: str, now: datetime) -> dict:
     """Calendar/time gate for host jobs; this never registers or executes a job.
 
-    Host cadence: postclose/ladder/chart run in [close+10/20/35m, close+60m).
+    Host cadence: postclose/ladder/macro/chart run in [close+10/20/30/35m, close+60m).
+    macro = the macro-lens task (independent of chart): its latest-settling
+    input is ^MOVE (Yahoo regularMarketTime close+30m; ^VIX / ^VIX3M close+15m).
     Heartbeat is allowed on an ET session date, briefing only before its open,
     and weekly is calendar-independent. Idempotency belongs to the job runtime.
     """
-    kinds = {"heartbeat", "briefing", "postclose", "ladder", "chart", "weekly"}
-    if kind not in kinds:
+    if kind not in SCHEDULED_KINDS:
         raise MarketSessionError("unsupported scheduled-session kind")
     if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         raise MarketSessionError("now must be a timezone-aware datetime")
@@ -148,6 +155,6 @@ def scheduled_session_due(kind: str, now: datetime) -> dict:
     if kind == "briefing":
         due = now < session_open(day)
         return {**out, "due": due, "reason": "before_session_open" if due else "session_already_opened"}
-    offset = {"postclose": 10, "ladder": 20, "chart": 35}[kind]
+    offset = POSTCLOSE_OFFSET_MIN[kind]
     due = close + timedelta(minutes=offset) <= now < close + timedelta(minutes=60)
     return {**out, "due": due, "reason": "postclose_window" if due else "outside_postclose_window"}

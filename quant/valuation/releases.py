@@ -2,8 +2,9 @@
 
 Pure functions; 零授权效力. The caller owns trusted journal/review storage and
 must supply current input/code hashes and time. Hashes bind content, not reviewer
-identity or evidence truth. This does not approve a methodology or replace the
-production global publication hold. No fallback to a previous release.
+identity or evidence truth. The production host verifies exact review identity
+and current company/code separately. Diagnostic computation remains withheld.
+No fallback to a previous release.
 """
 from __future__ import annotations
 
@@ -129,6 +130,9 @@ def resolve(events, artifacts, *, ticker, kind, as_of, current_input_hash,
                 raise ValueError('acceptance evidence scope/time/conclusion mismatch')
         # This is a reviewed report output, not a conversion of scenario extrema.
         payload = packet['output']
+        if (payload.get('unit') != 'USD_per_common_share'
+                or not isinstance(payload.get('share_basis'), str) or not payload['share_basis'].strip()):
+            raise ValueError('explicit common-share price unit and share basis required')
         low, point, high = [number(payload[k], k, minimum=0) for k in ('low', 'point', 'high')]
         if not low <= point <= high or payload['currency'] != 'USD' or not payload['basis']:
             raise ValueError('invalid released value range')

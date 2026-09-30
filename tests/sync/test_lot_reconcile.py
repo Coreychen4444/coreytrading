@@ -7,7 +7,8 @@ trades.jsonl、broker.qty 当晚就对, 唯独"补一条 lot + 更新 position_s
 但那条 warn 只 print 到 stderr。
 
 这里最该守的不是"能加 lot", 是**不该动手时不动手**: 部分卖出、数量对不上、
-期权、结构豁免层 —— 全部只报不写。自动写台账的模块, 保守方向才是安全方向。
+结构豁免层 —— 全部只报不写。自动写台账的模块, 保守方向才是安全方向。
+期权同样自动落 (stop 连卡上基准一起抄, 区位取成交章的正股读数)。
 """
 import json
 
@@ -253,11 +254,40 @@ def test_structural_exemption_layer_is_skipped():
     assert item["action"] == "skip" and "结构豁免" in item["reason"]
 
 
-def test_option_card_is_skipped_with_a_reason():
-    """期权 lot 要 Greeks 入场快照 + stop 基准判断 —— 都是判断, 不是对账。"""
-    doc = {"tickers": {"GOOGL270115C390000": _body(qty=1.0)}}
-    (item,) = lr.plan(doc, {})
-    assert item["action"] == "skip" and "期权" in item["reason"]
+OPT = "AAA270319C120000"
+
+
+def _option_doc(stop_basis="underlying"):
+    zones = {"stop_level": 95.0, "stop_level_days": 1}
+    if stop_basis:
+        zones["stop_level_basis"] = stop_basis
+    return {"tickers": {OPT: _body(qty=1.0, zones=zones)}}
+
+
+def _option_episode():
+    fill = {"event_type": "fill", "side": "BUY", "ticker": OPT, "qty": 1.0, "price": 12.5,
+            "order_id": "OID_OPT", "timestamp": "2026-01-15T10:01:00-05:00",
+            "underlying_at_fill": {"price": 101.2, "bar_time": "2026-01-15 10:30:00", "basis": "60m"},
+            "zone_at_fill": "above_no_chase", "price_flags": ["above_z1", "above_no_chase"]}
+    return {OPT: [{"ticker": OPT, "direction": "long", "status": "open", "entries": [fill], "exits": []}]}
+
+
+def test_option_buy_is_booked_with_stop_basis_and_underlying_zone():
+    """期权 lot 划给人工就没人写, lot_drift 天天响 —— 事实字段照抄即可自动落。"""
+    (item,) = lr.plan(_option_doc(), _option_episode())
+    assert item["action"] == "add_lots" and item["cost_added"] == 1250.0      # 权利金 × 100
+    (lot,) = item["lots"]
+    assert lot["qty"] == 1 and lot["avg_cost"] == 12.5
+    assert lot["stop_loss"] == 95.0 and lot["stop_basis"] == "underlying"
+    assert "正股≈101.2" in lot["zone_logic"] and "above_no_chase+above_z1" in lot["zone_logic"]
+    assert "Greeks 入场快照未采" in lot["notes"]
+    assert "张" in lr.render({"planned": [item]})
+
+
+def test_option_stop_without_basis_is_not_copied():
+    (item,) = lr.plan(_option_doc(stop_basis=None), _option_episode())
+    (lot,) = item["lots"]
+    assert "stop_loss" not in lot and "未标基准" in lot["notes"]
 
 
 def test_flat_card_is_left_to_close_reconcile():

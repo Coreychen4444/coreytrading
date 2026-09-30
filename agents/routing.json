@@ -19,11 +19,6 @@
     }
   },
   "roles": {
-    "macro": {
-      "profile": "openai",
-      "reviewer_profile": "anthropic",
-      "timeout_s": 600
-    },
     "technical": {
       "profile": "anthropic",
       "reviewer_profile": "openai",
@@ -35,8 +30,8 @@
       "timeout_s": 600
     },
     "valuation": {
-      "profile": "openai",
-      "reviewer_profile": "anthropic",
+      "profile": "anthropic",
+      "reviewer_profile": "openai",
       "timeout_s": 600
     }
   },

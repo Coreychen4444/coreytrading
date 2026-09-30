@@ -69,11 +69,9 @@ Every meaningful trading analysis should try to produce these fields when enough
 - `update_trigger`
 - `reasoning_summary`
 
-**归原型 = 画卡的一部分**：新票首次画卡（或估值层人工区还没有它）时，
-写完 zones 立刻 `python3 quant/valuation/archetypes.py set <T> --archetype <platform|semi_cyclical|ai_infra_capex|software_growth|not_applicable> --rationale "<商业模式一句话>"`
-（原型参数与语义见 `quant/valuation/archetypes.py` ARCHETYPES；明确知道比缺省更准才加 `--override key=value`），
-再 `python3 quant/valuation/valuate.py --tickers <T> --refresh --write` + `quant/sync/valuation_sync.py --tickers <T>` 把估值镜像进卡。
-漏了不拦截：`update_position_zones` 写盘后 ⚠️、brief `INFRA:card_missing_archetype` 每轮点名。判断层零授权。
+**估值不属于画卡**（归原型 / valuate / 估值镜像落卡 / `INFRA:card_missing_archetype` 已随旧估值栈退役）：
+估值只由每日估值日更出研究级 12 个月目标（`quant/valuation/research_target.py`），不落卡。新票要进研究级目标，
+需要一份精简 EPS 包（`quant/valuation/eps_model.py`）—— 画卡不负责，缺包 = 研究级「不出数」，判断层零授权。
 
 **重算 zone 前必跑 momentum diagnosis**（`.claude/rules/zone-maintenance.md` 第 4 步）：
 Q1 6m ≥ +150%？ Q2 20d 内有单日 ≥10%？ Q3 距 ATH < 10%？ 全 YES → **parabolic-mode anchor**
@@ -182,7 +180,7 @@ Follow all five steps in order. Do not skip. Do not give the final trade recomme
 2. **假设**：一句话，增长或利润由哪一两个驱动决定。说不出来 = 基本面还没读完。
 3. **驱动（1–3 条）**：机制（怎么变成收入或利润）→ 证据（事实 + 出处）→ KPI（下次披露读得到的指标）。
 4. **空头**：写最强版本 → 反驳（带出处，没有就写「待核实」）→ **证伪条件**（可观测，出现即 `thesis.status=broken`）。
-5. **估值**：价格要求什么（`agent.valuation` 的要求 CAGR / 目标利润率，带 as_of，标「诊断口径」），与驱动是否相容；可加透明的自上而下校验（份额 × 市场规模）。低估不是入场理由，高估不是退出理由。
+5. **估值**：价格要求什么（估值日更研究级目标里的反向 DCF 隐含增长，带估值日，标「未验证」），与驱动是否相容；可加透明的自上而下校验（份额 × 市场规模）。低估不是入场理由，高估不是退出理由。
 6. **价格与基本面**（只写报告，不落卡）：近期价格与基本面交付背离时，判断市场在定价空头主张（回到第 4 条）还是板块 / 宏观 / 流动性（按 `.claude/rules/macro-context-check.md` 归因）。这是归因，不是入场信号。
 7. **下一催化剂**：事件 + 事件日（财报取 `trade/market/earnings_calendar.json` 的 `pub_day`）+ 基线（上次指引 / 长期模型 / 一致预期）+ 看点 1–5 条（来自 KPI 与证伪条件）。看点在事件前写下，这就是预注册。
 8. **thesis.status**：证伪出现 → `broken`；KPI 恶化未证伪 → `weakening`；关键看点「待核实」→ `needs_reverification`；其余 `intact`（[FYI] 播报）。
@@ -191,7 +189,7 @@ Follow all five steps in order. Do not skip. Do not give the final trade recomme
 - 卡片 `agent.company_profile`（商业模式 + 资产负债表 + TTM 资本强度）——先读，机器区数字带 as_of / source 直接引用。
   - 机器区过期（`balance_sheet.as_of` 早于最新 print 的报告期）→ `python3 quant/sync/company_profile_sync.py --tickers <T>`
   - 商业模式 / 融资结构有实质变化（新可转债 / ATM / 大额发债 / 资本结构重组）→ `--ticker <T> --business-model "..."` / `--financing-notes "..."`（唯一 sanctioned 写法；直接编辑 JSON 禁止，机器区永不手改）
-- 卡片 `agent.valuation`（估值镜像；as_of 早于最新财报期 = 过期，写「待核实」）；诊断重算 `python3 quant/valuation/valuate.py --tickers <T> [--refresh]`。估值层零授权：不改 zone / gate / cap。
+- 估值：最近一次估值日更的研究级 12 个月目标（`var/valuation-daily/latest.json` → `research_targets`，或简报 📐 行）；未验证、零授权，只作 [FYI]。卡片 `agent.valuation` 镜像已退役（schema 禁写）。
 - 情报归档条目（若配置，`trade/intelligence/reports/`；文件名作出处）
 - `trade/market/earnings_calendar.json`（`pub_day` / `next_reaction_day`）
 - 用户在对话里贴的研报 / 财报（用户提供 ≠ 本 skill 拉取；出处写提供者 + 日期）

@@ -76,6 +76,15 @@ def test_balance_sheet_maps_fields_and_derives_net_cash():
     assert bs["currency"] == "USD"
 
 
+def test_sdk_named_quarters_build_the_same_balance_and_ttm():
+    reports = _four_quarters(_income_q, revenue=100.0)
+    expected = cps.build_fundamentals_ttm(reports, _four_quarters(_cashflow_q, ocf=30.0, ppe_net=-10.0, fcf=20.0))
+    for report in reports:
+        report["financial_type"] = f"Q{report['financial_type']}"
+    assert cps.build_fundamentals_ttm(reports, _four_quarters(_cashflow_q, ocf=30.0, ppe_net=-10.0, fcf=20.0)) == expected
+    assert cps.build_balance_sheet([_report("2026/Q2", "2026-06-29", "Q2", BS_ITEMS)]) == cps.build_balance_sheet([_report("2026/Q2", "2026-06-29", 2, BS_ITEMS)])
+
+
 def test_balance_sheet_picks_latest_discrete_quarter_and_skips_annual():
     reports = [
         _report("2025/FY", "2025-12-31", 7, {8003: 1.0 * M}, ts=20251231),

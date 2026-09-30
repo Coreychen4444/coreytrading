@@ -55,6 +55,52 @@ def result(p=None):
     return cm.build(p or packet(), as_of=STAMP)
 
 
+def tax_equivalence_packet():
+    p = packet()
+    for q in p['scenarios'][0]['quarters']:
+        q['cash']['income_cash_timing'] = {
+            'basis': 'synthetic scenario only; current/deferred tax and payments unknown',
+            'tax_cash_basis': 'modeled_provision_cash_equivalence',
+            'tax_cash_paid_net': 2,
+            'other_entries_exclude_selected_timing_items': True}
+    return p
+
+
+def test_explicit_tax_equivalence_preserves_cash_and_remains_a_scenario():
+    old = result(); new = result(tax_equivalence_packet())
+    old_case = old['scenarios']['base']; case = new['scenarios']['base']
+    for a, b in zip(old_case['quarters'], case['quarters']):
+        assert b['gaap_eps'] == a['gaap_eps'] == .08
+        assert b['cash']['operating_cash_flow'] == a['cash']['operating_cash_flow'] == 13
+        assert b['cash']['ending_liquidity'] == a['cash']['ending_liquidity']
+        assert b['cash']['income_cash_timing']['components'] == {'tax': 0}
+        assert b['cash']['income_cash_timing']['tax_payment_status'] == 'scenario_assumption_not_verified_payment'
+    taxes = case['native_cash_tax_basis']
+    assert taxes['selected_period_count'] == taxes['native_period_count'] == 8
+    assert taxes['tax_provision'] == taxes['net_cash_tax'] == 16
+    assert taxes['timing_adjustment'] == 0 and taxes['validated'] is False
+    assert taxes['publication'] == 'withheld' and len(taxes['periods']) == 8
+
+
+@pytest.mark.parametrize('change', [
+    {'tax_cash_paid_net': 3}, {'tax_cash_basis': 'reported_cash_payment'},
+    {'tax_cash_basis': None}, {'tax_cash_paid_net': True}])
+def test_tax_equivalence_cannot_assert_unmatched_or_verified_payment(change):
+    p = tax_equivalence_packet()
+    p['scenarios'][0]['quarters'][0]['cash']['income_cash_timing'].update(change)
+    with pytest.raises(ValueError):
+        result(p)
+
+
+def test_selected_tax_equivalence_does_not_claim_unmodeled_quarters():
+    p = tax_equivalence_packet()
+    for q in p['scenarios'][0]['quarters'][1:]:
+        del q['cash']['income_cash_timing']
+    taxes = result(p)['scenarios']['base']['native_cash_tax_basis']
+    assert taxes['native_period_count'] == 8 and taxes['selected_period_count'] == 1
+    assert taxes['tax_provision'] == taxes['net_cash_tax'] == 2
+
+
 def test_after_tax_equity_and_discontinued_items_preserve_pretax_and_cash_bridge():
     p = packet()
     q = p['scenarios'][0]['quarters'][0]
@@ -151,10 +197,43 @@ def test_ended_unreported_bridge_is_explicit_estimate_not_actual_opening():
     r=result(p)
     assert r['opening_balance']['date']=='2026-06-08'
     assert r['scenarios']['base']['quarters'][0]['period_status']=='ended_unreported_estimate'
-    assert r['scenarios']['base']['quarters'][1]['period_status']=='future_projection'
+    assert r['scenarios']['base']['quarters'][1]['period_status']=='current_period_projection'
+    assert r['scenarios']['base']['quarters'][2]['period_status']=='future_projection'
     assert r['publication']['status']=='withheld'
     q['unreported_bridge']['expires_at']='2026-09-08T07:00:00+00:00'
     with pytest.raises(ValueError,match='freshness'):result(p)
+
+
+def test_inclusive_fiscal_end_remains_projection_until_next_cutoff_calendar_day():
+    p = packet(); s = p['scenarios'][0]; s.pop('multiple')
+    p['opening_balance']['date'] = s['opening_date'] = '2026-06-08'
+    p['observed']['end'] = '2026-06-08'
+    start = date(2026, 6, 9)
+    for q in s['quarters']:
+        end = start + timedelta(days=91)
+        q.update(start=str(start), end=str(end)); start = end + timedelta(days=1)
+    assert s['quarters'][0]['end'] == '2026-09-08'
+    # No financial inputs change when the timestamp moves within the final
+    # inclusive date. This is an estimate, not a reported actual quarter.
+    early = cm.build(p, as_of='2026-09-08T07:00:00+00:00')
+    late = cm.build(p, as_of='2026-09-08T23:59:59+00:00')
+    assert early['scenarios'] == late['scenarios']
+    assert early['scenarios']['base']['quarters'][0]['period_status'] == 'current_period_projection'
+    assert early['publication']['status'] == 'withheld'
+    with pytest.raises(ValueError, match='ended-unreported'):
+        cm.build(p, as_of='2026-09-09T00:00:00+00:00')
+    # The caller's explicit cutoff calendar controls the date comparison;
+    # the engine does not infer an issuer's closing/reporting timezone.
+    same_date = cm.build(p, as_of='2026-09-08T23:00:00-04:00')
+    assert same_date['scenarios']['base']['quarters'][0]['period_status'] == 'current_period_projection'
+    s['quarters'][0]['unreported_bridge'] = {
+        'basis': 'synthetic next-day unreported estimate', 'source_refs': ['synthetic'],
+        'known_at': '2026-09-08T07:00:00+00:00',
+        'expires_at': '2026-09-10T07:00:00+00:00', 'reported_results_available': False}
+    with pytest.raises(ValueError, match='only for an ended quarter'):
+        cm.build(p, as_of='2026-09-08T23:59:59+00:00')
+    next_day = cm.build(p, as_of='2026-09-09T00:00:00+00:00')
+    assert next_day['scenarios']['base']['quarters'][0]['period_status'] == 'ended_unreported_estimate'
 
 
 @pytest.mark.parametrize('change', ['missing', 'included', 'unknown', 'extra'])
@@ -458,3 +537,180 @@ def test_cash_timing_is_invariant_to_selected_accrual_timing():
     q['income']['interest_expense'] += 3
     q['income']['interest_income'] += 2
     assert result(p)['scenarios']['base']['quarters'][0]['cash']['ending_liquidity'] == before
+
+
+def legal_cash_packet():
+    p=packet();s=p['scenarios'][0]
+    for i,q in enumerate(s['quarters']):
+        expense=40 if i==0 else 0
+        paid=15 if i==0 else (25 if i==2 else 0)
+        q['segments']['corporate']['operating_profit']-=expense
+        q['cash']['income_cash_timing']=timing_block(legal_settlement={
+            'basis':'Synthetic nondeductible selected operating settlement, payments hypothetical',
+            'scope':'selected_conditional_operating_settlement','expense':expense,'cash_paid':paid,
+            'expense_is_in_ebit':True,'operating_profit_before_expense':13,
+            'timing_key':'legal_cash'})
+    return p
+
+
+def test_selected_legal_expense_and_dated_cash_enter_cfo_once():
+    old=result(packet())['scenarios']['base']
+    new=result(legal_cash_packet())['scenarios']['base']
+    cumulative=0
+    for i,(q,oq) in enumerate(zip(new['quarters'],old['quarters'])):
+        expense=40 if i==0 else 0
+        paid=15 if i==0 else (25 if i==2 else 0)
+        cumulative+=paid
+        assert q['operating_profit']==oq['operating_profit']-expense
+        assert q['cash']['operating_cash_flow']==oq['cash']['operating_cash_flow']-paid
+        assert q['cash']['ending_liquidity']==oq['cash']['ending_liquidity']-cumulative
+        assert q['cash']['ending_debt']==oq['cash']['ending_debt']
+        assert q['cash']['total_capex']==oq['cash']['total_capex']
+        assert q['cash']['income_cash_timing']['selected_legal_settlement']['cash_paid']==paid
+
+
+@pytest.mark.parametrize('change',['missing_expense','missing_cash','unknown_cash','negative_expense',
+    'bool_expense','not_in_ebit','unpaired_ebit','actual_scope','missing_key','duplicate_other',
+    'duplicate_noncash','overlap_wc','empty_legal'])
+def test_legal_cash_bridge_rejects_unpaired_or_duplicate_items(change):
+    p=legal_cash_packet();q=p['scenarios'][0]['quarters'][0]
+    b=q['cash']['income_cash_timing'];a=b['legal_settlement']
+    if change=='missing_expense':a.pop('expense')
+    elif change=='missing_cash':a.pop('cash_paid')
+    elif change=='unknown_cash':a['cash_paid']=None
+    elif change=='negative_expense':a['expense']=-1
+    elif change=='bool_expense':a['expense']=True
+    elif change=='not_in_ebit':a['expense_is_in_ebit']=False
+    elif change=='unpaired_ebit':q['segments']['corporate']['operating_profit']+=1
+    elif change=='actual_scope':a['scope']='all_actual_company_settlements'
+    elif change=='missing_key':a['timing_key']=''
+    elif change=='duplicate_other':q['cash']['other_cash_flows'][a['timing_key']]=0
+    elif change=='duplicate_noncash':q['cash']['noncash_adjustments'][a['timing_key']]=0
+    elif change=='overlap_wc':b['other_entries_exclude_selected_timing_items']=False
+    elif change=='empty_legal':b['legal_settlement']=None
+    with pytest.raises(ValueError):result(p)
+
+
+def principal_packet():
+    p=packet();s=p['scenarios'][0]
+    e={k:s[k] for k in ['known_at','basis','source_refs']}
+    case={**e,'currency':'USD','scale':'millions','date':s['opening_date'],
+          'scope':'selected_contractual_note_principal_only',
+          'execution_assumption':'contractual_maturity_no_early_redemption_refinancing',
+          'payment_date_basis':'Synthetic contractual quarter date, no actual future transfer asserted',
+          'selected_opening_nominal':9,'payments':[], 'periods':[],
+          'unresolved_economics':[{**e,'economic_id':'book_coupon_credit_refinancing', 'status':'unresolved'}]}
+    for i,q in enumerate(s['quarters']):
+        amount={0:4,2:5}.get(i,0)
+        case['periods'].append({**e,'start':q['start'],'end':q['end'],
+                               'other_debt_principal_paid':q['cash']['debt_repaid']})
+        if amount:case['payments'].append({**e,'economic_id':q['id'],'contractual_due':q['end'],'amount':amount})
+        q['cash']['debt_repaid']+=amount
+    s['note_principal_cash']=case
+    return p
+
+
+def test_contractual_principal_cash_binds_dates_once_without_changing_income_or_cfo():
+    old=result(packet())['scenarios']['base'];new=result(principal_packet())['scenarios']['base']
+    total=0
+    for i,(q,oq) in enumerate(zip(new['quarters'],old['quarters'])):
+        total+={0:4,2:5}.get(i,0)
+        assert {k:v for k,v in q.items() if k!='cash'}=={k:v for k,v in oq.items() if k!='cash'}
+        assert q['cash']['operating_cash_flow']==oq['cash']['operating_cash_flow']
+        assert q['cash']['total_capex']==oq['cash']['total_capex']
+        assert q['cash']['ending_liquidity']==oq['cash']['ending_liquidity']-total
+        assert q['cash']['ending_debt']==oq['cash']['ending_debt']-total
+    ledger=new['note_principal_cash']
+    assert [r['selected_principal_paid'] for r in ledger['periods']]==[4,0,5,0,0,0,0,0]
+    assert ledger['periods'][-1]['remaining_selected_nominal']==0
+    assert ledger['selected_principal_paid_total']==9
+    assert ledger['unresolved_economics'][0]['status']=='unresolved'
+
+
+@pytest.mark.parametrize('change',['scope','execution','nominal','unknown_payment','negative_payment',
+    'duplicate_payment','past_payment','late_payment','quarter_binding','missing_quarter','other_cash',
+    'inventory','duplicate_inventory','future_evidence','missing_evidence','wrong_opening','missing_date_basis'])
+def test_selected_note_principal_rejects_unavailable_or_unpaired_payments(change):
+    p=principal_packet();s=p['scenarios'][0];a=s['note_principal_cash']
+    if change=='scope':a['scope']='all_company_fair_debt'
+    elif change=='execution':a['execution_assumption']='actual_transfers'
+    elif change=='nominal':a['selected_opening_nominal']+=1
+    elif change=='unknown_payment':a['payments'][0]['amount']=None
+    elif change=='negative_payment':a['payments'][0]['amount']=-1
+    elif change=='duplicate_payment':a['payments']*=2
+    elif change=='past_payment':a['payments'][0]['contractual_due']=s['opening_date']
+    elif change=='late_payment':a['payments'][0]['contractual_due']='2030-01-01'
+    elif change=='quarter_binding':a['periods'][0]['end']=a['periods'][1]['end']
+    elif change=='missing_quarter':a['periods'].pop()
+    elif change=='other_cash':s['quarters'][0]['cash']['debt_repaid']+=1
+    elif change=='inventory':a['unresolved_economics']=[]
+    elif change=='duplicate_inventory':a['unresolved_economics']*=2
+    elif change=='future_evidence':a['payments'][0]['known_at']='2026-09-09T00:00:00Z'
+    elif change=='missing_evidence':a['payments'][0]['source_refs']=['absent']
+    elif change=='wrong_opening':a['date']='2026-09-07'
+    elif change=='missing_date_basis':a.pop('payment_date_basis')
+    with pytest.raises((ValueError,KeyError)):result(p)
+
+
+def financing_obligation_packet():
+    p = packet()
+    for q in p['scenarios'][0]['quarters']:
+        q['cash']['capex_financing'] = 0
+        q['cash']['financing_obligation_cash'] = {
+            'basis': 'synthetic existing-obligation payment; book and interest unverified',
+            'population_basis': 'selected_obligations_outside_recourse_nonrecourse_debt',
+            'cash_paid': 2, 'cash_received': 0,
+            'excluded_from_debt_rollforward': True, 'not_new_operating_capital': True,
+            'other_entries_exclude_this_population': True}
+    return p
+
+
+def test_existing_financing_payment_is_not_new_capital_or_recourse_debt():
+    old = result()['scenarios']['base']; new = result(financing_obligation_packet())['scenarios']['base']
+    for a, b in zip(old['quarters'], new['quarters']):
+        assert b['gaap_eps'] == a['gaap_eps'] == .08
+        assert b['cash']['operating_cash_flow'] == a['cash']['operating_cash_flow'] == 13
+        assert b['cash']['total_capex'] == a['cash']['total_capex'] - 2 == 10
+        assert b['cash']['cash_before_external_financing'] == a['cash']['cash_before_external_financing'] + 2
+        assert b['cash']['ending_liquidity'] == a['cash']['ending_liquidity']
+        assert b['cash']['ending_debt'] == a['cash']['ending_debt']
+    s = new['native_financing_obligation_cash']
+    assert s['cash_paid'] == 16 and s['cash_received'] == 0 and s['net_cash'] == -16
+    assert s['selected_period_count'] == s['native_period_count'] == 8
+    assert s['book_rollforward_verified'] is False and s['validated'] is False
+    assert s['publication'] == 'withheld'
+
+
+def test_selected_financing_cash_receipt_does_not_invent_debt_or_assets():
+    p = financing_obligation_packet()
+    p['scenarios'][0]['quarters'][0]['cash']['financing_obligation_cash']['cash_received'] = 3
+    a = result(financing_obligation_packet())['scenarios']['base']
+    b = result(p)['scenarios']['base']
+    for qa, qb in zip(a['quarters'], b['quarters']):
+        assert qb['cash']['ending_liquidity'] == qa['cash']['ending_liquidity'] + 3
+        assert qb['cash']['ending_debt'] == qa['cash']['ending_debt']
+        assert qb['cash']['total_capex'] == qa['cash']['total_capex']
+    assert b['native_financing_obligation_cash']['net_cash'] == -13
+
+
+def test_partial_financing_cash_scope_is_not_full_period_coverage():
+    p = packet()
+    p['scenarios'][0]['quarters'][0]['cash'] = financing_obligation_packet()['scenarios'][0]['quarters'][0]['cash']
+    s = result(p)['scenarios']['base']['native_financing_obligation_cash']
+    assert s['selected_period_count'] == 1 and s['native_period_count'] == 8
+    assert s['cash_paid'] == 2 and len(s['periods']) == 1
+
+
+@pytest.mark.parametrize('change', [None, {'cash_paid': None}, {'cash_received': True},
+    {'cash_paid': -1}, {'cash_received': float('nan')}, {'basis': ''},
+    {'population_basis': 'new_PPE'}, {'excluded_from_debt_rollforward': False},
+    {'not_new_operating_capital': False}, {'other_entries_exclude_this_population': False},
+    {'book_rollforward_verified': True}])
+def test_financing_cash_rejects_unknown_or_inconsistent_population(change):
+    cash = financing_obligation_packet()['scenarios'][0]['quarters'][0]['cash']
+    if change is None:
+        cash['financing_obligation_cash'] = None
+    else:
+        cash['financing_obligation_cash'].update(change)
+    with pytest.raises(ValueError):
+        cm.liquidity({'consolidated_income': 8}, cash, 100, 20)

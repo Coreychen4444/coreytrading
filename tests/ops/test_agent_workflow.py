@@ -33,53 +33,23 @@ def request(role, text="Check source timing", refs=None):
     return {"role": role, "question": text, "evidence_refs": refs if refs is not None else ["price"]}
 
 
-@pytest.mark.parametrize("purpose,downstream,calls", [("trading", "risk", 3), ("valuation", "valuation", 2)])
-def test_causal_digest_and_original_research_reach_downstream_without_extra_calls(snapshot, routes, purpose, downstream, calls):
-    from tests.core.test_agent_contracts import result
-    from quant.core.agent_contracts import validate_result
-    seen = {}
-    def worker(role, task, inputs, **kwargs):
-        seen[role] = deepcopy(inputs)
-        output = report(role, inputs)
-        if role == "macro":
-            payload = result("macro", inputs)
-            payload.update(generated_at=inputs["as_of"], observations=[], hypotheses=[], risks=[])
-            output["result"] = validate_result("macro", payload, snapshot=inputs)
-        return output
-    workflow = run_workflow("Synthetic causal handoff", snapshot, routes=routes, purpose=purpose, run_role_fn=worker)
-    context = seen[downstream]["data"]["workflow_context"]
-    assert context["macro_digest"]["status"] == "available"
-    assert context["macro_digest"]["synthesis"]["status"] == "unknown"
-    assert context["macro_digest"]["independent_evidence"] is False
-    original = next(peer["result"] for peer in context["peer_reports"] if peer["role"] == "macro")
-    assert original["macro_diagnosis"]["synthesis"] == context["macro_digest"]["synthesis"]
-    assert workflow["macro_research"]["initial"]["synthesis"] == context["macro_digest"]["synthesis"]
-    assert "hypotheses" not in context["macro_digest"] and "hypothesis_index" in context["macro_digest"]
-    assert workflow["macro_research"]["followup"] is None and workflow["total_calls"] == calls
-
-
-def test_macro_and_technical_parallel_then_valuation_then_risk(snapshot, routes):
-    barrier = threading.Barrier(2)
-    finished = set()
-    lock = threading.Lock()
-    captured = {}
+def test_technical_then_valuation_then_risk(snapshot, routes):
+    """宏观不是模型角色：technical → 宿主估值计算 → valuation → risk。"""
+    order, captured = [], {}
 
     def worker(role, task, inputs, **kwargs):
         captured[role] = deepcopy(inputs)
-        if role in ("macro", "technical"):
-            barrier.wait(timeout=2)
+        order.append(role)
+        if role == "technical":
             assert inputs == snapshot
             inputs["data"]["price"]["close"] = -1
-            with lock:
-                finished.add(role)
         elif role == "valuation":
-            assert finished == {"macro", "technical"}
+            assert order == ["technical", "valuation"]
             assert inputs["data"]["source_data"] == snapshot["data"]
-            assert inputs["data"]["workflow_context"]["peer_reports"][0]["role"] == "macro"
-            assert inputs["data"]["valuation_calculations"]["macro_research_status"] == "succeeded"
-            finished.add(role)
+            assert inputs["data"]["workflow_context"]["peer_reports"] == []
+            assert "valuation_calculations" in inputs["data"]
         else:
-            assert finished == set(PRIMARY_ROLES)
+            assert order == ["technical", "valuation", "risk"]
             peers = inputs["data"]["workflow_context"]["peer_reports"]
             assert {peer["role"] for peer in peers} == set(PRIMARY_ROLES)
             assert inputs["data"]["source_data"]["price"]["close"] == 100
@@ -87,30 +57,29 @@ def test_macro_and_technical_parallel_then_valuation_then_risk(snapshot, routes)
         return report(role, captured[role])
 
     output = run_workflow("Review synthetic inputs", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == 4 and output["status"] == "completed"
+    assert output["total_calls"] == 3 and output["status"] == "completed"
+    assert "macro_research" not in output
     assert snapshot["data"]["price"]["close"] == 100
-    assert all(captured[role]["snapshot_id"] == snapshot["snapshot_id"] for role in ("macro", "technical"))
+    assert captured["technical"]["snapshot_id"] == snapshot["snapshot_id"]
     assert captured["valuation"]["snapshot_id"] != snapshot["snapshot_id"]
     assert captured["risk"]["expires_at"] == snapshot["expires_at"]
     validate_snapshot(captured["risk"])
 
-
 def test_peer_failures_leave_other_roles_and_explicit_missing_inputs(snapshot, routes):
     def worker(role, task, inputs, **kwargs):
-        if role == "macro":
+        if role == "technical":
             raise RuntimeError("provider unavailable")
         if role == "valuation":
             return report(role, inputs, status="running")
         if role == "risk":
-            assert inputs["data"]["workflow_context"]["missing_roles"] == ["macro", "valuation"]
+            assert inputs["data"]["workflow_context"]["missing_roles"] == ["technical", "valuation"]
             assert "missing inputs" in task
         return report(role, inputs)
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
     assert output["status"] == "partial"
-    assert output["reports"]["technical"]["status"] == "succeeded"
-    assert {entry["role"] for entry in output["failures"]} == {"macro", "valuation"}
-
+    assert output["reports"]["risk"]["status"] == "succeeded"
+    assert {entry["role"] for entry in output["failures"]} == {"technical", "valuation"}
 
 def test_peer_results_are_marked_same_source_not_independent_evidence(snapshot, routes):
     def worker(role, task, inputs, **kwargs):
@@ -128,31 +97,6 @@ def test_peer_results_are_marked_same_source_not_independent_evidence(snapshot, 
     assert run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)["status"] == "completed"
 
 
-@pytest.mark.parametrize("purpose,downstream,calls", [("trading", {"risk"}, 3),
-                                                   ("valuation", {"valuation"}, 2)])
-def test_macro_modules_reach_consumers_without_a_fifth_role(snapshot, routes, purpose, downstream, calls):
-    from tests.core.test_macro_analysis import macro_fields
-    fields = macro_fields()
-    seen = set()
-
-    def worker(role, task, inputs, **kwargs):
-        if role in downstream:
-            peers = inputs["data"]["workflow_context"]["peer_reports"]
-            macro = next(p for p in peers if p["role"] == "macro")
-            assert macro["result"]["macro_diagnosis"] == fields["macro_diagnosis"]
-            assert macro["result"]["market_structure"] == fields["market_structure"]
-            assert macro["independent_evidence"] is False
-            seen.add(role)
-        result = report(role, inputs)
-        if role == "macro":
-            result["result"].update(deepcopy(fields))
-        return result
-
-    output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker, purpose=purpose)
-    assert seen == downstream and output["total_calls"] == calls
-    assert output["status"] == "completed"
-
-
 def test_one_round_deduplicates_questions_and_never_chases_new_requests(snapshot, routes):
     seen = []
 
@@ -163,18 +107,17 @@ def test_one_round_deduplicates_questions_and_never_chases_new_requests(snapshot
         if followup:
             assert role == "valuation"
             assert len(context["targeted_requests"]) == 1
-            return report(role, inputs, [request("macro", "Another task")])
-        if role in ("macro", "technical"):
+            return report(role, inputs, [request("technical", "Another task")])
+        if role in ("technical", "risk"):
             return report(role, inputs, [request("valuation"), request("valuation", "Check   source timing")])
         return report(role, inputs)
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == 5
+    assert output["total_calls"] == 4
     assert set(output["followups"]) == {"valuation"}
     assert len([entry for entry in output["unhandled_requests"] if entry["reason"] == "duplicate_request"]) == 3
     assert any(entry["reason"] == "depth_limit" for entry in output["unhandled_requests"])
-    assert len(seen) == 5
-
+    assert len(seen) == 4
 
 def test_disabled_followups_preserve_questions_without_dispatch(snapshot, routes):
     routes["limits"]["max_followup_rounds"] = 0
@@ -183,15 +126,14 @@ def test_disabled_followups_preserve_questions_without_dispatch(snapshot, routes
     def worker(role, task, inputs, **kwargs):
         seen.append(role)
         assert not inputs["data"].get("workflow_context", {}).get("targeted_requests")
-        return report(role, inputs, [request("technical")] if role == "macro" else [])
+        return report(role, inputs, [request("risk")] if role == "technical" else [])
 
     output = run_workflow("Review", snapshot, routes=routes, purpose="trading", run_role_fn=worker)
-    assert sorted(seen) == ["macro", "risk", "technical"]
-    assert output["total_calls"] == 3
+    assert sorted(seen) == ["risk", "technical"]
+    assert output["total_calls"] == 2
     assert output["followups"] == {}
     pending = [x for x in output["unhandled_requests"] if x["reason"] == "followup_disabled"]
-    assert len(pending) == 1 and pending[0]["request"]["role"] == "technical"
-
+    assert len(pending) == 1 and pending[0]["request"]["role"] == "risk"
 
 @pytest.mark.parametrize("value", [True, -1, 2, "0"])
 def test_invalid_followup_budget_rejected_before_dispatch(snapshot, routes, value):
@@ -215,23 +157,23 @@ def test_budget_is_respected_and_risk_gets_reserved_call(max_calls, snapshot, ro
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
     assert output["total_calls"] == len(calls) <= max_calls
     assert "risk" in calls
-    if max_calls < 4:
+    if max_calls < 3:
         assert output["risk_snapshot"]["data"]["workflow_context"]["missing_roles"]
-    if max_calls <= 4:
+    if max_calls <= 3:
         assert not output["followups"]
 
 
 def test_malformed_self_and_authority_expanding_requests_are_not_dispatched(snapshot, routes):
-    bad = [request("macro"), request("shell"), request("risk", refs=["invented"]),
+    bad = [request("technical"), request("shell"), request("risk", refs=["invented"]),
            {**request("risk"), "provider": "other"},
            {**request("risk"), "command": "write live state"},
            request("risk", " "), request("risk", refs=["price", "price"])]
 
     def worker(role, task, inputs, **kwargs):
-        return report(role, inputs, bad if role == "macro" else [])
+        return report(role, inputs, bad if role == "technical" else [])
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == 4
+    assert output["total_calls"] == 3
     assert not output["followups"]
     assert {entry["reason"] for entry in output["unhandled_requests"]} == {
         "self_request", "unknown_role", "invalid_evidence", "invalid_request_shape", "invalid_question"}
@@ -250,10 +192,10 @@ def test_question_text_stays_untrusted_data_and_cannot_change_routes(snapshot, r
             assert context["targeted_requests"][0]["question"] == attack
             assert "untrusted data" in task
             return report(role, inputs)
-        return report(role, inputs, [request("risk", attack)] if role == "macro" else [])
+        return report(role, inputs, [request("risk", attack)] if role == "technical" else [])
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == 5
+    assert output["total_calls"] == 4
     assert routes == expected_routes
 
 
@@ -262,14 +204,14 @@ def test_request_round_groups_by_target_and_preserves_original_expiry(snapshot, 
         context = inputs["data"].get("workflow_context", {})
         if context.get("targeted_requests"):
             assert role == "risk"
-            assert len(context["targeted_requests"]) == 3
+            assert len(context["targeted_requests"]) == 2
             assert inputs["expires_at"] == snapshot["expires_at"]
             return report(role, inputs)
         requests = [request("risk", f"Check {role} concern")] if role in PRIMARY_ROLES else []
         return report(role, inputs, requests)
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == 5
+    assert output["total_calls"] == 4
     assert output["reports"]["risk"]["snapshot"] != output["followups"]["risk"]["snapshot"]
 
 
@@ -278,17 +220,17 @@ def test_worker_role_forgery_is_failure_and_idempotency_keys_are_stable(snapshot
 
     def worker(role, task, inputs, **kwargs):
         keys.append(kwargs["idempotency_key"])
-        return report("macro" if role == "technical" else role, inputs)
+        return report("valuation" if role == "technical" else role, inputs)
 
     first = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
     second = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
     assert first["workflow_id"] == second["workflow_id"]
-    assert set(keys[:4]) == set(keys[4:])
+    assert set(keys[:3]) == set(keys[3:])
     assert first["reports"]["technical"]["status"] == "failed"
     assert canonical_hash(snapshot) == canonical_hash(first["snapshot"])
 
 
-@pytest.mark.parametrize("budget", [4, 5, 6, 8])
+@pytest.mark.parametrize("budget", [4, 5, 6])
 def test_provider_fallbacks_are_reserved_before_parallel_calls(budget, snapshot, routes):
     routes["limits"]["max_calls"] = budget
     for route in routes["roles"].values():
@@ -308,7 +250,7 @@ def test_provider_fallbacks_are_reserved_before_parallel_calls(budget, snapshot,
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
     assert output["total_calls"] == len(actual) == budget
-    assert output["role_calls"] == 4
+    assert output["role_calls"] == 3
     assert not output["followups"]
     assert all(len(route["fallback"]) == 1 for route in routes["roles"].values())
 
@@ -327,7 +269,7 @@ def test_unused_fallback_reservations_are_released_using_host_audit(snapshot, ro
         return output
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == output["role_calls"] == 8
+    assert output["total_calls"] == output["role_calls"] == 6
     assert set(output["followups"]) == {*PRIMARY_ROLES, "risk"}
 
 
@@ -341,15 +283,15 @@ def test_host_attempt_audit_cannot_exceed_reserved_allowance(snapshot, routes):
         run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
 
 
-@pytest.mark.parametrize("budget", [4, 5, 6, 8])
+@pytest.mark.parametrize("budget", [4, 5, 6])
 def test_profile_model_fallbacks_are_resolved_before_workflow_budgeting(budget, snapshot):
     routes = {"version": 2, "model_profiles": {
         "openai": {"runtime": "codex", "primary": {"model": "gpt-6-astra", "effort": "high"},
                    "fallback": [{"model": "gpt-5.6-sol", "effort": "high"}]},
         "anthropic": {"runtime": "claude", "primary": {"model": "claude-fable-5-1", "effort": "xhigh"},
                       "fallback": [{"model": "claude-opus-5", "effort": "xhigh"}]}},
-        "roles": {role: {"profile": "openai" if role in ("macro", "valuation") else "anthropic",
-                         "reviewer_profile": "anthropic" if role in ("macro", "valuation") else "openai",
+        "roles": {role: {"profile": "openai" if role == "valuation" else "anthropic",
+                         "reviewer_profile": "anthropic" if role == "valuation" else "openai",
                          "timeout_s": 600} for role in (*PRIMARY_ROLES, "risk")},
         "limits": {"max_parallel": 3, "max_calls": budget},
         "autopaint": {"enabled": True, "apply": False, "review": True}}
@@ -371,12 +313,13 @@ def test_profile_model_fallbacks_are_resolved_before_workflow_budgeting(budget, 
         return output
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
     assert output["total_calls"] == len(actual) == budget
-    assert output["role_calls"] == 4 and not output["followups"]
+    assert output["role_calls"] == 3 and not output["followups"]
     assert routes == original
 
 
 @pytest.mark.parametrize("receipt", ["missing", "empty", "raise"])
 def test_missing_host_receipts_keep_all_reserved_provider_budget(receipt, snapshot, routes):
+    routes["limits"]["max_calls"] = 6
     for route in routes["roles"].values():
         route["fallback"] = [{"provider": "alternate", "model": None}]
 
@@ -390,8 +333,8 @@ def test_missing_host_receipts_keep_all_reserved_provider_budget(receipt, snapsh
         return output
 
     output = run_workflow("Review", snapshot, routes=routes, run_role_fn=worker)
-    assert output["total_calls"] == 8
-    assert output["role_calls"] == 4
+    assert output["total_calls"] == 6
+    assert output["role_calls"] == 3
     assert not output["followups"]
 
 
@@ -403,34 +346,27 @@ def test_invalid_limits_rejected_before_workers(field, value, snapshot, routes):
         run_workflow("Review", snapshot, routes=routes, run_role_fn=lambda *args, **kwargs: pytest.fail("called"))
 
 
-def test_macro_scenario_is_calculated_before_valuation_from_full_archive(routes):
+def test_host_valuation_is_calculated_before_the_valuation_worker(routes):
     from tests.valuation.test_assessment import data, STAMP
     from quant.valuation.assessment import build
     package = data()
-    capture = make_snapshot(package, evidence_refs=["macro", "fundamentals:SYN"],
+    capture = make_snapshot(package, evidence_refs=["fundamentals:SYN"],
                             now=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
-    case = {"id": "rate_cut", "label": "synthetic", "basis": "parallel curve experiment",
-            "evidence_refs": ["macro"], "shocks": [{"factor": "rf_bp", "delta": -25,
-              "start_year": 1, "end_year": 10, "terminal": True}]}
-    expected = build(package, as_of=STAMP, macro_scenarios=[case], evidence_refs=capture["evidence_refs"])
+    expected = build(package, as_of=STAMP, evidence_refs=capture["evidence_refs"])
     observed = {}
     def worker(role, task, inputs, **kwargs):
-        record = report(role, inputs)
-        if role == "macro":
-            record["result"]["valuation_scenarios"] = [case]
         if role in ("valuation", "risk"):
             observed[role] = inputs["data"]["valuation_calculations"]
-        return record
+        return report(role, inputs)
     output = run_workflow("Review", capture, routes=routes, run_role_fn=worker)
     assert output["status"] == "completed"
     assert observed["valuation"] == observed["risk"]
     assert observed["valuation"]["receipt_view"] == "worker_summary"
     assert observed["valuation"]["full_receipt_hash"] == output["valuation_calculations"]["receipt_hash"]
     actual = observed["valuation"]["tickers"]["SYN"]
-    assert actual["macro_scenarios"][0]["fair_value"] == expected["tickers"]["SYN"]["macro_scenarios"][0]["fair_value"]
-    assert actual["macro_scenarios"][0]["fair_value"] > actual["baseline"]["fair_value"]
+    assert actual["baseline"]["fair_value"] == expected["tickers"]["SYN"]["baseline"]["fair_value"]
+    assert actual["macro_scenarios"] == []
     assert capture["data"] == package
-
 
 def test_valuation_worker_receipt_is_bounded_and_points_to_full_host_receipt():
     import json
@@ -445,6 +381,151 @@ def test_valuation_worker_receipt_is_bounded_and_points_to_full_host_receipt():
     assert 'quarters' not in view['tickers']['SYN']['company_research']['scenarios']['base']
     assert len(json.dumps(view)) < len(json.dumps(full)) / 4
     assert len(full['tickers']['SYN']['company_research']['scenarios']['base']['quarters']) == 8
+
+
+def test_worker_amortization_summary_preserves_unresolved_pool_and_limits_without_full_path():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import packet, STAMP
+    full = build({'selected_tickers': ['SYN'],
+                  'valuation': {'company_models': {'SYN': packet()}}}, as_of=STAMP)
+    source = {'status': 'conditional_research', 'source_completeness': 'not_established',
+              'input_hash': 'a'*64, 'receipt_hash': 'b'*64, 'limitations': ['Readiness unconfirmed'],
+              'periods': [{'end': '2030-01-01', 'remaining_existing': 0, 'remaining_iprd': 40,
+                           'operating_profit': 10, 'total_da': 5}]}
+    full['tickers']['SYN']['company_research']['scenarios']['base']['acquired_intangible_runoff'] = source
+    full['receipt_hash'] = canonical_hash({k: v for k, v in full.items() if k != 'receipt_hash'})
+    view = _valuation_worker_receipt(full)
+    compact = view['tickers']['SYN']['company_research']['scenarios']['base']['acquired_intangible_runoff']
+    assert compact['ending_pools']['remaining_iprd'] == 40
+    assert compact['source_completeness'] == 'not_established'
+    assert compact['limitations'] == ['Readiness unconfirmed']
+    assert 'periods' not in compact and full['tickers']['SYN']['company_research']['scenarios']['base']['acquired_intangible_runoff'] == source
+
+
+def test_worker_amortization_summary_keeps_finite_scope_and_excluded_indefinite_assets():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import packet, STAMP
+    full = build({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': packet()}}}, as_of=STAMP)
+    source = {'status': 'conditional_research', 'population_scope': 'definite_lived_intangibles_only',
+        'excluded_nonamortizing_assets': [{'asset_id': 'other_indefinite', 'book_balance': 211,
+                                         'valuation_status': 'unresolved', 'basis': 'IPRD composition unknown'}],
+        'periods': [], 'source_completeness': 'not_established'}
+    full['tickers']['SYN']['company_research']['scenarios']['base']['acquired_intangible_runoff'] = source
+    compact = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']['acquired_intangible_runoff']
+    assert compact['population_scope'] == source['population_scope']
+    assert compact['excluded_nonamortizing_assets'] == source['excluded_nonamortizing_assets']
+    assert 'periods' not in compact
+
+
+@pytest.mark.parametrize('assumptions', [
+    {'acquired_amortization': 'IPRD readiness unconfirmed', 'long_term_dcf': 'License finance assumed'},
+    {'capital_cohorts': 'CIP readiness unconfirmed', 'capital_completeness': 'Supplier financing unknown'}])
+def test_worker_view_preserves_asset_conditions_and_distinct_issued_class_units(assumptions):
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import packet, STAMP
+    full = build({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': packet()}}}, as_of=STAMP)
+    scenario = full['tickers']['SYN']['company_research']['scenarios']['base']
+    scenario['assumptions'] = assumptions
+    scenario['acquired_intangible_runoff'] = {'status': 'conditional_research', 'periods': []}
+    scenario['business_equity'] = {'status': 'unknown', 'per_share': None,
+                                  'outstanding_shares': 100, 'participating_common_equivalents': 20,
+                                  'fixed_new_shares': 0, 'unresolved_assets': ['cash'],
+                                  'unresolved_claims': ['awards']}
+    view = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']
+    assert view['business_equity'] == scenario['business_equity']
+    summary = view['acquired_intangible_runoff']
+    assert summary['readiness_basis'] in ('IPRD readiness unconfirmed', 'CIP readiness unconfirmed')
+    assert summary['capital_path_basis'] in ('License finance assumed', 'Supplier financing unknown')
+    assert 'quarters' not in view and 'periods' not in summary
+
+
+def test_worker_lease_summary_preserves_partial_population_and_assumptions():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_leases import linked_packet
+    from tests.valuation.test_company_model import STAMP
+    p = linked_packet()
+    p['scenarios'][0]['assumptions'] = {'finance_lease_runoff': 'Synthetic calendar allocation, future leases unknown'}
+    full = build({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': p}}}, as_of=STAMP)
+    source = full['tickers']['SYN']['company_research']['scenarios']['base']['finance_lease_runoff']
+    view = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']['finance_lease_runoff']
+    assert view['scope'] == 'opening_commenced_finance_leases_only'
+    assert view['source_completeness'] == 'not_established' and view['publication'] == 'withheld'
+    assert view['ending_opening_population']['closing_liability'] == source['periods'][-1]['closing_liability']
+    assert view['assumption_basis'] == p['scenarios'][0]['assumptions']['finance_lease_runoff']
+    assert 'periods' not in view and view['receipt_hash'] == source['receipt_hash']
+
+
+def test_compact_worker_keeps_explicit_native_cash_scope_and_unresolved_limits():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import packet, STAMP
+    p = packet()
+    scope = {'scope': 'selected_physical_PPE_DA_addback_only',
+             'nonphysical_costs_cash_treatment': 'cash_expense_equivalent_scenario',
+             'source_residual': 6119, 'forecast_physical_fraction': 13869 / 19988,
+             'limitations': ['Residual composition and future payment timing unresolved']}
+    p['scenarios'][0].setdefault('assumptions', {})['native_operating_cash_scope'] = scope
+    full = build({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': p}}}, as_of=STAMP)
+    compact = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']
+    assert compact['native_operating_cash_scope'] == scope
+    assert 'quarters' not in compact
+    assert compact['maximum_funding_gap'] == full['tickers']['SYN']['company_research']['scenarios']['base']['maximum_funding_gap']
+
+
+def test_compact_worker_keeps_ordinary_share_cash_proxy_and_current_claim_limitations():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_share_settlements import linked_packet, STAMP
+    p = linked_packet()
+    full = build({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': p}}}, as_of=STAMP)
+    source = full['tickers']['SYN']['company_research']['scenarios']['base']['ordinary_share_cash_settlements']
+    compact = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']
+    flow = compact['ordinary_share_cash_settlements']
+    assert flow['cohort_assignment'] == 'not_established' and flow['claim_valuation_status'] == 'unresolved'
+    assert flow['publication'] == 'withheld' and flow['validated'] is False
+    assert flow['period_count'] == 8 and flow['first_period']['gross_issued'] == 3
+    assert flow['first_period']['repurchased'] == 1 and flow['first_period']['unassigned_financing_cash'] == .3
+    assert flow['limitations'] == source['limitations'] and flow['receipt_hash'] == source['receipt_hash']
+    assert 'periods' not in flow and flow['full_periods_in_host_receipt'] is True
+    assert compact['business_equity']['unresolved_claims'] == ['employee_rights']
+
+
+def test_compact_worker_keeps_content_book_capital_and_economic_limits():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_content_capital import linked_packet, STAMP
+    p = linked_packet()
+    full = build({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': p}}}, as_of=STAMP)
+    source = full['tickers']['SYN']['company_research']['scenarios']['base']['content_capital']
+    compact = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']
+    view = compact['content_capital']
+    assert view['economic_value_status'] == 'unresolved' and view['book_is_not_nonoperating_value'] is True
+    assert view['native_period_count'] == 8 and view['period_count'] == 9
+    assert view['ending_book_balances']['closing_content_asset_net'] == 59
+    assert view['ending_book_balances']['closing_content_liability'] == 18
+    assert view['publication'] == 'withheld' and view['validated'] is False
+    assert view['limitations'] == source['limitations'] and view['receipt_hash'] == source['receipt_hash']
+    assert view['full_periods_in_host_receipt'] is True and 'periods' not in view
+
+
+def test_compact_worker_keeps_tax_assumptions_without_asserting_payments():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from quant.valuation.assessment import build
+    from tests.valuation.test_company_model import tax_equivalence_packet, STAMP
+    full = build({'selected_tickers': ['SYN'], 'valuation': {
+        'company_models': {'SYN': tax_equivalence_packet()}}}, as_of=STAMP)
+    source = full['tickers']['SYN']['company_research']['scenarios']['base']['native_cash_tax_basis']
+    compact = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']['native_cash_tax_basis']
+    assert compact['net_cash_tax'] == compact['tax_provision'] == 16
+    assert compact['selected_period_count'] == compact['native_period_count'] == 8
+    assert compact['payment_status'] == 'scenario_assumption_not_verified_payment'
+    assert compact['limitations'] == source['limitations']
+    assert compact['publication'] == 'withheld' and compact['validated'] is False
+    assert 'periods' not in compact
 
 
 def test_invalid_valuation_market_input_does_not_abort_other_research(routes):
@@ -467,7 +548,7 @@ def test_trading_scope_cannot_call_valuation_even_on_peer_request(snapshot, rout
         seen.append(role)
         return report(role, inputs, [request('valuation')])
     out = run_workflow('trading review', snapshot, routes=routes, run_role_fn=worker, purpose='trading')
-    assert set(seen) == {'macro', 'technical', 'risk'} and len(seen) == 3
+    assert set(seen) == {'technical', 'risk'} and len(seen) == 2
     assert out['valuation_calculations'] is None
     assert any(r['reason'] == 'role_outside_workflow_scope' for r in out['unhandled_requests'])
     assert out['risk_snapshot']['data']['workflow_context']['missing_roles'] == []
@@ -479,16 +560,16 @@ def test_valuation_scope_cannot_expand_to_trading_roles(snapshot, routes):
         seen.append(role)
         return report(role, inputs, [request('technical'), request('risk')])
     out = run_workflow('daily valuation', snapshot, routes=routes, run_role_fn=worker, purpose='valuation')
-    assert seen == ['macro', 'valuation']
+    assert seen == ['valuation']
     assert out['risk_snapshot'] is None and out['valuation_calculations'] is not None
-    assert len(out['unhandled_requests']) == 4
+    assert len(out['unhandled_requests']) == 2
 
 
 def test_trading_workflow_cross_provider_failover_respects_eight_call_budget(tmp_path):
     from quant.ops import agent_runtime as runtime
     from tests.ops.test_agent_runtime import fake_runner
     from quant.core.io_json import read_json
-    roles = ('macro', 'technical', 'risk', 'valuation')
+    roles = ('technical', 'risk', 'valuation')
     config = {'version': 2, 'model_profiles': {
         'anthropic': {'runtime': 'claude', 'primary': {'model': 'claude-fable-5-1', 'effort': 'xhigh'},
                       'fallback': [{'model': 'claude-opus-5', 'effort': 'xhigh'}]},
@@ -508,6 +589,19 @@ def test_trading_workflow_cross_provider_failover_respects_eight_call_budget(tmp
     workflow = run_workflow('合成盘前故障切换', inputs, routes=config,
                              purpose='trading', run_role_fn=worker, run_dir=tmp_path)
     assert workflow['status'] == 'completed'
-    assert workflow['total_calls'] == 6
-    assert len(read_json(tmp_path / 'control' / 'global-calls.json')['calls']) == 6
+    assert workflow['total_calls'] == 4
+    assert len(read_json(tmp_path / 'control' / 'global-calls.json')['calls']) == 4
     assert all(r['provider'] == 'codex' for r in workflow['reports'].values())
+
+
+def test_worker_keeps_selected_financing_cash_as_unverified_partial_scope():
+    from quant.ops.agent_workflow import _valuation_worker_receipt
+    from tests.valuation.test_company_model import financing_obligation_packet, result
+    full = {'receipt_hash': 'synthetic', 'tickers': {'SYN': {
+        'company_research': result(financing_obligation_packet())}}}
+    case = _valuation_worker_receipt(full)['tickers']['SYN']['company_research']['scenarios']['base']
+    s = case['native_financing_obligation_cash']
+    assert s['cash_paid'] == 16 and s['net_cash'] == -16
+    assert s['selected_period_count'] == s['native_period_count'] == 8
+    assert s['book_rollforward_verified'] is False and s['validated'] is False
+    assert s['publication'] == 'withheld' and 'periods' not in s

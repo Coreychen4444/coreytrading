@@ -17,10 +17,9 @@ import re
 from quant.core.agent_contracts import canonical_hash, card_revision
 from quant.core.io_json import read_json
 from quant.core.market_sessions import MarketSessionError, calendar_metadata, latest_completed_session, session_close
-from quant.core import technical
+from quant.core import macro_lens, technical
 from quant.core.paths import KLINE_CACHE_DIR, MACRO_CURRENT_PATH, POSITIONS_PATH, WATCHLIST_PATH
 from quant.decision.level_map import build_map
-from quant.ops.macro_state import validate_document as validate_macro_document
 
 
 def make_snapshot(data: dict, *, evidence_refs: list[str] | None = None,
@@ -73,18 +72,17 @@ def completed_bars(rows: list[dict], now: datetime) -> list[dict]:
 
 
 def _macro_prior(path: Path, now: datetime) -> tuple[dict | None, str]:
-    """Use the existing macro schema; a capture cannot repair or refresh a prior."""
+    """宏观透镜发布文件 → 精简先验（core/macro_lens.prior_view）；capture 不修复、不刷新先验。"""
     if not path.exists():
         return None, "missing"
     try:
-        macro = read_json(path)
-        canonical_hash(macro)
-        if validate_macro_document(macro) or macro.get("example_only") is True:
+        doc = read_json(path)
+        canonical_hash(doc)
+        if macro_lens.validate_published(doc):
             return None, "invalid"
-        produced = datetime.fromisoformat(macro["generated_at"]["utc"].replace("Z", "+00:00"))
-        if produced > now:
+        if datetime.fromisoformat(doc["generated_at"]) > now:
             return None, "future"
-        return macro, "valid"
+        return macro_lens.prior_view(doc), "valid"
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None, "invalid"
 
@@ -137,8 +135,8 @@ def capture_card(ticker: str, bucket: str, *, now: datetime | None = None,
         "snapshot_as_of_is_capture_time": True,
         "completed_session": bars[-1]["time"] if bars else None,
         "macro_status": macro_status,
-        "macro_generated_at": macro["generated_at"]["utc"] if macro else None,
-        "macro_evidence_cutoff": macro["data_quality"]["cutoff_utc"] if macro else None,
+        "macro_generated_at": macro["generated_at"] if macro else None,
+        "macro_asof": macro["asof"] if macro else None,
         "valuation_as_of": valuation_as_of,
     }
     data = {"ticker": ticker, "bucket": bucket, "card": card,

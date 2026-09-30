@@ -103,6 +103,23 @@ def test_host_links_earnings_and_equity_bridge_without_duplicate_segment_value()
     r=cm.build(p,as_of=STAMP)['scenarios']['base']
     assert r['business_equity']['operating_value']==r['operating_value']['operating_value']
     assert r['business_equity']['per_share'] is not None
+    # Unknown nonoperating economics hold only the ordinary-equity value. The
+    # calculated operating path and its dated DCF remain inspectable.
+    asset = e['nonoperating_assets'][0]
+    asset['valuation_status'] = 'unresolved'
+    del asset['value']
+    unknown = cm.build(p, as_of=STAMP)['scenarios']['base']
+    assert unknown['quarters'] == r['quarters']
+    assert unknown['operating_value'] == r['operating_value']
+    assert unknown['business_equity']['per_share'] is None
+    assert unknown['business_equity']['unresolved_assets'] == ['cash']
+    from quant.report.valuation_report import fyi_map
+    from quant.valuation.assessment import build as assessment
+    receipt = assessment({'selected_tickers': ['SYN'],
+                          'valuation': {'company_models': {'SYN': p}}}, as_of=STAMP)
+    line = fyi_map(receipt)['SYN']
+    assert '基准条件经营价值 $' in line and '普通股权益桥未闭合：1项资产待估' in line
+    assert receipt['tickers']['SYN']['company_research']['scenarios']['base']['business_equity']['unresolved_assets'] == ['cash']
     d['periods'][0]['operating_profit']=100
     with pytest.raises(ValueError,match='differs from company'):cm.build(p,as_of=STAMP)
 

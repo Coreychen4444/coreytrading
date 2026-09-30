@@ -71,6 +71,15 @@ def test_g01_fires_each_level_once():
     assert [h["level"] for h in hits2] == ["+200%"]
 
 
+def test_g01_reconciled_lots_with_same_cost_keep_separate_keys():
+    """lot_reconcile 写的是 entry_period (期权 lot 自动落账): 同成本两笔不能撞成一个键。"""
+    lots = {"position": [{"qty": 1, "avg_cost": 18.0, "entry_period": "2026-09-17 10:00 ET"},
+                         {"qty": 1, "avg_cost": 18.0, "entry_period": "2026-09-18 15:30 ET"}],
+            "base": []}
+    hits = g01_crossings(lots, 36.5, {})
+    assert len({h["lot_key"] for h in hits}) == 2 and all(h["level"] == "+100%" for h in hits)
+
+
 # ── 趋势死亡线 ──────────────────────────────────────────────────
 
 def _trend_klines(n=30, start=10.0, step=0.2):

@@ -42,12 +42,12 @@ from quant.core.paths import FUNDAMENTALS_DIR  # noqa: E402
 from quant.core.timeutil import now_utc_iso  # noqa: E402
 from quant.core.agent_contracts import canonical_hash  # noqa: E402
 from quant.core.valuation_contracts import finite  # noqa: E402
+from quant.core.financials import discrete_quarter  # noqa: E402
 
 STATEMENT_INCOME = 1
 STATEMENT_BALANCE = 2
 STATEMENT_CASHFLOW = 3
 FINANCIAL_QUARTERLY_COMBO = 9        # 离散季度序列 (financial_type 1-4 逐季)
-DISCRETE_QUARTER_TYPES = {1, 2, 3, 4}
 DEFAULT_QUARTERS = 50                # 一页上限 = 12.5 年, 周期归一化够用
 
 INCOME_FIELDS = {
@@ -95,7 +95,7 @@ def _discrete_quarters(reports: list[dict]) -> dict[str, dict]:
     """离散季报 by period_text; 同一期只留最新 date_time (重述保护)。"""
     out: dict[str, dict] = {}
     for r in reports or []:
-        if r.get("financial_type") not in DISCRETE_QUARTER_TYPES:
+        if discrete_quarter(r.get("financial_type")) is None:
             continue
         period = str(r.get("period_text") or "")
         if not period:
@@ -118,7 +118,7 @@ def parse_quarters(income: list[dict], balance: list[dict], cashflow: list[dict]
         row: dict = {
             "period": period,
             "fiscal_year": r.get("fiscal_year"),
-            "quarter": r.get("financial_type"),
+            "quarter": discrete_quarter(r.get("financial_type")),
             "period_end": r.get("date_time_str"),
             "period_end_basis": "provider_calendar_date_unverified_against_filing",
             "provider_period_timestamp": r.get("date_time"),

@@ -105,7 +105,7 @@ def test_metadata_never_claims_a_live_emergency_closure_feed():
     assert sessions.calendar_metadata()["official_years_verified"] == [2026, 2027, 2028]
 
 
-@pytest.mark.parametrize("kind,minutes", [("postclose", 10), ("ladder", 20), ("chart", 35)])
+@pytest.mark.parametrize("kind,minutes", [("postclose", 10), ("ladder", 20), ("macro", 30), ("chart", 35)])
 @pytest.mark.parametrize("day", ["2026-09-04", "2026-11-02", "2026-11-27", "2026-12-24"])
 def test_postclose_jobs_follow_actual_dst_and_halfday_closes(kind, minutes, day):
     close = sessions.session_close(day)
@@ -118,7 +118,7 @@ def test_postclose_jobs_follow_actual_dst_and_halfday_closes(kind, minutes, day)
 
 def test_session_day_jobs_skip_labor_day_and_briefing_stops_at_open():
     holiday = datetime(2026, 9, 7, 20, tzinfo=timezone.utc)
-    for kind in ("heartbeat", "briefing", "postclose", "ladder", "chart"):
+    for kind in ("heartbeat", "briefing", "postclose", "ladder", "macro", "chart"):
         out = sessions.scheduled_session_due(kind, holiday)
         assert out["due"] is False and out["reason"] == "non_session_day"
         assert out["close"] is None

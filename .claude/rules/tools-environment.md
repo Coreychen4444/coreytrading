@@ -19,7 +19,7 @@
 - 券商连接类命令是 smoke test，不进离线测试；`.claude/skills/openapi/scripts/trade/` 下的订单脚本不在 pipeline 内，任何改单动作先取 operator 的显式授权，永不通过 SDK 解锁交易。
 
 ## Data sources（价格永远 OpenD / kline，禁 WebSearch 查行情）
-1. OpenD 实时；2. `positions.json` `broker` 快照（`stock_fetch.py` 刷新）；3. 本地缓存 `market/klines/<T>.jsonl` + `market/iv_history/<T>.jsonl` + VIX via `quant/data/macro_fetch.py`；4. 新闻 / 宏观叙事只读 operator 配置的情报归档（可选 `trade/intelligence/reports/`），未配置 = 无输入。
+1. OpenD 实时；2. `positions.json` `broker` 快照（`stock_fetch.py` 刷新）；3. 本地缓存 `market/klines/<T>.jsonl` + `market/iv_history/<T>.jsonl` + 跨资产宏观日线（VIX / 利率 / 油 / 美元 / 信用等，`quant/data/macro_series.py` → `trade/market/macro_daily/`，公开结构化日线端点）；4. 新闻叙事只读 operator 配置的情报归档（可选 `trade/intelligence/reports/`），未配置 = 无输入；宏观读数只读宏观透镜 `trade/intelligence/macro/current.json`。
 
 ## 时区
 - `events/*/trades.jsonl` 时间戳 = 带 ET offset 的 ISO；券商订单 `create_time` = ET。SGT = ET + 12h（夏令）/ +13h（冬令）；下结论前先换算。

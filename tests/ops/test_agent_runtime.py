@@ -12,7 +12,6 @@ from quant.core.agent_contracts import CONTRACT_VERSION, ROLES
 from quant.core.io_json import atomic_write_json, read_json
 from quant.ops import agent_runtime as runtime
 from quant.ops.agent_snapshots import make_snapshot
-from tests.core.test_macro_analysis import macro_fields
 
 
 @pytest.fixture
@@ -33,8 +32,8 @@ def profile_routes(routes):
                       "fallback": [{"model": "claude-opus-5", "effort": "xhigh"}]},
         "openai": {"runtime": "codex", "primary": {"model": "gpt-6-astra", "effort": "high"},
                    "fallback": [{"model": "gpt-5.6-sol", "effort": "high"}]}})
-    config["roles"] = {role: {"profile": "openai" if role in ("macro", "valuation") else "anthropic",
-                              "reviewer_profile": "anthropic" if role in ("macro", "valuation") else "openai",
+    config["roles"] = {role: {"profile": "openai" if role == "valuation" else "anthropic",
+                              "reviewer_profile": "anthropic" if role == "valuation" else "openai",
                               "timeout_s": 600} for role in ROLES}
     return config
 
@@ -49,7 +48,6 @@ def result_for(prompt):
     s, role = request["snapshot"], request["role"]
     target = request["review_target"]
     return {"schema_version": runtime.result_schema(role)["properties"]["schema_version"]["const"], "contract_version": CONTRACT_VERSION,
-            **({"valuation_scenarios": [], **macro_fields()} if role == "macro" else {}),
             "role": role, "snapshot_id": s["snapshot_id"], "input_hash": s["input_hash"],
             "generated_at": s["as_of"], "expires_at": s["expires_at"], "summary": "合成证据分析",
             "observations": [{"id": "f1", "kind": "fact", "text": "来自冻结证据",
@@ -132,53 +130,12 @@ def test_generation_schema_binds_source_ids_and_excludes_self_requests(packet):
     assert reviewed["properties"]["review"]["properties"]["run_id"]["const"] == "a" * 32
 
 
-@pytest.mark.parametrize("refs", [[], ["frozen-source"]])
-def test_macro_nested_generation_refs_and_method_contract(refs):
-    packet = make_snapshot({"synthetic": True}, evidence_refs=refs)
-    props = runtime.execution_schema("macro", packet)["properties"]
-    assert props["macro_diagnosis"]["properties"]["rate_drivers"]["properties"]["term_premium"]["properties"]["status"]["enum"] == ["inferred", "unknown"]
-    nested = [props["macro_diagnosis"]["properties"]["curve"]["properties"]["ust_30y"],
-              props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"],
-              props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]["feedback"],
-              props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]["upstream"]["properties"]["baseline"],
-              props["market_structure"]["properties"]["dimensions"]["properties"]["flows"]]
-    for item in nested:
-        schema = item["properties"]["evidence_refs"]
-        if refs:
-            assert schema["items"] == {"$ref": "#/$defs/evidence_ref"}
-            assert runtime.execution_schema("macro", packet)["$defs"]["evidence_ref"]["enum"] == refs
-        else:
-            assert schema["maxItems"] == 0
-    policy = runtime.policy_context("macro")
-    for method in ("agents/methods/market-structure-analysis.md", "agents/methods/macro-inference-contract.md"):
-        if (runtime.ROOT / method).exists():
-            assert method in policy
-        else:   # optional intelligence workspace absent: named, not fabricated
-            assert method in policy["optional_methods_missing"] and method not in policy
-
-
-def test_macro_generation_cannot_cite_catalogued_missing_source():
-    packet = make_snapshot({"source_data": {"evidence_catalog": {"missing": {"status": "missing"}, "good": {"status": "read"}}}},
-                           evidence_refs=["missing", "good"])
-    schema = runtime.execution_schema("macro", packet)
-    props = schema["properties"]
-    assert schema["$defs"]["evidence_ref"]["enum"] == ["good"]
-    assert props["observations"]["items"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
-    chain = props["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]
-    assert chain["upstream"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
-
-
-def test_large_macro_reference_catalog_is_factored_once_and_schema_not_repeated_in_prompt():
-    refs = ["macro_observation:" + f"{index:064x}" for index in range(200)]
-    packet = make_snapshot({"synthetic": True}, evidence_refs=refs)
-    schema = runtime.execution_schema("macro", packet)
-    encoded = json.dumps(schema)
-    assert encoded.count(refs[0]) == 1 and encoded.count(refs[-1]) == 1
-    assert len(encoded) < 45000  # Prevent O(field count × catalog size) expansion.
-    prompt = json.loads(runtime.build_prompt("macro", "Synthetic", packet, {}).split("\n", 1)[1])
-    assert "output_schema" not in prompt
-    assert prompt["output_contract"]["schema_delivery"].startswith("native structured output")
-    assert prompt["snapshot"]["evidence_refs"] == refs
+def test_macro_model_role_is_retired():
+    """宏观层 = core/macro_lens 纯代码判读；没有宏观 worker、没有宏观 policy。"""
+    assert "macro" not in ROLES
+    with pytest.raises(ValueError, match="unknown role"):
+        runtime.policy_context("macro")
+    assert "macro-context-check.md" in " ".join(runtime.policy_context("technical"))
 
 
 def test_global_concurrency_queues_without_spending_extra_calls(routes, packet, tmp_path, monkeypatch):
@@ -192,7 +149,7 @@ def test_global_concurrency_queues_without_spending_extra_calls(routes, packet, 
         return real_acquire(*args, **kwargs)
     monkeypatch.setattr(agent_health, "acquire_call", acquire)
     monkeypatch.setattr(runtime.time, "sleep", lambda seconds: None)
-    record = runtime.run_role("macro", "分析", packet, routes=routes, run_dir=tmp_path, runner=fake_runner)
+    record = runtime.run_role("valuation", "分析", packet, routes=routes, run_dir=tmp_path, runner=fake_runner)
     assert record["status"] == "succeeded" and len(record["attempts"]) == 1
     assert len(checks) == 2
     ledger = read_json(tmp_path / "control" / "global-calls.json")
@@ -265,7 +222,7 @@ def test_unexpected_runner_failure_is_counted_and_sanitized(routes, packet, tmp_
         if provider == "claude":
             raise RuntimeError("secret-must-not-appear")
         return fake_runner(provider, *args, **kwargs)
-    record = runtime.run_role("macro", "分析", packet, routes=routes, run_dir=tmp_path, runner=run)
+    record = runtime.run_role("valuation", "分析", packet, routes=routes, run_dir=tmp_path, runner=run)
     assert record["status"] == "succeeded" and len(record["attempts"]) == 2
     assert record["attempts"][0]["error"] == "runner_exception:RuntimeError"
     assert "secret-must-not-appear" not in json.dumps(record)
@@ -295,7 +252,7 @@ def test_wrong_snapshot_or_authority_fails_even_if_runner_succeeded(routes, pack
         out = fake_runner(*args, **kwargs)
         out["payload"]["authority"]["may_write_state"] = True
         return out
-    record = runtime.run_role("macro", "分析", packet, routes=routes, run_dir=tmp_path, runner=run)
+    record = runtime.run_role("valuation", "分析", packet, routes=routes, run_dir=tmp_path, runner=run)
     assert record["status"] == "failed"
     assert all(x["status"] == "invalid_result" for x in record["attempts"])
 
@@ -308,10 +265,10 @@ def test_concurrent_callers_only_start_one_worker(routes, packet, tmp_path):
         assert release.wait(5)
         return fake_runner(*args, **kwargs)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(runtime.run_role, "macro", "分析", packet,
+        first = pool.submit(runtime.run_role, "valuation", "分析", packet,
                             routes=routes, run_dir=tmp_path, runner=run)
         assert entered.wait(5)
-        second = runtime.run_role("macro", "分析", packet, routes=routes, run_dir=tmp_path, runner=run)
+        second = runtime.run_role("valuation", "分析", packet, routes=routes, run_dir=tmp_path, runner=run)
         assert second["status"] == "running"
         release.set()
         assert first.result()["status"] == "succeeded"
@@ -319,18 +276,18 @@ def test_concurrent_callers_only_start_one_worker(routes, packet, tmp_path):
 
 
 def test_expired_lease_revokes_old_publish(tmp_path):
-    a, claimed = runtime._claim(tmp_path, "key", {"role": "macro"}, 30)
+    a, claimed = runtime._claim(tmp_path, "key", {"role": "valuation"}, 30)
     assert claimed
     path = tmp_path / "jobs" / "key.json"
     job = read_json(path); job["lease_until"] = 0; atomic_write_json(path, job)
-    b, claimed = runtime._claim(tmp_path, "key", {"role": "macro"}, 30)
+    b, claimed = runtime._claim(tmp_path, "key", {"role": "valuation"}, 30)
     assert claimed and a["run_id"] != b["run_id"]
     assert runtime._publish(tmp_path, dict(a, status="succeeded", result={"late": True}))["status"] == "superseded"
     assert read_json(path)["run_id"] == b["run_id"]
 
 
 def test_expired_owner_cannot_publish_without_a_replacement(tmp_path):
-    record, _ = runtime._claim(tmp_path, "key", {"role": "macro"}, 30)
+    record, _ = runtime._claim(tmp_path, "key", {"role": "valuation"}, 30)
     job_path = tmp_path / "jobs" / "key.json"
     job = read_json(job_path)
     job["lease_until"] = 0
@@ -338,7 +295,7 @@ def test_expired_owner_cannot_publish_without_a_replacement(tmp_path):
     result = runtime._publish(tmp_path, dict(record, status="succeeded", result={"late": True}))
     assert result["status"] == "superseded" and result["result"] is None
     assert read_json(runtime._run_path(tmp_path, record["run_id"]))["status"] == "superseded"
-    replacement, claimed = runtime._claim(tmp_path, "key", {"role": "macro"}, 30)
+    replacement, claimed = runtime._claim(tmp_path, "key", {"role": "valuation"}, 30)
     assert claimed and replacement["run_id"] != record["run_id"]
 
 
@@ -384,7 +341,7 @@ def test_successful_submission_is_not_replayed(routes, packet, tmp_path, monkeyp
 def test_expired_snapshot_rejected_before_job_or_model(routes, packet, tmp_path):
     packet["expires_at"] = "2000-01-01T00:00:00+00:00"
     with pytest.raises(ValueError):
-        runtime.run_role("macro", "分析", packet, routes=routes, run_dir=tmp_path, runner=fake_runner)
+        runtime.run_role("valuation", "分析", packet, routes=routes, run_dir=tmp_path, runner=fake_runner)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -428,7 +385,7 @@ def test_profile_routes_resolve_without_mutating_source_and_remain_valid(profile
     assert runtime.validate_routes(config) == config
     for role in ROLES:
         route = config["roles"][role]
-        openai = role in ("macro", "valuation")
+        openai = role == "valuation"
         assert route["provider"] == ("codex" if openai else "claude")
         assert route["model"] == ("gpt-6-astra" if openai else "claude-fable-5-1")
         assert route["effort"] == ("high" if openai else "xhigh")
@@ -436,7 +393,7 @@ def test_profile_routes_resolve_without_mutating_source_and_remain_valid(profile
         assert route["reviewer"]["provider"] != route["provider"]
         assert route["reviewer_fallback"][0]["provider"] == route["reviewer"]["provider"]
     profile_routes["model_profiles"]["openai"]["primary"]["model"] = "future-model"
-    assert config["roles"]["macro"]["model"] == "gpt-6-astra"
+    assert config["roles"]["valuation"]["model"] == "gpt-6-astra"
 
 
 def test_followup_budget_survives_profile_resolution(profile_routes):
@@ -459,9 +416,9 @@ def test_followup_budget_survives_profile_resolution(profile_routes):
     lambda c: c["model_profiles"]["anthropic"]["primary"].update(effort="none"),
     lambda c: c["model_profiles"]["openai"]["primary"].update(fallback=True),
     lambda c: c["model_profiles"]["openai"].update(fallback=[deepcopy(c["model_profiles"]["openai"]["primary"])]),
-    lambda c: c["roles"]["macro"].update(profile="missing"),
-    lambda c: c["roles"]["macro"].update(reviewer_profile="openai"),
-    lambda c: c["roles"]["macro"].update(model="untrusted-override"),
+    lambda c: c["roles"]["valuation"].update(profile="missing"),
+    lambda c: c["roles"]["valuation"].update(reviewer_profile="openai"),
+    lambda c: c["roles"]["valuation"].update(model="untrusted-override"),
     lambda c: c["roles"].pop("risk"),
 ])
 def test_invalid_profile_configuration_is_rejected(profile_routes, change):
@@ -471,12 +428,12 @@ def test_invalid_profile_configuration_is_rejected(profile_routes, change):
 
 
 def test_legacy_identifiers_and_injected_runner_without_effort_remain_supported(routes, packet, tmp_path):
-    routes["roles"]["macro"]["model"] = "custom:model/version-1"
+    routes["roles"]["valuation"]["model"] = "custom:model/version-1"
     called = []
     def legacy(provider, prompt, schema, *, model, timeout_s, cwd):
         called.append(model)
         return fake_runner(provider, prompt, schema)
-    record = runtime.run_role("macro", "分析", packet, routes=routes, run_dir=tmp_path, runner=legacy)
+    record = runtime.run_role("valuation", "分析", packet, routes=routes, run_dir=tmp_path, runner=legacy)
     assert record["status"] == "succeeded" and called == ["custom:model/version-1"]
     assert record["requested_model"] == "custom:model/version-1"
     assert record["requested_effort"] is None
@@ -491,7 +448,7 @@ def test_same_runtime_model_fallback_has_distinct_fenced_calls(profile_routes, p
         return {**fake_runner(provider, prompt, schema), "model": kwargs["model"],
                 "reported_model": "gpt-5.6-sol-20260901", "reported_models": ["gpt-5.6-sol-20260901"],
                 "model_verification": "reported"}
-    record = runtime.run_role("macro", "分析", packet, routes=profile_routes, run_dir=tmp_path, runner=runner)
+    record = runtime.run_role("valuation", "分析", packet, routes=profile_routes, run_dir=tmp_path, runner=runner)
     assert record["status"] == "succeeded"
     assert calls == [("codex", "gpt-6-astra", "high"), ("codex", "gpt-5.6-sol", "high")]
     assert record["requested_model"] == "gpt-5.6-sol" and record["requested_effort"] == "high"
@@ -502,7 +459,7 @@ def test_same_runtime_model_fallback_has_distinct_fenced_calls(profile_routes, p
     assert len({attempt["call_id"] for attempt in record["attempts"]}) == 2
     assert {attempt["call_id"] for attempt in record["attempts"]} == {call["run_id"] for call in ledger["calls"]}
     assert all(call["status"] == "released" for call in ledger["calls"])
-    replay = runtime.run_role("macro", "分析", packet, routes=profile_routes, run_dir=tmp_path, runner=runner)
+    replay = runtime.run_role("valuation", "分析", packet, routes=profile_routes, run_dir=tmp_path, runner=runner)
     assert replay["run_id"] == record["run_id"] and len(calls) == 2
 
 
@@ -521,7 +478,7 @@ def test_primary_and_independent_review_can_each_fall_back_within_global_cap(pro
                      ("codex", "gpt-6-astra", "high"), ("codex", "gpt-5.6-sol", "high")]
     assert record["review"]["provider"] != record["provider"]
     assert len(record["attempts"]) == len(record["review"]["attempts"]) == 2
-    denied = runtime.run_role("macro", "分析", packet, routes=profile_routes,
+    denied = runtime.run_role("valuation", "分析", packet, routes=profile_routes,
                               run_dir=tmp_path, runner=runner)
     assert denied["status"] == "failed" and denied["error"] == "global_model_limit:window_budget"
     assert len(calls) == 4
@@ -562,16 +519,14 @@ def test_isolated_workers_receive_referenced_policy_and_actual_writer_contract()
     from quant.ops.agent_submit import FLAG_ARITY
     for role in ("technical", "risk"):   # the decision-stack index is host context, not worker policy
         assert "trade/strategy/trading-rules.md" not in runtime.policy_context(role)
-    for role, method in (("macro", "agents/methods/macro-inference-contract.md"),
-                         ("valuation", "agents/methods/news-valuation-overlay.md")):
-        policy = runtime.policy_context(role)
-        if (runtime.ROOT / method).exists():
-            assert method in policy
-        else:   # optional intelligence workspace absent: named, not fabricated
-            assert method in policy["optional_methods_missing"] and method not in policy
-    for role in ("macro", "valuation"):
-        assert runtime.policy_context(role)["quant/valuation/README.md"] == (
-            runtime.ROOT / "quant/valuation/README.md").read_text()
+    method = "agents/methods/news-valuation-overlay.md"
+    policy = runtime.policy_context("valuation")
+    if (runtime.ROOT / method).exists():
+        assert method in policy
+    else:   # optional intelligence workspace absent: named, not fabricated
+        assert method in policy["optional_methods_missing"] and method not in policy
+    assert policy["quant/valuation/README.md"] == (
+        runtime.ROOT / "quant/valuation/README.md").read_text()
     policy = runtime.policy_context("technical")
     assert policy["technical_proposal_contract"]["flag_arity"] == FLAG_ARITY
     assert "--ticker" not in policy["technical_proposal_contract"]["flag_arity"]

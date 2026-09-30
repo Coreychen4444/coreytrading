@@ -19,9 +19,10 @@ flowchart TD
     Rules["Canonical structure, sizing and exit rules"] --> Inputs
     Inputs --> Jobs
     Routes["Role-to-model routing: Codex / Claude"] --> Jobs
-    Jobs --> Workflow["Macro + technical → risk → bounded follow-ups"]
+    Jobs --> Workflow["Technical → risk → bounded follow-ups"]
+    Lens["Macro lens (code-rendered, no model)"] --> Inputs
     Workflow --> Reports["Research reports, disagreements and unknowns"]
-    ValTask["Independent valuation task"] --> ValFlow["Refresh and freeze → macro scenarios → valuation calculations and research"]
+    ValTask["Independent valuation task"] --> ValFlow["Refresh and freeze → valuation calculations and research"]
     ValFlow --> ValReport["Independent valuation report"]
     Jobs --> Card["Single-card technical proposal"]
     Card --> Review["Independent review by the other runtime"]
@@ -40,12 +41,13 @@ The model handles interpretation and collaboration. Python owns data ingestion, 
 
 | Agent | Runtime (when it runs) | Independent reviewer runtime | Responsibility |
 |---|---|---|---|
-| **Macro** | **Codex** (weekly review / daily valuation) | Claude Code | Interpret existing macro evidence, regimes and uncertainty; provide context |
 | **Technical analysis** | **Claude** (the only daily model role; reused for the same close and card revisions) | Codex CLI | Read price structure, gates and zones; propose individual card updates |
 | **Risk and position management** | Daily: code-rendered receipt (`quant/report/risk_receipt.py`); weekly: **Claude** | Codex CLI | Review whole-book exposure, buying power, stops and sizing receipts |
-| **Valuation** | **Codex** (independent daily job) | Claude Code | Interpret financial statements, valuation ledgers, scenarios and implied expectations |
+| **Valuation** | **Claude** (independent daily job) | Codex CLI | Interpret financial statements, the compact EPS package, research targets and implied expectations |
 
-[agents/routing.json](agents/routing.json) is the configuration source of truth. A role, runtime, model provider and model ID are separate concepts: macro is a role, Codex CLI is a runtime, OpenAI is a provider, and a particular GPT version is a model. Routing v2 defines explicit `model_profiles`; each role selects a primary profile and an independent reviewer profile.
+Macro is not a model role: the **macro lens** is rendered by code after every close — six risk lights (they forecast volatility and drawdown depth, not direction), the strongest macro driver over the last 40 days and how the market reads it (a description, not a persistence claim), what the market is trading, and forward scenarios with estimated betas. It makes no model calls and carries no trading authority; see [quant/core/macro_lens.py](quant/core/macro_lens.py) and the publisher [quant/journal/macro_lens_log.py](quant/journal/macro_lens_log.py). Its compact prior rides in every frozen capture for the technical and valuation views.
+
+[agents/routing.json](agents/routing.json) is the configuration source of truth. A role, runtime, model provider and model ID are separate concepts: valuation is a role, Codex CLI is a runtime, OpenAI is a provider, and a particular GPT version is a model. Routing v2 defines explicit `model_profiles`; each role selects a primary profile and an independent reviewer profile.
 
 | Model profile | Primary model | Secondary model | Explicit effort |
 |---|---|---|---|
@@ -59,13 +61,13 @@ A valid abstention is retained. The current production configuration disables mo
 ## How agents collaborate
 
 1. **Capture evidence.** The host reads existing state and caches, records their owners, timestamps and hashes, and freezes a shared snapshot with a view for each role. Capturing data does not refresh it; missing or stale evidence stays visible.
-2. **Research in parallel.** Macro and technical agents analyze their assigned views in the trading workflow. The separate valuation workflow runs macro scenarios, host calculations and valuation research in sequence. Outputs distinguish observations, hypotheses, risks and unknowns, with references bound to the captured evidence.
-3. **Review the portfolio.** The risk agent receives its original inputs and the current macro and technical reports. Its view includes all managed holdings, including option-specific exit rules and available Greeks. Amounts come from the existing mechanical calculations.
-4. **Resolve focused questions.** Cross-domain requests are grouped by recipient for at most one follow-up round. Unresolved questions remain in the record. Repeating a claim through another model does not create independent evidence.
+2. **Domain research.** The technical agent analyzes its assigned view in the trading workflow (the macro prior comes from the code-rendered macro lens). The separate valuation workflow runs host calculations and valuation research in sequence. Outputs distinguish observations, hypotheses, risks and unknowns, with references bound to the captured evidence.
+3. **Review the portfolio.** The risk agent receives its original inputs and the current technical report. Its view includes all managed holdings, including option-specific exit rules and available Greeks. Amounts come from the existing mechanical calculations.
+4. **Resolve focused questions.** Automatic follow-ups are disabled in the production budget profile (`max_followup_rounds=0`); the controller can support at most one round when explicitly configured. Unresolved questions remain in the record. Repeating a claim through another model does not create independent evidence.
 
 The current configuration allows two parallel calls and eight calls per workflow, with no automatic follow-up round. A shared host limit also caps concurrent native calls at two and calls within a rolling hour at 12. Fallbacks consume the same budget; concurrency waits are bounded. These limits control this system's workload, not either provider's account quota or billing.
 
-With `execution_transport = desktop` the host does not start model CLIs: packets are written under `var/agent-runs/desktop/`, and each runtime's desktop session claims, answers and completes them under [tasks/desktop-research.md](tasks/desktop-research.md). Orchestration, frozen evidence, controlled submission and applied receipts stay with the host. The daily loop runs only the technical role; risk receipts are code-rendered and the three-role workflow runs only in the weekly review.
+With `execution_transport = desktop` the host does not start model CLIs: packets are written under `var/agent-runs/desktop/`, and each runtime's desktop session claims, answers and completes them under [tasks/desktop-research.md](tasks/desktop-research.md). Orchestration, frozen evidence, controlled submission and applied receipts stay with the host. The daily loop runs only the technical role; risk receipts are code-rendered and the technical + risk workflow runs only in the weekly review.
 
 ## Reviewed automatic card updates
 
@@ -86,18 +88,19 @@ An uncertain write is reconciled against its prepared before/after hashes. Recov
 
 ## Daily operation
 
-Any scheduler that can run a prompt with a coding agent (a desktop task runner, cron with a CLI agent) can trigger the six trading tasks. The Python controller chooses the domain runtimes independently of that scheduler.
+Any scheduler that can run a prompt with a coding agent (a desktop task runner, cron with a CLI agent) can trigger the six trading tasks and the macro-lens publisher. The Python controller chooses the domain runtimes independently of that scheduler.
 
 | Task | Domain work |
 |---|---|
 | `heartbeat` | Broker/state reconciliation, mechanical risk and exit alerts, health checks and nonblocking missing-card dispatch |
-| `overnight-briefing` | Refresh daily inputs, run the technical role (reused when the close and cards are unchanged) with the code-rendered risk receipt, process the repaint queue and prepare entry plans |
+| `overnight-briefing` | Refresh daily inputs, run the technical role (reused when the close and cards are unchanged) with the code-rendered risk receipt, include the macro-lens lines, process the repaint queue and prepare entry plans |
 | `postclose-transition` | Evaluate exits, apply completed-session transitions, render transition receipts, run technical research with the code-rendered risk receipt and process repaints |
 | `gate-ladder-report` | Wait for the same session's postclose job to settle, then render the mechanical gate ladder |
+| `macro-lens` | 30 minutes after the actual close, without waiting for postclose: refresh cross-asset daily data, publish the code-rendered macro lens (reading, ledger, full text) and push it as its own message; publishes nothing if the session's bars are missing |
 | `chart-read` | Code-rendered list of the two tradable setups (bottom, trend confirmation) that have formed or are forming; no model call |
-| `weekly-portfolio-review` | Portfolio risk review using existing performance, macro and technical evidence, with the NAV change net of external cash flows |
+| `weekly-portfolio-review` | Portfolio risk review using existing performance and technical evidence plus the weekly macro-lens review, with the NAV change net of external cash flows |
 
-The independent `valuation-daily` task ([tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)) refreshes inputs and runs the macro-scenario and valuation chain for its own report under `var/valuation-daily/`. Briefing and weekly review do not run the valuation role.
+The independent `valuation-daily` task ([tasks/claude/valuation-daily.md](tasks/claude/valuation-daily.md); a Codex-runner variant lives in [tasks/codex/valuation-daily.md](tasks/codex/valuation-daily.md)) refreshes inputs and runs the valuation chain — including the unvalidated research-grade 12-month targets — for its own report under `var/valuation-daily/`. Briefing and weekly review do not run the valuation role.
 
 For briefing and postclose, the critical pipeline order is:
 
@@ -154,8 +157,8 @@ The six domains sit directly under `trade/`. [quant/core/paths.py](quant/core/pa
 |---|---|
 | `trade/portfolio/` | Positions, candidates, fills/NAV/cash-flow ledgers, scores, journals and derived observations |
 | `trade/market/` | Prices, financial statements and raw market inputs; refreshable caches and historical snapshots have distinct retention needs |
-| `trade/intelligence/` | News sources, macro snapshots, event plans/results and published reports |
-| `trade/valuation/` | Manual valuation inputs, prediction ledgers and calibration records |
+| `trade/intelligence/` | Optional news sources and report archive, plus macro-lens readings / ledger / full reports |
+| `trade/valuation/` | Manual valuation inputs, compact EPS packages and release records |
 | `trade/strategy/` | Trading rules and method contracts |
 | `trade/knowledge/` | Knowledge materials and frozen, read-only research |
 
@@ -193,7 +196,7 @@ python3 quant/ops/pipeline.py --mode briefing --read-only --json
 
 This renders cached output. It skips synchronization, transitions, notifications, journals, agent calls and the entry stage; it is not a data refresh.
 
-To request a macro, technical and risk review from existing inputs:
+To request a technical and risk review from existing inputs:
 
 ```bash
 python3 quant/ops/agent_jobs.py run --kind weekly --json

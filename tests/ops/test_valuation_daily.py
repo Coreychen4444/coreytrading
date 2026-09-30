@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+import json
 import pytest
 
 from quant.core.io_json import read_json
@@ -10,6 +11,13 @@ from quant.ops import valuation_daily as daily
 from quant.ops.agent_health import acquire_job, release_job
 from quant.ops.agent_snapshots import make_snapshot
 from tests.valuation.test_assessment import data, STAMP
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_lock(tmp_path, monkeypatch):
+    """research_snapshot 取共享 state 锁; 离线测试不许在仓库 var/ 下留锁文件。"""
+    from quant.core import io_json
+    monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
 
 
 @pytest.fixture
@@ -21,7 +29,7 @@ def setup(tmp_path):
     def capture(**kwargs):
         events.append("capture")
         return {"snapshot": frozen, "snapshots": {r: frozen for r in
-                ("macro", "technical", "risk", "valuation")}, "summary": {"scope": "portfolio"}}
+                ("technical", "risk", "valuation")}, "summary": {"scope": "portfolio"}}
 
     def refresh(tickers):
         events.append("refresh")
@@ -32,9 +40,9 @@ def setup(tmp_path):
         events.append(role)
         assert kwargs["review"] is False
         assert kwargs["control_dir"] == tmp_path / "control"
-        assert role in ("macro", "valuation")
+        assert role == "valuation"                       # 没有宏观模型阶段
         return {"role": role, "status": "succeeded", "run_id": role,
-                "result": {"summary": "synthetic", "requests": [], "valuation_scenarios": []}}
+                "result": {"summary": "synthetic", "requests": []}}
 
     return dict(root=tmp_path / "daily", run_dir=tmp_path / "agents",
                 control_dir=tmp_path / "control", now=now,
@@ -46,7 +54,7 @@ def setup(tmp_path):
 def test_independent_daily_sequence_and_archived_receipt(setup):
     kwargs, events = setup
     out = daily.run_daily(**kwargs)
-    assert events == ["refresh", "capture", "macro", "valuation"]
+    assert events == ["refresh", "capture", "valuation"]
     assert out["status"] == "completed"
     assert out["coverage"] == {"total": 1, "computed": 1, "publishable": 0,
                                "company_research": 0, "conditional_operating": 0,
@@ -106,7 +114,7 @@ def test_refresh_error_is_partial_even_if_cached_research_succeeds(setup):
 def test_preview_has_no_writes_refresh_or_models(setup):
     kwargs, events = setup
     out = daily.run_daily(preview=True, **kwargs)
-    assert out["status"] == "preview" and out["macro_research"] == "not_run"
+    assert out["status"] == "preview" and "macro_research" not in out
     assert events == ["capture"]
     assert not kwargs["root"].exists() and not kwargs["control_dir"].exists()
 
@@ -118,7 +126,7 @@ def test_company_pilot_reaches_daily_archive_without_legacy_price(setup):
     now = datetime.fromisoformat(COMPANY_STAMP)
     frozen = make_snapshot({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': packet()}}}, now=now)
     kwargs['now'] = now
-    kwargs['capture_fn'] = lambda **kw: {'snapshot': frozen, 'snapshots': {r: frozen for r in ('macro', 'technical', 'risk', 'valuation')}, 'summary': {}}
+    kwargs['capture_fn'] = lambda **kw: {'snapshot': frozen, 'snapshots': {r: frozen for r in ('technical', 'risk', 'valuation')}, 'summary': {}}
     out = daily.run_daily(**kwargs)
     assert out['status'] == 'completed', out
     assert out['coverage'] == {'total': 1, 'computed': 0, 'publishable': 0,
@@ -154,3 +162,78 @@ def test_invalid_mode_never_runs(monkeypatch):
     monkeypatch.setattr(daily, "run_daily", lambda **k: pytest.fail("unexpected run"))
     with pytest.raises(SystemExit):
         daily.main(["--preview", "--retry"])
+
+
+def test_price_cache_status_distinguishes_current_from_missing_stale_or_future(tmp_path):
+    import json
+    path = tmp_path / "SYN.jsonl"
+    check = lambda: daily.price_cache_status("SYN", expected_session="2026-09-25", cache_dir=tmp_path)
+    assert check()["status"] == "unavailable"
+    for day, value in (("2026-09-24", 20), ("2026-09-28", 20), ("2026-09-25", 0)):
+        path.write_text(json.dumps({"time": day + " 00:00:00", "close": value}) + "\n")
+        assert check()["status"] == "unavailable"
+    path.write_text(json.dumps({"time": "2026-09-25 00:00:00", "close": 20}) + "\n")
+    assert check()["status"] == "current"
+
+
+def test_zero_new_bars_is_healthy_only_with_current_completed_close(monkeypatch):
+    from quant.valuation import fundamentals
+    from quant.data import kline_cache
+    monkeypatch.setattr(fundamentals, "refresh", lambda t: {"refreshed": t, "errors": {}})
+    monkeypatch.setattr(kline_cache, "update_ticker", lambda *a: 0)
+    monkeypatch.setattr(daily, "price_cache_status", lambda ticker, **k: {
+        "status": "current" if ticker == "CURRENT" else "unavailable", "cached_session": None})
+    out = daily.refresh_inputs(["CURRENT", "STALE"])
+    assert out["prices"] == {"CURRENT": 0, "STALE": 0}
+    assert "prices:CURRENT" not in out["errors"]
+    assert "prices:STALE" in out["errors"]
+
+
+def test_exact_company_release_is_archived_separately_from_diagnostic_hold(setup):
+    from tests.valuation.test_company_model import packet, STAMP as COMPANY_STAMP
+    from tests.valuation.test_releases import fixture, select
+    kwargs, _ = setup
+    now = datetime.fromisoformat(COMPANY_STAMP)
+    frozen = make_snapshot({'selected_tickers': ['SYN'], 'valuation': {'company_models': {'SYN': packet()}}}, now=now)
+    kwargs['now'] = now
+    kwargs['capture_fn'] = lambda **kw: {'snapshot': frozen, 'snapshots': {
+        r: frozen for r in ('technical', 'risk', 'valuation')}, 'summary': {}}
+    accepted = select(*fixture())
+    calls = []
+    def read_release(ticker, kind, **kw):
+        calls.append((ticker, kind, kw['expected_input_hash']))
+        return accepted if kind == 'fair_value' else {
+            'status': 'withheld', 'ticker': ticker, 'kind': kind, 'reason': 'no_release'}
+    out = daily.run_daily(**kwargs, release_fn=read_release)
+    assert out['released_counts'] == {'fair_value': 1, 'market_target_12m': 0}
+    assert all(h == read_json(out['receipt'])['tickers']['SYN']['company_research']['input_hash'] for _, _, h in calls)
+    assert out['publication']['status'] == 'withheld'  # Raw DCF hold stays separate.
+    assert read_json(out['publication_receipt'])['SYN']['fair_value']['release_id'] == 'one'
+    text = Path(out['report']).read_text()
+    assert '条件公允价值区间 $10.00–$30.00' in text
+    assert '12个月市场预测区间' not in text
+
+
+def test_research_forward_ledger_follows_explicit_root(setup):
+    kwargs, _ = setup
+    out = daily.run_daily(**kwargs)
+    ledger = kwargs["root"] / "valuation_forward.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [r["ticker"] for r in rows] == ["SYN"] and rows[0]["run_id"] == out["run_id"]
+    assert out["research_counts"]["total"] == 1
+
+
+def test_research_snapshot_rolls_eps_models_and_preview_does_not_write(tmp_path):
+    from quant.valuation import eps_model
+    from tests.valuation.test_eps_model import model
+    path = tmp_path / "eps_models.json"
+    eps_model.save({"SYN": model()}, path)
+    first_end = model()["quarters"][0]["end"]
+    frozen = {"snapshot": {"data": {"valuation": {"fundamentals": {
+        "SYN": {"quarters": [{"period_end": first_end, "revenue": 120.0}]}}}}}}
+    receipt = {"as_of": "2026-10-01T00:00:00+00:00", "tickers": {}}
+    _, text = daily.research_snapshot(receipt, frozen, eps_models_path=path, write=False)
+    assert "SYN" in text and eps_model.load(path)["SYN"]["quarters"][0]["id"] == "Q0", "preview 不写盘"
+    result, _ = daily.research_snapshot(receipt, frozen, eps_models_path=path)
+    assert result["eps_model_rolls"]["SYN"][0]["quarter"] == "Q0"
+    assert eps_model.load(path)["SYN"]["quarters"][0]["id"] == "Q1"

@@ -240,6 +240,8 @@ def test_latest_iv_skips_zero_rows(tmp_path, monkeypatch):
 )
     monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path)
     monkeypatch.setattr(entry_guard.iv_logger, "IV_HISTORY_DIR", tmp_path)
+    # HV20 分位代理读实时 K 线 (可能放行): 钉成无数据, 本测只验零行跳过 + 绝对值兜底
+    monkeypatch.setattr(entry_guard.book, "hv20_percentile_of", lambda ticker: None)
     row = entry_guard.latest_iv("MRVL")
     assert row["date"] == "2026-07-17"
     assert "93.2" in entry_guard.iv_gate_line("MRVL")
@@ -252,6 +254,7 @@ def test_latest_iv_all_invalid_reads_none(tmp_path, monkeypatch):
     p.write_text('{"date": "2026-07-20", "atm_iv_pct": 0.0}\n')
     monkeypatch.setattr(entry_guard, "IV_HISTORY_DIR", tmp_path)
     monkeypatch.setattr(entry_guard.iv_logger, "IV_HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(entry_guard.book, "hv20_percentile_of", lambda ticker: None)
     assert entry_guard.latest_iv("X") is None
     assert "未入库" in entry_guard.iv_gate_line("X")
     assert not entry_guard.option_iv_gate("X")["allowed"]      # 无数据 = 不放行

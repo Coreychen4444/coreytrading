@@ -44,14 +44,17 @@ def repaint_bound(queue_len: int) -> int:
 # Daily loop: only the technical role runs a model each
 # trading day; risk is rendered from the frozen mechanical receipts by
 # quant/report/risk_receipt (no model), and the macro prior is read by the
-# briefing straight from macro/current.json. The full three-role workflow
-# (macro + technical + risk models) remains the weekly job.
+# briefing straight from macro/current.json (code-rendered by core/macro_lens;
+# the macro model role is retired). The technical + risk workflow remains the
+# weekly job.
 # Chart is not a model job. Its deliverable
 # is quant/report/chart_read.py, which is itself the implementation of the
 # chart-read core purpose (structure / pattern hypotheses / opportunities, all
 # code). The model only produced an optional [FYI] prose supplement that was
 # already forbidden from adding any number the mechanical read had not printed.
 # chart remains a scheduled kind for `due` (market_sessions offset 35m).
+# macro (offset 30m) is due-only too: the macro-lens task is
+# quant/journal/macro_lens_log.py, zero model calls, no postclose barrier.
 WORKFLOW_KINDS = ("weekly",)
 
 TASKS = {
@@ -254,8 +257,6 @@ def run_job(kind: str, *, apply=False, routes=None, run_dir=None, control_dir=No
                                        "unknowns": (r.get("result") or {}).get("unknowns", [])}
                                 for role, r in workflow["reports"].items()},
                        total_calls=workflow["total_calls"])
-            if "macro_research" in workflow:
-                job["macro_research"] = workflow["macro_research"]
         else:
             reports = {}
             view = capture["snapshots"]["technical"]
@@ -319,7 +320,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
     due = sub.add_parser("due")
-    due.add_argument("--kind", required=True, choices=("heartbeat", "briefing", "postclose", "ladder", "chart", "weekly"))
+    due.add_argument("--kind", required=True, choices=("heartbeat", "briefing", "postclose", "ladder", "macro", "chart", "weekly"))
     run = sub.add_parser("run")
     run.add_argument("--kind", required=True, choices=(*TASKS, "heartbeat"))
     run.add_argument("--apply", action="store_true")

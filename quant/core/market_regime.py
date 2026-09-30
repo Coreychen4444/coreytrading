@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Sequence
 
 from . import dow
@@ -156,6 +157,7 @@ def state(bars: List[dict], horizons: Sequence[int] = (5, 20)) -> Dict:
     states = [x["state"] for x in tl]
     return {
         "date": cur["date"], "close": _close(bars[-1]),
+        "prev_close": _close(bars[-2]) if len(bars) >= 2 else None,
         "state": cur["state"], "state_cn": STATE_CN[cur["state"]],
         "er": cur["er"], "pctl": cur["pctl"], "band": cur["band"],
         "band_cn": BAND_CN.get(cur["band"] or "", "样本不足"),
@@ -167,6 +169,16 @@ def state(bars: List[dict], horizons: Sequence[int] = (5, 20)) -> Dict:
     }
 
 
+_LEVEL_RE = re.compile(r"((?:跌破|站上|收复|收上|收破) )(\d+(?:\.\d+)?)")
+
+
+def with_distance(line: str, close: Optional[float]) -> str:
+    """道氏线后缀「距收盘 ±x%」（dow.describe 不带距离，归渲染层）：线价 ÷ 收盘 − 1。"""
+    if not close:
+        return line
+    return _LEVEL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}（{float(m.group(2)) / close - 1:+.1%}）", line)
+
+
 def describe(card: Dict) -> List[str]:
     """机械白话：一行状态 + 转移条件 + 历史频率（频率不是概率）。"""
     if card.get("state") in (None, UNKNOWN) and not card.get("dow"):
@@ -176,7 +188,7 @@ def describe(card: Dict) -> List[str]:
     head = (f"{card['state_cn']} · ER20 {er:.2f}（自身 252 日分位 {p:.0%} = {card['band_cn']}）"
             if er is not None and p is not None else f"{card['state_cn']} · ER20 样本不足")
     L = [head, f"道氏：{card['dow']['stage_cn']}"]
-    L += [f"  {x}" for x in card["dow"]["lines"]]
+    L += [f"  {with_distance(x, card.get('close'))}" for x in card["dow"]["lines"]]
     th = card.get("er_thresholds")
     if th and th.get("range_below") is not None:
         L.append(f"档位线：ER20 ≥ {th['trend_at']:.2f} = 单边档；< {th['range_below']:.2f} = 震荡档")

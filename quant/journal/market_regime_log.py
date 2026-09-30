@@ -131,14 +131,15 @@ def digest(asof: Optional[str] = None) -> str:
     day = next((c["date"] for c in cs if not c.get("error")), asof or "")
     L = [f"## [FYI] 大盘状态 {day} · 判读层，零授权效力",
          "> 状态 = ER20（|20 日净位移| ÷ 20 日路径）在自身 252 日分位的档（<1/3 震荡 / ≥2/3 单边）× 短期道氏（推进 / 观察期）。"
-         "「预测」= 条件线 + 历史频率（频率不是概率）。2010–2026 回测：状态分不出两种模式的好坏（H1 不成立），只作环境判读，不排序、不授权。",
+         "线价后括号 = 距收盘 %。「预测」= 条件线 + 历史频率（频率不是概率）。2010–2026 回测：状态分不出两种模式的好坏（H1 不成立），只作环境判读，不排序、不授权。",
          ""]
     for c in cs:
         if c.get("error"):
             L.append(f"⚠️ {c['bench']} {c['error']}")
             continue
         lines = MR.describe(c)
-        L.append(f"**{c['bench']}** {lines[0]}")
+        chg = (f"（当日 {c['close'] / c['prev_close'] - 1:+.1%}）" if c.get("prev_close") else "")
+        L.append(f"**{c['bench']}** 收 {c['close']:.2f}{chg} · {lines[0]}")
         L.extend(f"- {x.strip()}" for x in lines[1:])
         L.append("")
     cal = calibration()

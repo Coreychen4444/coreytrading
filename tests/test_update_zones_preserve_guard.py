@@ -48,7 +48,6 @@ def upz(monkeypatch, tmp_path):
     from quant.core import io_json
     monkeypatch.setattr(io_json, "STATE_LOCK_PATH", tmp_path / ".state.lock")
     monkeypatch.setattr(mod, "KLINE_CACHE_DIR", tmp_path / "klines")
-    monkeypatch.setattr(mod, "VALUATION_INPUTS_PATH", tmp_path / "inputs.json")
     return mod, wl
 
 

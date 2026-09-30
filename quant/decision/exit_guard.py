@@ -220,7 +220,11 @@ def g01_crossings(lots: Dict, mark: Optional[float], crossed: Dict[str, List[str
             qty = coerce_float(lot.get("qty")) or 0
             if not cost or cost <= 0 or qty <= 0:
                 continue
-            key = f"{tier}|{lot.get('entry_date') or lot.get('entry_period_human') or '?'}|{cost}"
+            # entry_period = lot_reconcile 自动落账的时间字段 (期权 lot 同样自动落);
+            # 旧手写 lot 的 entry_date / entry_period_human 优先, 已有 crossed 键不变。
+            entry = (lot.get("entry_date") or lot.get("entry_period_human")
+                     or lot.get("entry_period") or "?")
+            key = f"{tier}|{entry}|{cost}"
             done = crossed.setdefault(key, [])
             for gain, trim_pct in p["g01_levels"]:
                 tag = f"+{int(gain * 100)}%"

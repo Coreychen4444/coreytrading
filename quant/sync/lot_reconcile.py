@@ -24,9 +24,10 @@
     · tier 恒 position —— base 是结构豁免层 (holdings.UNMANAGED_ROLES), 它的
       归属由结构授予, 不由成交产生。unmanaged 卡整张跳过。
     · 部分卖出 (lots 5 股 vs broker 3 股, 或进行中 episode 里已有 exit) 要决定
-      **哪个 lot 被卖掉**—— 判断不是对账, 归人工, 与 close_reconcile 划同一条界。
-    · 期权跳过 —— lot 要 Greeks 入场快照 (options_journal), stop 还要判
-      underlying / option_price 基准, 都是判断。
+      **哪个 lot 被卖掉** —— 判断不是对账, 归人工, 与 close_reconcile 划同一条界。
+    · 期权同样自动落: stop 基准住期权卡 `zones.stop_level_basis`, 正股区位住成交章
+      `underlying_at_fill` / `zone_at_fill` / `price_flags`。lot 只抄事实; 卡上没标 stop
+      基准就不写 stop (不猜)。Greeks 入场快照成交流里没有, 写明「未采」而不是补。
     · 数量对不上 (未入账 BUF 合计 ≠ 缺口) 一律不写, 只报 —— **这里不猜**。
 
 安全网: 降级出来的这些"不动手"的情况会经 portfolio_brief.lot_drift() 变成
@@ -175,21 +176,39 @@ def _zone_logic(price: float, agent: dict, fills: List[dict]) -> str:
     return "; ".join([head] + bits)
 
 
-def _build_lot(fills: List[dict], agent: dict, order_id: str) -> dict:
+def _option_zone_logic(premium: float, fills: List[dict]) -> str:
+    """期权 lot 的区位 = 成交章里的正股读数 (期权卡 zones 是正股价位, 不拿权利金去比)。"""
+    u = next((f.get("underlying_at_fill") for f in fills
+              if isinstance(f.get("underlying_at_fill"), dict)), None)
+    tag = next((str(f.get("zone_at_fill")) for f in fills if f.get("zone_at_fill")), None)
+    flags = sorted({x for f in fills for x in (f.get("price_flags") or [])})
+    head = f"期权权利金 {premium:g}"
+    if u and u.get("price") is not None:
+        head += f"; 成交时正股≈{float(u['price']):g} ({u.get('basis', '60m')} bar {u.get('bar_time', '?')})"
+    head += (f" 落在 {FILL_TAG_LABELS.get(tag, tag)} (成交时标注 zone_at_fill)" if tag
+             else " — 本笔无成交时正股区位标注")
+    if flags:
+        head += f"; 成交章 {'+'.join(flags)}"
+    return head
+
+
+def _build_lot(fills: List[dict], agent: dict, order_id: str, ticker: str = "") -> dict:
     """一个 order_id → 一条 lot (同 order 的多笔部分成交按数量加权合并)。
 
     计划字段只从卡片**派生**, 不发明: stop_loss ← zones.stop_level,
     target_exit ← trim_zone。catalyst 这类要判断的字段一律不写 —— 空着比编强。
+    期权: qty = 张, avg_cost = 权利金; stop 连同卡上的基准一起抄 (没基准不写)。
     """
     qty = sum(float(f.get("qty") or 0) for f in fills)
     cost = sum(float(f.get("qty") or 0) * float(f.get("price") or 0) for f in fills)
     price = cost / qty if qty else 0.0
     zones = agent.get("zones") or {}
+    option = is_option_ticker(ticker)
     lot: Dict[str, Any] = {
         "qty": int(qty) if float(qty).is_integer() else round(qty, 6),
         "avg_cost": round(price, 6),
         "entry_period": _entry_period(fills[0].get("timestamp")),
-        "zone_logic": _zone_logic(price, agent, fills),
+        "zone_logic": _option_zone_logic(price, fills) if option else _zone_logic(price, agent, fills),
         "order_id": order_id,
         "reconciled_by": RECONCILER,
         # 只陈述"这条 lot 是机器落的"这个事实 + 常设规则。**不写"计划内成交"**——
@@ -198,7 +217,14 @@ def _build_lot(fills: List[dict], agent: dict, order_id: str) -> dict:
                   f"规则外成交另需 annotate_event 注解 + 评分"),
     }
     stop = coerce_float(zones.get("stop_level"))
-    if stop is not None:
+    basis = zones.get("stop_level_basis")
+    if option:
+        lot["notes"] += "; 期权: Greeks 入场快照未采 (成交流无 Greeks)"
+        if stop is not None and basis:
+            lot["stop_loss"], lot["stop_basis"] = stop, basis
+        elif stop is not None:
+            lot["notes"] += f"; 卡 stop {stop:g} 未标基准 (underlying / option_price), lot 不抄"
+    elif stop is not None:
         lot["stop_loss"] = stop
     # 抄底 (reversal_probe,): 授权住计划不住卡, stop = 止跌低 (auth.support), 与卡 stop 无关;
     # lot 带 entry_class 让 brief 能核「持仓卡有没有盖 entry_class + 止损 = 止跌低」(INFRA:bottom_card_unstamped)
@@ -211,7 +237,7 @@ def _build_lot(fills: List[dict], agent: dict, order_id: str) -> dict:
             lot["notes"] += f"; 抄底 止损 = 止跌低 {sup:g} ×1 (信号 {auth.get('signal_date')})"
     trim = zones.get("trim_zone")
     if isinstance(trim, list) and len(trim) == 2:
-        lot["target_exit"] = f"trim {trim[0]:g}-{trim[1]:g}"
+        lot["target_exit"] = f"trim {trim[0]:g}-{trim[1]:g}" + (" (正股)" if option else "")
     return lot
 
 
@@ -232,10 +258,6 @@ def plan(doc: dict, episodes: Dict[str, List[dict]] | None = None) -> List[dict]
             continue                     # 已对齐 —— 绝大多数轮次走这里
         if not is_managed(body):
             out.append(_skip(ticker, "结构豁免层 (instrument.role) — lot 归属由结构授予, 不由成交产生"))
-            continue
-        if is_option_ticker(ticker):
-            out.append(_skip(ticker, f"期权卡缺口 {gap:+g} — lot 要 Greeks 入场快照 + "
-                                     "stop 基准判断 (underlying/option_price), 归人工"))
             continue
         if gap < 0:
             out.append(_blocked(ticker, f"lots 比 broker 多 {abs(gap):g} 股 = 卖出未落账 —— "
@@ -292,12 +314,13 @@ def plan(doc: dict, episodes: Dict[str, List[dict]] | None = None) -> List[dict]
             continue
 
         agent = body.get("agent") or {}
-        lots = [_build_lot(fs, agent, oid)
+        lots = [_build_lot(fs, agent, oid, ticker)
                 for oid, fs in sorted(pending.items(),
                                       key=lambda kv: str(kv[1][0].get("timestamp") or ""))]
         out.append({"ticker": ticker, "action": "add_lots", "gap": gap,
                     "qty_added": pending_qty,
-                    "cost_added": round(sum(l["qty"] * l["avg_cost"] for l in lots), 2),
+                    "cost_added": round(sum(l["qty"] * l["avg_cost"] for l in lots)
+                                        * contract_multiplier(ticker), 2),
                     "order_ids": [l["order_id"] for l in lots], "lots": lots})
     return out
 
@@ -364,7 +387,8 @@ def render(res: dict) -> str:
     if added:
         lines.append(f"lot_reconcile: {verb} {len(added)} 张卡")
     for it in added:
-        lines.append(f"  {it['ticker']}: +{it['qty_added']:g} 股 / ${it['cost_added']:,.2f} "
+        unit = "张" if is_option_ticker(it["ticker"]) else "股"
+        lines.append(f"  {it['ticker']}: +{it['qty_added']:g} {unit} / ${it['cost_added']:,.2f} "
                      f"({len(it['lots'])} 笔)")
         for lot in it["lots"]:
             lines.append(f"    · {lot['qty']:g} @ {lot['avg_cost']:g}  {lot['entry_period']}"

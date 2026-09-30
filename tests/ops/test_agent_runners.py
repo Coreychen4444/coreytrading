@@ -137,7 +137,7 @@ def test_optional_controls_require_cli_support_only_when_requested(
     assert not any(call[1] for call in fake_cli)
 
 
-@pytest.mark.parametrize("role", ["macro", "technical", "risk", "valuation"])
+@pytest.mark.parametrize("role", ["technical", "risk", "valuation"])
 def test_claude_schema_projects_only_wire_constraints_and_keeps_authority(role):
     from quant.core.agent_contracts import result_schema
 
@@ -167,16 +167,17 @@ def test_claude_schema_rejects_unknown_keywords_without_dropping_named_propertie
 
 
 def test_claude_projection_preserves_shared_evidence_definition_and_bindings():
-    from quant.ops.agent_runtime import execution_schema
-    from quant.ops.agent_snapshots import make_snapshot
-
-    source = execution_schema("macro", make_snapshot({"synthetic": True}, evidence_refs=["source-1"]))
+    source = {"type": "object",
+              "$defs": {"evidence_ref": {"type": "string", "enum": ["source-1"]}},
+              "properties": {"chain": {"type": "object", "properties": {
+                  "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/evidence_ref"},
+                                    "minItems": 0, "maxItems": 100}},
+                  "required": ["evidence_refs"], "additionalProperties": False}},
+              "required": ["chain"], "additionalProperties": False}
     before = json.dumps(source, sort_keys=True)
     wire = ar._claude_schema(source)
     assert wire["$defs"] == {"evidence_ref": {"type": "string", "enum": ["source-1"]}}
-    chain = wire["properties"]["macro_diagnosis"]["properties"]["causal_hypotheses"]["items"]["properties"]
-    assert chain["upstream"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
-    assert chain["feedback"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
+    assert wire["properties"]["chain"]["properties"]["evidence_refs"]["items"] == {"$ref": "#/$defs/evidence_ref"}
     assert json.dumps(source, sort_keys=True) == before
 
 
@@ -184,9 +185,7 @@ def test_claude_projection_preserves_shared_evidence_definition_and_bindings():
                                         ("unknowns", ["synthetic"] * 101)])
 def test_projected_claude_output_still_fails_the_full_host_contract(
         field, value, monkeypatch, fake_cli, tmp_path):
-    from quant.core.agent_contracts import CONTRACT_VERSION
-    from quant.core.macro_analysis import MACRO_RESULT_SCHEMA_VERSION
-    from tests.core.test_macro_analysis import macro_fields
+    from quant.core.agent_contracts import CONTRACT_VERSION, result_schema
     from quant.ops import agent_runtime as runtime
     from quant.ops.agent_snapshots import make_snapshot
 
@@ -203,9 +202,9 @@ def test_projected_claude_output_still_fails_the_full_host_contract(
         wire = json.loads(argv[argv.index("--json-schema") + 1])
         assert '"maxLength": 12000' in wire["properties"]["summary"]["description"]
         snapshot = packet["snapshot"]
-        payload = {"schema_version": MACRO_RESULT_SCHEMA_VERSION, "contract_version": CONTRACT_VERSION,
-                   **macro_fields(),
-                   "valuation_scenarios": [], "role": "macro", "snapshot_id": snapshot["snapshot_id"],
+        payload = {"schema_version": result_schema("valuation")["properties"]["schema_version"]["const"],
+                   "contract_version": CONTRACT_VERSION,
+                   "role": "valuation", "snapshot_id": snapshot["snapshot_id"],
                    "input_hash": snapshot["input_hash"], "generated_at": snapshot["as_of"],
                    "expires_at": snapshot["expires_at"], "summary": "synthetic",
                    "observations": [], "hypotheses": [], "risks": [], "unknowns": [],
@@ -216,8 +215,8 @@ def test_projected_claude_output_still_fails_the_full_host_contract(
 
     monkeypatch.setattr(ar, "_capture", invalid_output)
     routes = runtime.load_routes()
-    routes["roles"]["macro"].update(provider="claude", fallback=[])
-    result = runtime.run_role("macro", "synthetic only", make_snapshot({"synthetic": 123}),
+    routes["roles"]["valuation"].update(provider="claude", fallback=[])
+    result = runtime.run_role("valuation", "synthetic only", make_snapshot({"synthetic": 123}),
                               routes=routes, run_dir=tmp_path, control_dir=tmp_path / "control", runner=ar.run)
     assert result["status"] == "failed" and result["result"] is None
     assert result["attempts"][0]["status"] == "invalid_result"
