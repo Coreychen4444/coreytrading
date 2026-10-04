@@ -62,6 +62,7 @@
                market_regime（大盘状态卡：ER20 自身分位档 × 短期道氏 → 单边上行/单边下行/震荡/转换中 + 转移线 + 历史频率；判读层零授权）
                reversal（抄底入场类判别式：信号 / 止跌低 / 域 / 有效期；授权归 entry_guard）· setups（两种模式判读：抄底 = 空头衰竭的价格行为 / 趋势确认 = gate 接近度；零授权）
                future_gates（卡片阶梯顶之上的远端 gate 候选：pivot 簇上沿 + 窗口最高价，与 bottom_evidence 同一把尺；零授权；两个消费者读同一个 `for_card`：price_reminder_sync 的 `gate:+N` 线 / gate_ladder_report 的远端行）
+               vacuum（关键位之间的真空带：近 250 根成交分布里 ≤25%×POC 的连续稀薄带、宽 ≥1N，现价上 / 下最近一条 + 近端边线被拒 / 承接次数 + 带内簇；窗口与宽度门槛全是既有常量别名，稀薄判据 = `technical.find_lvn` 同一条；`dense()` 筹码密集区 = 同一份分布的峰，±1N 内最大、半高宽、相邻区以谷底分开、不与真空重叠；`chip_decay` 换手衰减 = CYQ 口径（按股数、成交量 ÷ 流通股，系数 1），流通股由 report 层从 fundamentals 缓存传入；零授权、未回测；消费者 gate_ladder_report 的 🧱 / 🌫 行，日报只播日换手）
                key_levels（⭐箱顶 = 近 20 根最高价所在的簇 × 近 60 根被从下方测 ≥2 次、⭐突破 ×2 收盘（只站上一根 = ⭐突破中）、箱体位置判读；同一把簇尺，窗口全是既有常量别名；零授权；消费者 price_reminder_sync 的 ⭐ 线）
                market_sessions（XNYS 交易日历：休市 / 半日 / DST 的唯一时段真源）· quote_times · nav（NAV × 外部现金流，纯函数）
                macro_lens（宏观透镜：六盏风险灯 / 近 40 日最强驱动与读法 / 市场在交易什么 / 未来方向与情景 β / 单日归因；判读层零授权）

@@ -95,7 +95,7 @@ def candidates(bars: List[dict], above: float, n: int) -> List[Dict]:
 
 def _rejections(bars: List[dict], level: float, near: float) -> int:
     """最高价够到 `level − near` 但收盘没站上 `level` 的根数 (level_interactions 同判据)。"""
-    return sum(1 for r in bars if r["close"] <= level and r["high"] >= level - near)
+    return len(technical.rejections_at(bars, level, near))
 
 
 def evidence_tag(c: Dict) -> str:

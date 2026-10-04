@@ -328,3 +328,37 @@ def test_averaging_down_follows_the_campaign_through_sells_and_exits():
     opt = [_ev("2025-06-20T10:00:00-04:00", 1, 12.0, ticker="SYNA270319C050000")]     # 期权按合约 (权利金)
     assert averaging_down(opt, "SYNA270319C050000", "2025-06-27T09:36:00-04:00", 8.0)["avg_cost"] == 12.0
     assert averaging_down(opt, "SYNA270319C055000", "2025-06-27T09:36:00-04:00", 8.0) is None
+
+
+# ── 基金票 (ETF): 交易, 但没有公司财报语义 ──────────────────
+from quant.core.holdings import (  # noqa: E402
+    fund_tickers, has_fundamentals, is_traded, stamp_security_type)
+
+
+def test_fund_card_is_traded_but_has_no_fundamentals():
+    """两条轴正交: 参考票 = 不做; 基金票 = 做, 只是没有财报 / 三张表 / EPS。"""
+    etf = {"instrument": {"type": "stock", "security_type": "ETF"}}
+    assert is_traded(etf) and not has_fundamentals(etf)
+    assert has_fundamentals({"instrument": {"type": "stock"}})          # 存量正股卡不带章
+    assert has_fundamentals({}) and has_fundamentals(None)             # 半张卡不炸
+    spy = {"instrument": {"type": "stock", "role": "volume_reference"}}
+    assert not is_traded(spy) and has_fundamentals(spy)                # 参考票另一条轴
+
+
+def test_stamp_security_type_only_marks_funds_and_is_idempotent():
+    card = {"instrument": {"type": "stock", "role": "x"}}
+    assert stamp_security_type(card, "STOCK") is False and "security_type" not in card["instrument"]
+    assert stamp_security_type(card, "etf") is True
+    assert card["instrument"] == {"type": "stock", "role": "x", "security_type": "ETF"}   # type 不动
+    assert stamp_security_type(card, "ETF") is False                   # 第二轮零 diff
+    assert stamp_security_type({}, None) is False
+
+
+def test_fund_tickers_lookup_is_by_underlying_name_across_both_buckets():
+    """期权卡 body 不带基金章 —— 消费端按标的名字查表, 不查期权卡。"""
+    pos = {"tickers": {"ETFX270617C560000": {"instrument": {"type": "option"}},
+                       "ETFY": {"instrument": {"type": "stock", "security_type": "ETF"}}}}
+    wl = {"tickers": {"ETFX": {"instrument": {"type": "stock", "security_type": "ETF"}},
+                      "NVDA": {"instrument": {"type": "stock"}}}}
+    assert fund_tickers(pos, wl) == {"ETFY", "ETFX"}
+    assert fund_tickers({}, None) == set()

@@ -58,7 +58,7 @@ import copy
 import json
 from typing import Dict, List, Optional, Tuple
 
-from quant.core.holdings import held_bare  # noqa: E402  「谁算持仓」单一真源 (裸 ticker 分支)
+from quant.core.holdings import held_bare, stamp_security_type  # noqa: E402  「谁算持仓」单一真源 (裸 ticker 分支) / 基金章
 from quant.core.io_json import atomic_write_json, read_json, state_lock  # noqa: E402
 from quant.core.occ import is_option_ticker, strip_us_prefix  # noqa: E402
 from quant.core.timeutil import now_utc_iso  # noqa: E402
@@ -410,6 +410,11 @@ def sync(group: str = DEFAULT_GROUP) -> dict:
         else:
             card["moomoo_listed"] = True
             card["moomoo_synced_at"] = ts
+    # 基金章 (ETF 作为交易标的): 券商报的证券类型是机器事实, 每轮对账式补盖
+    # —— 不靠建卡的人记得标。carried_card 换信封会把 instrument 重置, 这里幂等补回来。
+    stype = {strip_us_prefix(str(r.get("code") or "")): r.get("stock_type") for r in rows}
+    fund_stamped = sorted(tk for tk in moomoo_tks
+                          if tk in wl["tickers"] and stamp_security_type(wl["tickers"][tk], stype.get(tk)))
     moomoo_set = set(moomoo_tks)
     drift_system_only = []
     for tk, card in wl["tickers"].items():
@@ -430,6 +435,7 @@ def sync(group: str = DEFAULT_GROUP) -> dict:
         "group": group,
         "moomoo": sorted(moomoo_tks),
         "added_stubs": added,
+        "fund_stamped": fund_stamped,
         "carried_from_closed": sorted(carried),
         "carry_errors": carry_errors,
         "drift_system_only": sorted(drift_system_only),
@@ -463,6 +469,9 @@ def main(argv: List[str]) -> int:
         print(f"moomoo[{out['group']}]: {', '.join(out['moomoo']) or '(空)'}")
         if out["added_stubs"]:
             print(f"新增 stub 卡: {', '.join(out['added_stubs'])} → 跑 /trading-analysis 建卡")
+        if out["fund_stamped"]:
+            print(f"基金票 (ETF) 盖章: {', '.join(out['fund_stamped'])}"
+                  " (照常交易; 财报日历 / 公司画像 / 估值跳过)")
         if out["carried_from_closed"]:
             print(f"平仓卡分析原样搬回候选: {', '.join(out['carried_from_closed'])}"
                   " (zones/gate/thesis 逐字保留, 待过期或 staleness 触发重画)")

@@ -248,6 +248,15 @@ def test_target_cards_selection():
     assert all(tk not in ("AAOI", "OLD") for _, tk in got)
 
 
+def test_target_cards_skips_funds():
+    """基金票 (ETF) 没有三张表: 报表接口返回空表 → 每轮一行取数错。"""
+    etf = {"type": "stock", "security_type": "ETF"}
+    pos = {"tickers": {"ETFY": {"status": "active", "instrument": etf},
+                       "NBIS": {"status": "active", "instrument": {"type": "stock"}}}}
+    wl = {"tickers": {"ETFX": {"status": "watching", "instrument": etf}, "MU": {"status": "watching"}}}
+    assert cps.target_cards(pos, wl) == [("positions", "NBIS"), ("watchlist", "MU")]
+
+
 # ── sync_profiles: 降级与选择性 ────────────────────────────────
 
 def _fake_fetch_ok(code, statement_type, num):

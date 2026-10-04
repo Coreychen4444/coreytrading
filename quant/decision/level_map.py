@@ -64,45 +64,9 @@ EDGE_WEIGHT = technical.EDGE_WEIGHT
 top_hvn = technical.top_hvn
 
 
-def find_lvn(profile: list[dict], bucket: float, poc_frac: float = 0.25) -> list[dict]:
-    """信号2b: LVN 低量带(纯函数)。网格铺满 [first_lo, last_hi]; profile 里缺席的桶
-    = **完全真空(void)**, 存在但 turnover ≤ poc_frac×POC = 稀薄。相邻合并成带,
-    **掐掉触到两端的边缘带**(range 尽头天然低量, 是边界不是穿越真空)。
-
-    ⚠️ void 的含义在 2026-08-06 变强了: profile 改成按 bar 区间铺开之后, 一个桶缺席
-    意味着**没有任何一根 bar 的 [low, high] 覆盖过它**—— 价格从未到过那里。
-    旧口径下它只意味着"没有 bar 的 typical price 落进来", 而 TP 只是一根 bar 的
-    代表价、不是成交发生的地方, 于是一根 13% 振幅的日线能让它两边的真实成交价位
-    集体显示 0.0% (AAOI 60 日里 30/63 个桶如此)。"""
-    if not profile or bucket <= 0:
-        return []
-    poc = max(b["turnover"] for b in profile)
-    if poc <= 0:
-        return []
-    by_lo = {round(b["lo"], 4): b for b in profile}
-    first_lo = profile[0]["lo"]
-    n = int(round((profile[-1]["lo"] - first_lo) / bucket))
-    if n + 1 < 5:                       # 网格太窄, 无"内部"可言
-        return []
-    bands: list[dict] = []
-    for i in range(n + 1):
-        lo = round(first_lo + i * bucket, 4)
-        b = by_lo.get(lo)
-        if b is not None and b["turnover"] > poc * poc_frac:
-            continue                     # 非 LVN 桶
-        cell = {"lo": lo, "hi": round(lo + bucket, 4),
-                "share_pct": round(b["share_pct"], 1) if b else 0.0,
-                "void": b is None}
-        if bands and abs(cell["lo"] - bands[-1]["hi"]) < 1e-6:
-            last = bands[-1]
-            last["hi"] = cell["hi"]
-            last["share_pct"] = round(last["share_pct"] + cell["share_pct"], 1)
-            last["void"] = last["void"] and cell["void"]
-        else:
-            bands.append(cell)
-    lo_edge, hi_edge = first_lo, round(first_lo + n * bucket + bucket, 4)
-    return [b for b in bands
-            if b["lo"] > lo_edge + 1e-6 and b["hi"] < hi_edge - 1e-6]
+# 信号2b LVN 低量带: 纯函数住 core/technical (core/vacuum 要同一份「稀薄」判据,
+# core 不能向上 import decision) —— 同名转出, 缺省参数下行为不变
+find_lvn = technical.find_lvn
 
 
 # 纯函数住 core/technical (下沉: core/bottom_evidence 的锚收敛要同一份簇/HVN 口径,

@@ -91,6 +91,43 @@ UNMANAGED_ROLES = frozenset({"commemorative_hold"})
 REFERENCE_ROLES = frozenset({"volume_reference"})
 
 
+#: 基金票 (ETF / ETN) —— **交易, 但没有公司财报语义**。价格结构与正股无异, zones / gate /
+#: entry_guard / 退出栈全套照走; 只是没有财报日 / 三张表 / EPS。与 `is_traded` 正交:
+#: 参考票 = 不做; 基金票 = 做, 只在「按公司取数」的三个消费端跳过 (财报日历 / 公司画像 /
+#: 估值范围)。不跳 = 每轮各留一行没人能修的取数错 (基金票上财报接口直接拒
+#: "This API only supports equities" / 报表接口空表 / 估值日更「不出数」)。
+#: 判据 = `instrument.security_type`, 由 `watchlist_sync` 按 moomoo 分组行的 stock_type 盖
+#: (机器事实, 不靠人记)。`instrument.type` 仍是 "stock": 受控重画 / 冻结证据 / 写卡脚本都按
+#: type=="stock" 认正股类卡, 改 type = 焊死写路径。
+FUND_SECURITY_TYPES = frozenset({"ETF"})
+
+
+def has_fundamentals(body: dict) -> bool:
+    """这张卡背后是不是一家**有财报的公司** (判据 instrument.security_type)。"""
+    st = ((body or {}).get("instrument") or {}).get("security_type")
+    return str(st or "").upper() not in FUND_SECURITY_TYPES
+
+
+def stamp_security_type(body: dict, stock_type) -> bool:
+    """按券商报的证券类型给卡盖基金章; 非基金类型不盖 (存量正股卡零 diff)。→ 是否改了卡。"""
+    st = str(stock_type or "").upper()
+    if st not in FUND_SECURITY_TYPES:
+        return False
+    inst = body.setdefault("instrument", {})
+    if inst.get("security_type") == st:
+        return False
+    inst["security_type"] = st
+    return True
+
+
+def fund_tickers(positions_doc: dict, watchlist_doc: dict) -> set[str]:
+    """两桶里盖了基金章的裸 ticker。期权卡自己不带章 (它只有 underlying 的名字) ——
+    按标的名取数的消费端查这张表, 不查期权卡 body。"""
+    return {t for doc in (positions_doc, watchlist_doc)
+            for t, body in ((doc or {}).get("tickers") or {}).items()
+            if isinstance(body, dict) and not has_fundamentals(body)}
+
+
 def is_reference_role(role) -> bool:
     """Return whether a flattened instrument role is reference-only."""
     return role in REFERENCE_ROLES

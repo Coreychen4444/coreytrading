@@ -561,7 +561,7 @@ def test_stale_preview_is_flagged_and_a_same_priced_far_gate_folds_into_its_row(
              "next_regime": {"name": "R_next", "entry_gate": {"level": 104.0, "days": 2},
                              "next_gate_preview": {"level": 110.4, "days": 2, "stale": True}}}
     block = glr.render_ticker("XX", agent, FAR_BARS)
-    at = [ln for ln in block if "110.4" in ln]
+    at = [ln for ln in block if "110.4" in ln and ln.startswith("|")]   # 只数阶梯表的行 (🌫 行的带内簇另说)
     assert len(at) == 1                                              # 一个价位一行
     assert "stale" in at[0] and f"{glr.FAR_MARK} 远端 +2 簇×2H" in at[0]
     assert not at[0].lstrip("| ").startswith(glr.FAR_MARK)           # 行主体仍是卡片行
@@ -570,3 +570,138 @@ def test_stale_preview_is_flagged_and_a_same_priced_far_gate_folds_into_its_row(
     # 未 stale 的 preview 行不带任何后缀
     clean = [ln for ln in glr.render_ticker("XX", FAR_AGENT, FAR_BARS) if "| ▫️ 106 " in ln]
     assert clean and "stale" not in clean[0] and glr.FAR_MARK not in clean[0]
+
+
+# ── 🌫 真空带行 (两个关键位之间的真空交易区, 只做展示零授权) ──────
+
+def _shelf_bars(end_at_top: bool):
+    """100 横 80 根 → 5 根走完 100→130 → 130 横 80 根 → (可选) 走回 100 横 20 根
+    (tests/core/test_vacuum 同款: 中间那段只被快速走过 = 稀薄)。"""
+    import datetime as dt
+    out = []
+
+    def add(lo, hi, c):
+        t = (dt.date(2025, 1, 1) + dt.timedelta(days=len(out))).isoformat()
+        out.append({"time": f"{t} 00:00:00", "open": c, "high": hi, "low": lo, "close": c,
+                    "volume": 1000, "turnover": c * 1000})
+
+    for _ in range(80):
+        add(99, 101, 100)
+    for k in range(5):
+        add(100 + 6 * k, 106 + 6 * k, 105 + 6 * k)
+    for _ in range(80):
+        add(129, 131, 130)
+    if not end_at_top:
+        for k in range(5):
+            add(124 - 6 * k, 130 - 6 * k, 125 - 6 * k)
+        for _ in range(20):
+            add(99, 101, 100)
+    return out
+
+
+VAC_AGENT = {"zones": {"valid_until": "2099-01-01"},
+             "next_regime": {"name": "R_next", "entry_gate": {"level": 104.0, "days": 2}}}
+
+
+def test_vacuum_line_reports_the_nearest_band_each_side_as_facts():
+    from quant.core import vacuum
+    bars = _shelf_bars(end_at_top=False)
+    line = glr.vacuum_line(bars)
+    up = vacuum.scan(bars)["up"]
+    assert line.startswith(glr.VACUUM_MARK) and line.count("｜") == 1
+    seg_up, seg_dn = line[len(glr.VACUUM_MARK):].split("｜")
+    assert seg_dn.strip() == "↓无"                                    # 下方没有带 = 说出口, 不是省略
+    assert f"↑{up['lo']:g}–{up['hi']:g}" in seg_up                     # 同一个 scan, 渲染不另算
+    assert f"距{up['dist_pct']:+.1f}%" in seg_up and f"宽{up['width_n']:g}N" in seg_up
+    assert f"量{up['share_pct']:g}%" in seg_up and f"拒{up['tests']}·" in seg_up
+    # 现价在上方平台 → 同一条带翻到下方, 近端边线的词从「拒」换成「承」
+    flipped = glr.vacuum_line(_shelf_bars(end_at_top=True))
+    assert "↑无" in flipped and "↓" in flipped and "承" in flipped and "拒" not in flipped
+
+
+def test_vacuum_line_sits_after_the_ladder_table_and_never_touches_gate_rows():
+    bars = _shelf_bars(end_at_top=False)
+    block = glr.render_ticker("XX", VAC_AGENT, bars)
+    vac = [i for i, ln in enumerate(block) if ln.startswith(glr.VACUUM_MARK)]
+    table = [i for i, ln in enumerate(block) if ln.startswith("|")]
+    assert len(vac) == 1 and vac[0] > max(table)                      # 表后恰好一行
+    assert not any(glr.VACUUM_MARK in block[i] for i in table)        # 不进任何一行 gate 的备注 / 确认列
+
+
+def test_no_vacuum_line_for_option_cards_or_short_history():
+    bars = _shelf_bars(end_at_top=False)
+    # 期权卡: K 线是权利金序列, 「成交分布」不是标的的价位
+    assert glr.VACUUM_MARK not in "\n".join(glr.render_ticker("XX270319C360000", VAC_AGENT, bars))
+    # 历史不足: 不出行, 不编数
+    assert glr.vacuum_line(bars[:40]) is None
+    assert glr.VACUUM_MARK not in "\n".join(glr.render_ticker("XX", AGENT, _bars([150] * 25)))
+
+
+def test_header_legend_carries_the_reading_caveat(tmp_path):
+    """真空 ≠ 无阻力、未回测、零授权 —— 这三句必须跟着 🌫 一起出, 不许只剩「量少」。"""
+    wl = tmp_path / "watchlist.json"
+    wl.write_text(json.dumps({"tickers": {}}))
+    pos = tmp_path / "positions.json"
+    pos.write_text(json.dumps({"tickers": {}}))
+    head = glr.build_report(wl_path=wl, kdir=tmp_path, market_dir=tmp_path, pos_path=pos)
+    legend = [ln for ln in head.splitlines() if glr.VACUUM_MARK in ln or "真空 ≠ 无阻力" in ln]
+    assert len(legend) == 2
+    assert "真空 ≠ 无阻力" in legend[1] and "未回测" in legend[1] and "零授权" in legend[1]
+    assert "不因它放宽" in legend[1]
+
+
+def test_dense_line_marks_the_shelves_as_resistance_and_support():
+    from quant.core import vacuum
+    bars = _shelf_bars(end_at_top=False)
+    line = glr.dense_line(bars)
+    r = vacuum.dense(bars)
+    assert line.startswith(glr.DENSE_MARK)
+    segs = [x.strip() for x in line[len(glr.DENSE_MARK):].split("｜")][1:]   # [0] = 换手行首
+    assert segs[0].startswith("带内 ") and f"峰{r['inside']['peak']:g}" in segs[0]
+    assert segs[1].startswith(f"↑{r['up']['lo']:g}–") and f"峰{r['up']['peak']:g}" in segs[1]
+    assert f"距{r['up']['dist_pct']:+.1f}%" in segs[1]
+    assert segs[2] == "↓无"
+    flipped = glr.dense_line(_shelf_bars(end_at_top=True))
+    assert "↑无" in flipped and "↓" in flipped and "承" in flipped
+
+
+def test_dense_line_sits_right_before_the_vacuum_line_and_not_for_options():
+    bars = _shelf_bars(end_at_top=False)
+    block = glr.render_ticker("XX", VAC_AGENT, bars)
+    d = [i for i, ln in enumerate(block) if ln.startswith(glr.DENSE_MARK)]
+    v = [i for i, ln in enumerate(block) if ln.startswith(glr.VACUUM_MARK)]
+    assert len(d) == 1 and v == [d[0] + 1]
+    assert glr.DENSE_MARK not in "\n".join(glr.render_ticker("XX270319C360000", VAC_AGENT, bars))
+    assert glr.dense_line(bars[:40]) is None
+
+
+def test_dense_legend_says_it_is_not_stronger_than_the_card_gates(tmp_path):
+    wl = tmp_path / "watchlist.json"
+    wl.write_text(json.dumps({"tickers": {}}))
+    pos = tmp_path / "positions.json"
+    pos.write_text(json.dumps({"tickers": {}}))
+    head = glr.build_report(wl_path=wl, kdir=tmp_path, market_dir=tmp_path, pos_path=pos)
+    legend = [ln for ln in head.splitlines() if ln.startswith(glr.DENSE_MARK)]
+    assert len(legend) == 1 and "不更强" in legend[0] and "hvn_gate" in legend[0]
+    ruling = [ln for ln in head.splitlines() if "chip_decay" in ln]
+    assert len(ruling) == 1 and "无区分力" in ruling[0] and "只作描述" in ruling[0]
+    assert "CYQ" not in head and "半衰期" not in head
+
+
+def test_dense_line_shows_turnover_only():
+    """衰减占比与半衰期不进日报, 行首只留日换手 (缺流通股说出口)。"""
+    from quant.core import vacuum
+    bars = _shelf_bars(end_at_top=False)
+    assert glr.dense_line(bars).startswith(f"{glr.DENSE_MARK} 日换手 —（缺流通股） ｜")
+    line = glr.dense_line(bars, float_shares=10_000)
+    r = vacuum.dense(bars, float_shares=10_000)
+    assert line.startswith(f"{glr.DENSE_MARK} 日换手{r['chips']['turnover_pct']:g}% ｜")
+    assert "衰减" not in line and "半衰期" not in line
+
+
+def test_float_shares_come_from_the_fundamentals_snapshot(tmp_path):
+    (tmp_path / "XX.json").write_text(json.dumps({"snapshot": {"outstanding_shares": 4.6e9}}))
+    (tmp_path / "BAD.json").write_text("{not json")
+    assert glr.float_shares_of("XX", tmp_path) == 4.6e9
+    assert glr.float_shares_of("BAD", tmp_path) is None
+    assert glr.float_shares_of("NONE", tmp_path) is None

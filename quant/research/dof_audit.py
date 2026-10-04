@@ -87,6 +87,8 @@ NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统�
     "sync/price_reminder_sync:SERVER_SET_WINDOW_S",
     "core/future_gates:_MIN_BARS",                   # 簇判别的最少历史 = 数据充分性守卫, 不是阈值
     "core/key_levels:_MIN_BARS",                     # 同上 (与 future_gates 同值同义)
+    "core/vacuum:_MIN_BARS",                         # 同上 (真空带)
+    "report/gate_ladder_report:VACUUM_INNER_MAX",    # 🌫 行里带内簇列几个 = 显示条数
     "decision/level_map:PROFILE_SESSIONS_PER_DAY",  # 一天几根 60m bar = 事实
     "report/portfolio_brief:TOP_MOVERS_COUNT",   # 显示条数
     "sync/trade_history_sync:fetch_history(days=)",
@@ -155,6 +157,8 @@ CLASSIFY: dict[str, str] = {
     # ── 定义 / 口径约定（不是选择） ──
     "core/technical:VALUE_AREA_FRAC": "definition",    # 70% 拍卖理论
     "core/technical:EDGE_WEIGHT": "unbacked",          # 0.05 三角权重下限, 无出处
+    "core/vacuum:DENSE_HALF": "definition",            # 0.5 = 半高宽 FWHM (筹码密集区宽度)
+    "core/technical:LVN_POC_FRAC": "unbacked",         # 0.25×POC = 稀薄桶; 立项口径, 无回测 (原 level_map.find_lvn 缺省, 下沉 core 具名)
     "core/earnings:EVENT_MULT": "ruled",               # 0.7 earnings_window 路 A
     "decision/level_map:TRAIL_ATR_MULT": "convention",     # = exit_guard, pin 钉
     "decision/level_map:TRAIL_PARABOLIC_PCT": "convention",

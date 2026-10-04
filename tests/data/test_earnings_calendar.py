@@ -196,3 +196,23 @@ def test_no_prior_file_is_not_a_crash():
                                "pub_type": 2}}}
     ec.merge_last_print(out, None, TODAY, ["LITE"])
     assert out["tickers"]["LITE"]["last_print"]["reaction_day"] == TODAY
+
+
+def test_card_tickers_skips_funds_including_via_their_option_legs(tmp_path, monkeypatch):
+    """基金票 (ETF) 照常交易但没有财报日: 接口直接拒 ("only supports equities")。
+    章在 underlying 那张卡上 —— 持有基金 call 时期权卡 body 不带章, 按标的名字也要剔掉。"""
+    import json
+    pos = tmp_path / "p.json"
+    wl = tmp_path / "w.json"
+    pos.write_text(json.dumps({"tickers": {
+        "ETFX270617C560000": {"broker": {"qty": 1}},
+        "NVDA270319C220000": {"broker": {"qty": 1}},
+    }}))
+    wl.write_text(json.dumps({"tickers": {
+        "ETFX": {"broker": None, "status": "watching",
+                "instrument": {"type": "stock", "security_type": "ETF"}},
+        "MU": {"broker": None, "status": "watching"},
+    }}))
+    monkeypatch.setattr(ec, "POSITIONS_PATH", pos)
+    monkeypatch.setattr(ec, "WATCHLIST_PATH", wl)
+    assert ec.card_tickers() == ["MU", "NVDA"]

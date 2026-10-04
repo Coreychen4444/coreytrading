@@ -394,3 +394,25 @@ def test_add_to_group_uses_add_op(monkeypatch):
     ws.add_to_group("Watchlist", ["US.AAOI"])
 
     assert recorded == [("Watchlist", ModifyUserSecurityOp.ADD, ["US.AAOI"])]
+
+
+def test_etf_in_group_is_a_traded_stub_stamped_as_fund(env):
+    """ETF 作为交易标的进 Watchlist 组 = 照常建 stub (type 仍 stock, 写卡 /
+    受控重画路径只认它), 另盖 security_type —— 财报日历 / 公司画像 / 估值据此跳过。"""
+    _, wl, _ = env([_row("US.ETFX", "ETF"), _row("US.NVDA")], {}, held_tickers=[])
+    out = ws.sync("Watchlist")
+    cards = json.loads(wl.read_text())["tickers"]
+    assert out["added_stubs"] == ["ETFX", "NVDA"] and out["fund_stamped"] == ["ETFX"]
+    assert cards["ETFX"]["instrument"] == {"type": "stock", "security_type": "ETF"}
+    assert cards["ETFX"]["agent"]["action"]["intent"] == "needs_card"
+    assert cards["NVDA"]["instrument"] == {"type": "stock"}            # 正股卡零 diff
+    assert ws.sync("Watchlist")["fund_stamped"] == []                  # 幂等
+
+
+def test_fund_stamp_is_restored_on_a_card_carried_back_from_a_close(env):
+    """carried_card 换信封会把 instrument 重置成 {type: stock} —— 章由每轮对账补回。"""
+    pos = {"ETFX": closed_card("2026-10-20T15:00:00-04:00", agent=analysis_agent())}
+    _, wl, _ = env([_row("US.ETFX", "ETF")], {}, held_tickers=[], positions=pos)
+    out = ws.sync("Watchlist")
+    assert out["carried_from_closed"] == ["ETFX"] and out["fund_stamped"] == ["ETFX"]
+    assert json.loads(wl.read_text())["tickers"]["ETFX"]["instrument"]["security_type"] == "ETF"

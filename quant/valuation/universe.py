@@ -11,11 +11,16 @@
 """
 from __future__ import annotations
 
-from quant.core.holdings import coverage_universe
+from quant.core.holdings import coverage_universe, fund_tickers
 from quant.sync import state_io
 
 
 def coverage_tickers() -> list[str]:
-    """持仓 (期权映射回正股, 纪念仓/参考票不进) ∪ 候选 (status=watching 且 moomoo_listed≠false), 排序。"""
-    return coverage_universe(state_io.read_positions(allow_missing=True),
-                             state_io.read_watchlist(allow_missing=True))
+    """持仓 (期权映射回正股, 纪念仓/参考票不进) ∪ 候选 (status=watching 且 moomoo_listed≠false), 排序。
+
+    基金票 (ETF, `holdings.has_fundamentals`) 不进: 没有 EPS 可估, 留着 = 日更每天一行「不出数」。
+    只在估值这一层剔 —— `coverage_universe` 本身照常含它 (技术面 / 情报照做)。"""
+    pos = state_io.read_positions(allow_missing=True)
+    wl = state_io.read_watchlist(allow_missing=True)
+    funds = fund_tickers(pos, wl)
+    return [t for t in coverage_universe(pos, wl) if t not in funds]

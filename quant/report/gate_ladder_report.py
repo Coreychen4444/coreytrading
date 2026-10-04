@@ -43,13 +43,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 import json
 from typing import List, Optional, Tuple
 
-from quant.core import future_gates, technical  # noqa: E402  future_gates = 远端 gate 候选, 与 moomoo 画线同一份
+from quant.core import future_gates, technical, vacuum  # noqa: E402  future_gates = 远端 gate 候选, 与 moomoo 画线同一份; vacuum = 🌫 真空带
 from quant.core.episodes import (# noqa: E402  gate 结构身份: 与回测同一份判别式
     DELTA_ATR, MIN_BARS, breakdown_in_window, episodes_of, gate_path, merge_bars_by_date)
 from quant.core.holdings import is_managed, is_traded, live_tickers  # noqa: E402
 from quant.core.num import coerce_float  # noqa: E402
+from quant.core.occ import is_option_ticker  # noqa: E402  期权卡的 K 线是权利金, 不量真空带
 from quant.core.paths import (# noqa: E402
-    KLINE_CACHE_DIR, KLINE_DEEP_DIR, MARKET_DIR, POSITIONS_PATH, WATCHLIST_PATH)
+    FUNDAMENTALS_DIR, KLINE_CACHE_DIR, KLINE_DEEP_DIR, MARKET_DIR, POSITIONS_PATH, WATCHLIST_PATH)
 from quant.core.sizing import constraint_lines, read_constraints  # noqa: E402  🔒 canonical, 不另造
 from quant.core.structure import (  # noqa: E402
     trading_days_after, unresolved_demotions)
@@ -386,10 +387,125 @@ def far_fold(g: dict, far: List[dict]) -> Tuple[str, Optional[float]]:
     return out, hit
 
 
+VACUUM_MARK = "🌫"
+VACUUM_INNER_MAX = 3     # 带内簇最多列几个 (由近及远); 只是一行放得下多少, 不进任何判据
+_EDGE_CN = {"window_high": "窗高", "window_low": "窗低"}
+
+
+def _vacuum_range(b: dict) -> str:
+    lo, hi = f"{b['lo']:g}", f"{b['hi']:g}"
+    if b.get("edge") == "window_low":
+        lo += _EDGE_CN["window_low"]
+    if b.get("edge") == "window_high":
+        hi += _EDGE_CN["window_high"]
+    return f"{lo}–{hi}"
+
+
+def _vacuum_seg(b: dict) -> str:
+    """一条真空带的短语: 范围 距离 宽 量 近端边线被测次数·最近日期 带内簇 (全是事实, 无形容词)。"""
+    side = b["side"]
+    if side == "inside":
+        parts = [_vacuum_range(b) + f"（上沿{b['up_pct']:+.1f}% / 下沿{b['down_pct']:+.1f}%）"]
+    else:
+        parts = [_vacuum_range(b), f"距{b['dist_pct']:+.1f}%"]
+    parts.append(f"宽{b['width_n']:g}N")
+    parts.append(f"量{b['share_pct']:g}%≈{b['days_eq']:.0f}日")
+    if b.get("tests"):
+        word = "拒" if side == "above" else "承"
+        parts.append(f"{word}{b['tests']}·{(b.get('last_test') or '')[5:]}")
+    inner = b.get("inner") or []
+    if inner:
+        # 由近及远: 上方的带从下沿往上数, 下方的带从上沿往下数
+        near = sorted(inner, key=lambda c: c["level"], reverse=(side == "below"))
+        parts.append("簇" + "/".join(f"{c['level']:g}" for c in near[:VACUUM_INNER_MAX])
+                     + ("…" if len(near) > VACUUM_INNER_MAX else ""))
+    return " ".join(parts)
+
+
+def vacuum_line(bars: List[dict]) -> Optional[str]:
+    """🌫 真空带行 (两个关键位之间的真空交易区, 上下行都标, 只做展示零授权):
+    现价上 / 下最近的一条稀薄成交带 (`core.vacuum.scan`), 现价在带内另起一段。
+
+    只播事实: 成交占比、近端边线被拒 / 承接次数、带内簇 —— **真空 ≠ 无阻力**, 三个一起读。
+    不进确认列、不计数、不改任何一行 gate 的状态; 数据不足 → None (不出行, 不编数)。"""
+    r = vacuum.scan(bars)
+    if r is None:
+        return None
+    segs = []
+    if r["inside"]:
+        segs.append("带内 " + _vacuum_seg(r["inside"]))
+    segs.append("↑" + (_vacuum_seg(r["up"]) if r["up"] else "无"))
+    segs.append("↓" + (_vacuum_seg(r["down"]) if r["down"] else "无"))
+    return f"{VACUUM_MARK} " + " ｜ ".join(segs)
+
+
+DENSE_MARK = "🧱"
+
+
+def _dense_seg(z: dict) -> str:
+    """一个筹码密集区的短语: 范围 峰 距离 量 近端边线被测次数·最近日期 (全是事实, 无形容词)。"""
+    side = z["side"]
+    parts = [_vacuum_range(z), f"峰{z['peak']:g}"]
+    if side == "inside":
+        parts[-1] += f"（上沿{z['up_pct']:+.1f}% / 下沿{z['down_pct']:+.1f}%）"
+    else:
+        parts.append(f"距{z['dist_pct']:+.1f}%")
+    parts.append(f"量{z['share_pct']:g}%≈{z['days_eq']:.0f}日")
+    if z.get("tests"):
+        word = "拒" if side == "above" else "承"
+        parts.append(f"{word}{z['tests']}·{(z.get('last_test') or '')[5:]}")
+    return " ".join(parts)
+
+
+def _chips_head(chips: Optional[dict]) -> str:
+    """🧱 行首: 窗口日均换手 (成交量 ÷ 流通股, 事实; 缺流通股 = 说出口, 不省略)。
+
+    只播这一个数: 换手衰减占比与半衰期未被证明比等权更能区分入口被打回, 不进日报。"""
+    if not chips:
+        return "日换手 —（缺流通股）"
+    return f"日换手{chips['turnover_pct']:g}%"
+
+
+def float_shares_of(tk: str, fdir: Path = FUNDAMENTALS_DIR) -> Optional[float]:
+    """流通股 = 估值层 fundamentals 缓存的 OpenD 快照 `outstanding_shares` (不联网; 缺 / 坏 → None)。"""
+    try:
+        snap = json.loads((Path(fdir) / f"{tk}.json").read_text()).get("snapshot") or {}
+    except (OSError, ValueError):
+        return None
+    return coerce_float(snap.get("outstanding_shares"))
+
+
+def dense_line(bars: List[dict], float_shares: Optional[float] = None) -> Optional[str]:
+    """🧱 筹码密集区行 (标注关键阻力与支撑区域):
+    现价所在的区 + 上 / 下最近的一个 (`core.vacuum.dense`, 与 🌫 同一份 250 根分布); 更远的只报个数。
+
+    上方的区 = 套牢库存 (阻力区), 下方的区 = 持有者成本 (支撑区) —— 和卡上 gate 同一量级的证据,
+    不是更可靠的那个 (hvn_gate: 拒绝权与 pivot 簇无差)。不进确认列、不计数;
+    数据不足 → None。
+    换手衰减 (上方旧筹码可能早已换手) 不进本行: 衰减占比不比等权更能区分入口被打回, 占比本身
+    也只作描述 —— 行首只留日换手这个事实。"""
+    r = vacuum.dense(bars, float_shares=float_shares)
+    if r is None:
+        return None
+    zones = r["zones"]
+    segs = [_chips_head(r.get("chips"))]
+    if r["inside"]:
+        segs.append("带内 " + _dense_seg(r["inside"]))
+    for key, arrow, word in (("up", "↑", "之上"), ("down", "↓", "之下")):
+        z = r[key]
+        if not z:
+            segs.append(arrow + "无")
+            continue
+        more = sum(1 for x in zones if x["side"] == z["side"] and x is not z)
+        segs.append(arrow + _dense_seg(z) + (f"（{word}另 {more} 区）" if more else ""))
+    return f"{DENSE_MARK} " + " ｜ ".join(segs)
+
+
 def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
                   deep: Optional[List[dict]] = None,
                   deep_note: Optional[str] = None,
-                  overdue: Optional[dict] = None) -> List[str]:
+                  overdue: Optional[dict] = None,
+                  float_shares: Optional[float] = None) -> List[str]:
     """一票一块 (4b 表格式, 富消息通道原生渲染):
       第 0 行 = **票 价 涨跌 量比** · 🧭结构 · 📍位置 · 🛑stop   (粗体头 + 行内标签)
       ⬇ 断层 / ⚠️ 线名降级 各占一行
@@ -525,6 +641,12 @@ def render_ticker(tk: str, agent: dict, bars: List[dict], held: bool = False,
     if rows:
         L.extend(LADDER_TABLE_HEADER)
         L.extend(rows)
+    # 🧱 筹码密集区 + 🌫 真空带: 表后各一行 (同一份 250 根分布的两端)。
+    # 期权卡的 K 线是权利金序列, 「成交分布」不是标的的价位 —— 不出。
+    if not is_option_ticker(tk):
+        for ln in (dense_line(bars, float_shares=float_shares), vacuum_line(bars)):
+            if ln:
+                L.append(ln)
 
     # 🔒 约束播报 = sizing.constraint_lines (canonical)。窗口态以本报表的快照日
     # (最后完成 bar) 为准, 与"截至 X 收盘"同框 —— 手搓渲染丢 from 的病  修。
@@ -550,7 +672,8 @@ def skhy_premium_line(market_dir: Path = MARKET_DIR) -> Optional[str]:
 
 
 def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
-                 market_dir: Path = MARKET_DIR, pos_path: Path = POSITIONS_PATH) -> str:
+                 market_dir: Path = MARKET_DIR, pos_path: Path = POSITIONS_PATH,
+                 fdir: Path = FUNDAMENTALS_DIR) -> str:
     wl = json.loads(Path(wl_path).read_text())["tickers"]
     # Reference instruments do not get ticker blocks; their readings are in the sector header.
     active = {tk: c for tk, c in wl.items()
@@ -587,7 +710,8 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
             dbars, dnote = deep_bars(tk, kdir)
             block = render_ticker(tk, agent, bars, held=held_flag,
                                   deep=dbars, deep_note=dnote,
-                                  overdue=overdue.get(tk) if held_flag else None)
+                                  overdue=overdue.get(tk) if held_flag else None,
+                                  float_shares=float_shares_of(tk, fdir))
             if tk == "SKHY":
                 pl = skhy_premium_line(market_dir)
                 if pl:
@@ -601,6 +725,16 @@ def build_report(wl_path: Path = WATCHLIST_PATH, kdir: Path = KLINE_CACHE_DIR,
     head = (f"📐 Gate 阶梯收盘报 — 截至 {asof} 收盘 (完成 bar)\n"
             f"{FAR_MARK}=远端地标 (阶梯顶之上的 pivot 簇上沿 / 窗高, = moomoo 的 gate:+N 线; "
             f"机械、零授权、不计数)\n"
+            f"{DENSE_MARK}=筹码密集区 (同一份 {vacuum.WINDOW} 根成交分布里的峰: 峰 = ±{vacuum.MIN_WIDTH_ATR:g}N 内成交最多的桶, "
+            f"区 = 半高宽、相邻区以谷底分开; 带内 = 现价所在, ↑↓ = 上 / 下最近一个): 上方 = 套牢库存 (阻力区), "
+            f"下方 = 持有者成本 (支撑区); 拒 / 承同下。挡价能力与卡上 pivot 簇 gate 同一量级, 不更强 (hvn_gate)\n"
+            f"  **占比对入口被打回无区分力, 只作描述**: chip_decay 预注册判定 "
+            f"等权占比 AUC ≈ 0.50, 换手衰减不比等权更能区分 (已撤); 日换手 = 窗口日均成交量 ÷ 流通股\n"
+            f"{VACUUM_MARK}=真空带 (近 {vacuum.WINDOW} 根成交分布里 ≤{technical.LVN_POC_FRAC:.0%}×POC 的连续稀薄带, "
+            f"宽 ≥{vacuum.MIN_WIDTH_ATR:g}N; ↑↓ = 现价上 / 下最近一条): 量 = 带内占窗口成交额≈几个日均量; "
+            f"拒 / 承 = 近端边线被拒 / 承接次数·最近日期; 簇 = 带内 pivot 簇上沿。\n"
+            f"  **真空 ≠ 无阻力** (量看得见库存, 看不见卖方); 「真空里走得更快」未回测 —— 只作判读, "
+            f"零授权, stop / 棘轮 / 趋势线不因它放宽\n"
             f"✅=站稳成立 ⏳=计数中 ▫️=未触及 | 量比⚡=绝对≥{VOL_GATE} 今日 tape 读数 (**不是**量腿); "
             f"量腿 = streak 内任一日 RelVR ≥{RECLAIM_VOL_RATIO_MIN}\n"
             f"距离双单位 %(N): 同一个 % 在不同票上差好几倍, N 才可比\n"

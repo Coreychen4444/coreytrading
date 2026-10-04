@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 直接 `python3 
 import argparse
 import json
 
+from quant.core.holdings import has_fundamentals  # noqa: E402  (基金票判据单一真源)
 from quant.core.io_json import state_lock  # noqa: E402
 from quant.core.occ import is_option_ticker  # noqa: E402
 from quant.core.timeutil import now_utc_iso, et_today  # noqa: E402
@@ -226,14 +227,16 @@ def target_cards(pos_doc: dict, wl_doc: dict) -> list[tuple[str, str]]:
     """(bucket, ticker) 清单: positions active 正股 + watchlist watching 正股。
 
     期权卡跳过 (underlying 承载); 结构豁免层**不跳过**——豁免的是 task 输出,
-    不是数据, 雷达的个股检索覆盖它们。"""
+    不是数据, 雷达的个股检索覆盖它们。基金票 (ETF) 跳过: 没有三张表, 报表接口
+    返回空表, 留着 = 每轮一行「无离散季度资产负债表」。"""
     out: list[tuple[str, str]] = []
     for tk, card in (pos_doc.get("tickers") or {}).items():
-        if is_option_ticker(tk) or card.get("status") != "active":
+        if is_option_ticker(tk) or card.get("status") != "active" or not has_fundamentals(card):
             continue
         out.append(("positions", tk))
     for tk, card in (wl_doc.get("tickers") or {}).items():
-        if is_option_ticker(tk) or str(card.get("status")) != "watching":
+        if (is_option_ticker(tk) or str(card.get("status")) != "watching"
+                or not has_fundamentals(card)):
             continue
         out.append(("watchlist", tk))
     return out

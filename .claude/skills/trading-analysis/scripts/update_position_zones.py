@@ -53,8 +53,9 @@ KNOWN_ROLES = {
     "core_thesis_via_leaps_call",
     "core_thesis_via_long_dated_call",
     "conditional_entry_short_put",
-    # 量能/板块参考票 (SPY/QQQ/SMH/SOXX, 用户): 只供 kline/量比/板块读数,
+    # 量能/板块参考票 (宽基 / 板块指数 ETF 的观察用途): 只供 kline/量比/板块读数,
     # 不交易不评估 — entry_guard 与 gate_ladder_report 按此 role 跳过评估。
+    # 作为交易标的的 ETF 不带本 role (基金票判据另见 holdings.has_fundamentals)。
     # ⚠️  教训: normalize_role 白名单静默过滤 = 第一次标注没写进去还不报错。
     "volume_reference",
 }

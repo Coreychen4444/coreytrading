@@ -7,7 +7,7 @@
 - 外部动作（订单、消息、发布、任务注册、commit / push）需要与之相称的授权；canonical pipeline 只准备状态、告警与计划，永不下单、改单、撤单。
 - 不假设 operator 的叙述准确：价格、时点、催化剂、券商状态一律对数据核实，错了直说。
 - 不臆造私有事实：账户数值、持仓、授权、风险上限未知就是未知，用 `null`、空集合、警告或待复核项表达，不用 0 冒充。
-- 交易范围：美股与现有美股期权流程；没有预测市场子系统。跨资产宏观观测只作 sensor_only，不是额外的交易市场。
+- 交易范围：美股（含美国上市的板块 ETF：基金票判据 `holdings.has_fundamentals`，照常交易但无财报 / 估值语义）与现有美股期权流程；没有预测市场子系统。跨资产宏观观测只作 sensor_only，不是额外的交易市场。
 
 ## 隐私与公开仓边界
 - 公开仓只含可复用代码、schema、合成示例与文档。`.env`、密钥、token、账户标识、券商导出、真实持仓 / 候选 / 成交 / NAV / 账本 / 市场缓存 / 私人研究卡一律不入库。
@@ -58,7 +58,7 @@
 | heartbeat | `17 0,6,12,18 * * 1-6` | 持仓巡逻 `pipeline --mode heartbeat`，退出栈 / 异动告警原文推送 |
 | overnight-briefing | `30 18 * * 1-5` | 盘前简报 + 开盘操作手册 + 当日挂单清单（`--mode briefing`），技术研究回执 + 代码渲染风控收据，宏观先验读发布快照 |
 | postclose-transition | `10 1,2,4,5 * * 2-6` | 多槽唤醒，日历定位实际收盘后 10 min：brief→regime→agents 受控重画（每轮 `repaint_bound`）→入场计划（`option_plans` 按同一收盘重锚）→提醒线 / 白名单→转移达标收据与简报 |
-| gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled（等待预算 = 上游 lease，不私设秒数）后推 gate 阶梯表原文 |
+| gate-ladder-report | `20 1,2,4,5 * * 2-6` | 实际收盘后 20 min，等同 session postclose settled（等待预算 = 上游 lease，不私设秒数）后推 gate 阶梯表原文；每张正股卡表后 🧱 筹码密集区 + 🌫 真空带各一行（同一份 250 根成交分布的峰与稀薄带，`quant/core/vacuum.py`；描述性、零授权，不放宽退出栈） |
 | macro-lens | `30 1,2,4,5 * * 2-6` | 实际收盘后 30 min（跨资产日线里最晚收定的一条 = 收盘 +30）：`quant/journal/macro_lens_log.py --update --session` 刷新跨资产日线 → 宏观透镜读数 → current / 账本 / 全文，单独推送一条；不等 postclose，当日日线没取到 = 不发布（退出码 3）；零模型、零授权 |
 | chart-read | `35 1,2,4,5 * * 2-6` | 实际收盘后 35 min：首段大盘状态卡（SPY / QQQ / SMH 震荡·单边·转换中 + 转移线，`quant/journal/market_regime_log.py`，只作整体参考，不进排序与授权）+ 两种模式清单（🔁 抄底 = 次日未新低 / 长下影，止损 = 止跌低，附 [FYI] 底部确认概率 / 🚀 趋势确认 gate 接近度；已形成·即将形成）原文推送，未形成不列；尾段 🧭 箱体位置（全书按 ⭐已破·单边 / ⭐突破中 / 箱顶下 / 中段 / 底部分组，`quant/core/key_levels.py`；描述性标注，样本外未复现 edge，不进排序与授权）（判别式 `quant/core/setups.py`；零授权、零模型调用） |
 | weekly-portfolio-review | `3 10 * * 6` | 周复盘（技术 / 风控两角色唯一时点 + 宏观透镜周回顾 `--week` + Agent 层周基线；估值归独立任务） |

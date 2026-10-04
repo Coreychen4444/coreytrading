@@ -13,3 +13,13 @@ def test_coverage_tickers_reads_state_and_drops_tombstones(monkeypatch):
     monkeypatch.setattr(state_io, "read_positions", lambda **k: pos)
     monkeypatch.setattr(state_io, "read_watchlist", lambda **k: wl)
     assert U.coverage_tickers() == ["MU", "NBIS", "NVDA", "PLTR"]
+
+
+def test_coverage_tickers_drops_funds_even_when_held_through_an_option(monkeypatch):
+    """基金票 (ETF) 没有 EPS 可估 —— 留着 = 日更每天一行「不出数」。"""
+    pos = {"tickers": {"ETFX270617C560000": {"broker": {"qty": 1}}, "NBIS": {"broker": {"qty": 20}}}}
+    wl = {"tickers": {"ETFX": {"status": "watching", "instrument": {"type": "stock", "security_type": "ETF"}},
+                      "MU": {"status": "watching"}}}
+    monkeypatch.setattr(state_io, "read_positions", lambda **k: pos)
+    monkeypatch.setattr(state_io, "read_watchlist", lambda **k: wl)
+    assert U.coverage_tickers() == ["MU", "NBIS"]

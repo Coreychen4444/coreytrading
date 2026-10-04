@@ -491,6 +491,72 @@ def top_hvn(profile: list[dict], n: int = 5) -> list[dict]:
     return sorted(bands, key=lambda x: -x["turnover"])
 
 
+LVN_POC_FRAC = 0.25         # 稀薄桶 = 成交额 ≤ 25%×POC (立项口径, level_map 缺省同值)
+
+
+def find_lvn(profile: list[dict], bucket: float, poc_frac: float = LVN_POC_FRAC,
+             keep_edges: bool = False) -> list[dict]:
+    """信号2b: LVN 低量带(纯函数)。网格铺满 [first_lo, last_hi]; profile 里缺席的桶
+    = **完全真空(void)**, 存在但 turnover ≤ poc_frac×POC = 稀薄。相邻合并成带,
+    **掐掉触到两端的边缘带** (range 尽头天然低量, 是边界不是穿越真空)。
+
+    ⚠️ void 的含义: profile 按 bar 区间铺开, 一个桶缺席意味着**没有任何一根 bar 的
+    [low, high] 覆盖过它** —— 价格从未到过那里。若改按 typical price 落桶, TP 只是一根
+    bar 的代表价、不是成交发生的地方, 一根大振幅日线会让它两边的真实成交价位集体
+    显示 0.0%。
+
+    `keep_edges=True` (`core/vacuum` 用): 边缘带不掐。画 zone 时边缘带是噪音
+    (窗口的尽头 = 价格刚到), 但「关键位之间的真空」恰恰常常顶着窗口最高价。
+    缺省 False = 画 zone 的原口径。
+    (住 core 而非 decision/level_map: core 不能向上 import decision; level_map 同名转出。)"""
+    if not profile or bucket <= 0:
+        return []
+    poc = max(b["turnover"] for b in profile)
+    if poc <= 0:
+        return []
+    by_lo = {round(b["lo"], 4): b for b in profile}
+    first_lo = profile[0]["lo"]
+    n = int(round((profile[-1]["lo"] - first_lo) / bucket))
+    if n + 1 < 5:                       # 网格太窄, 无"内部"可言
+        return []
+    bands: list[dict] = []
+    for i in range(n + 1):
+        lo = round(first_lo + i * bucket, 4)
+        b = by_lo.get(lo)
+        if b is not None and b["turnover"] > poc * poc_frac:
+            continue                     # 非 LVN 桶
+        cell = {"lo": lo, "hi": round(lo + bucket, 4),
+                "share_pct": round(b["share_pct"], 1) if b else 0.0,
+                "void": b is None}
+        if bands and abs(cell["lo"] - bands[-1]["hi"]) < 1e-6:
+            last = bands[-1]
+            last["hi"] = cell["hi"]
+            last["share_pct"] = round(last["share_pct"] + cell["share_pct"], 1)
+            last["void"] = last["void"] and cell["void"]
+        else:
+            bands.append(cell)
+    if keep_edges:
+        return bands
+    lo_edge, hi_edge = first_lo, round(first_lo + n * bucket + bucket, 4)
+    return [b for b in bands
+            if b["lo"] > lo_edge + 1e-6 and b["hi"] < hi_edge - 1e-6]
+
+
+def rejections_at(bars: List[dict], level: float, near: float) -> List[str]:
+    """最高价够到 `level − near` 但收盘没站上 `level` 的那些日子 (升序日期)。
+
+    = `level_map.level_interactions` 的拒绝判据 / `future_gates` 的拒绝计数, 同一条。
+    `near` 传一个 profile 桶宽 (见 level_interactions docstring: 跨票可比的那把尺)。"""
+    return [str(r.get("time") or r.get("date") or "")[:10] for r in bars
+            if r["close"] <= level and r["high"] >= level - near]
+
+
+def supports_at(bars: List[dict], level: float, near: float) -> List[str]:
+    """`rejections_at` 的镜像: 最低价探到 `level + near` 但收盘没跌破 `level` 的那些日子。"""
+    return [str(r.get("time") or r.get("date") or "")[:10] for r in bars
+            if r["close"] >= level and r["low"] <= level + near]
+
+
 def cluster_pivots(pivots: list[dict], tol: float) -> list[dict]:
     """Merge swing pivots within `tol` of running cluster mean into bands.
     pivots: [{price, date, kind('high'|'low')}]. Multi-touch + mixed-kind

@@ -125,3 +125,32 @@ def test_hv_percentile_needs_enough_samples_and_is_a_fraction():
     p = technical.hv_percentile(series, len(series) - 1, 252, 120)
     assert p is not None and 0.0 <= p <= 1.0
     assert technical.hv_percentile(series, 5, 252, 120) is None       # series[5] 是 None
+
+
+# ── find_lvn(keep_edges) / rejections_at / supports_at (core/vacuum 的三块积木) ──
+
+def _prof(shares):
+    """[(lo, turnover)] → profile (桶宽 1)。"""
+    tot = sum(t for _, t in shares)
+    return [{"lo": float(lo), "hi": float(lo) + 1.0, "turnover": float(t),
+             "share_pct": t / tot * 100} for lo, t in shares]
+
+
+def test_find_lvn_keep_edges_returns_the_bands_the_default_trims():
+    prof = _prof([(10, 5), (11, 100), (12, 100), (13, 5), (14, 5), (15, 100), (16, 5), (17, 5)])
+    trimmed = technical.find_lvn(prof, 1.0)
+    kept = technical.find_lvn(prof, 1.0, keep_edges=True)
+    assert [(b["lo"], b["hi"]) for b in trimmed] == [(13.0, 15.0)]                 # 缺省: 两端边缘带掐掉
+    assert [(b["lo"], b["hi"]) for b in kept] == [(10.0, 11.0), (13.0, 15.0), (16.0, 18.0)]
+
+
+def test_rejections_and_supports_are_mirror_images():
+    def bar(d, lo, hi, c):
+        return {"time": f"2025-01-{d:02d} 00:00:00", "low": lo, "high": hi, "close": c}
+    bars = [bar(1, 95, 99.6, 97),     # 高点够到 100−0.5, 收在线下 → 被拒
+            bar(2, 95, 99.4, 97),     # 差 0.6, 不算
+            bar(3, 98, 103, 101),     # 收上去了 → 不是拒绝; 低点 98 ≤ 100.5 且收在线上 → 承接
+            bar(4, 100.4, 104, 102),  # 低点探到 100+0.5 以内, 收在线上 → 承接
+            bar(5, 100.6, 104, 102)]  # 没探到
+    assert technical.rejections_at(bars, 100.0, 0.5) == ["2025-01-01"]
+    assert technical.supports_at(bars, 100.0, 0.5) == ["2025-01-03", "2025-01-04"]
