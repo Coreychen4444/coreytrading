@@ -253,3 +253,48 @@ def test_divergence_missing_inputs_are_none_not_false():
     d = L.divergence_states(fr, t)
     assert d["D2"]["on"] is None and d["D4"]["on"] is None
 
+
+
+# ── 广度描述行（零授权，只描述形状）──
+
+def _breadth_world(n, spy, rsp, sectors=None):
+    days = _dates(n)
+    s = {"SPY": list(zip(days, spy)), "RSP": list(zip(days, rsp)), "IWM": list(zip(days, rsp))}
+    for k, v in (sectors or {}).items():
+        s[k] = list(zip(days, v))
+    return L.align(s), n - 1
+
+
+def test_breadth_b60_high_and_narrow():
+    n = L.PCT_WIN + 120
+    spy = [100 * math.exp(0.0005 * i) for i in range(n)]
+    rsp = [100 * math.exp(0.0005 * i) for i in range(n - 60)] + \
+          [100 * math.exp(0.0005 * (n - 60)) * math.exp(-0.001 * k) for k in range(1, 61)]   # 最后 60 日等权掉队
+    fr, t = _breadth_world(n, spy, rsp)
+    b = L.breadth_state(fr, t)
+    assert b["B60"] == {"P": True, "G": True, "on": True}
+    assert b["equal_weight"]["d60"] < 0 and b["equal_weight"]["pct60"] <= 0.2
+
+
+def test_breadth_not_at_high_is_false_regardless_of_narrowness():
+    n = L.PCT_WIN + 120
+    spy = [100 * math.exp(0.0005 * i) for i in range(n - 10)] + \
+          [100 * math.exp(0.0005 * (n - 10)) * 0.95] * 10                              # 离 60 日高 −5%
+    fr, t = _breadth_world(n, spy, [100.0] * n)
+    b = L.breadth_state(fr, t)["B60"]
+    assert b["P"] is False and b["on"] is False
+
+
+def test_breadth_sector_count_skips_missing_history():
+    n = L.PCT_WIN + 120
+    flat = [100.0] * n
+    fr, t = _breadth_world(n, flat, flat, {"XLK": [100.0] * (n - 1) + [110.0],             # 站上 50 日线
+                                           "XLF": [100.0] * (n - 1) + [90.0]})             # 跌破
+    sec = L.breadth_state(fr, t)["sectors_above_50dma"]
+    assert sec == {"n": 1, "of": 2, "names": ["科技"]}                                     # 缺序列的 9 个行业不计入分母
+
+
+def test_breadth_short_history_is_none():
+    fr, t = _breadth_world(30, [100.0] * 30, [100.0] * 30)
+    b = L.breadth_state(fr, t)
+    assert b["B60"]["on"] is None and b["equal_weight"]["pct60"] is None

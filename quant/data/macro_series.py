@@ -59,6 +59,8 @@ SERIES: dict[str, tuple[str, str, str]] = {
     "XLI": ("yahoo", "XLI", "adj"),
     "XLB": ("yahoo", "XLB", "adj"),
     "KRE": ("yahoo", "KRE", "adj"),
+    "XLC": ("yahoo", "XLC", "adj"),            # 通信（序列自 2018 年起）—— 广度描述行的 11 个行业
+    "XLRE": ("yahoo", "XLRE", "adj"),          # 地产（序列自 2015 年起）
     # ── 利率（收益率指数 = 百分比；期货 / ETF = 价格）
     "US10Y": ("yahoo", "^TNX", "close"),
     "US5Y": ("yahoo", "^FVX", "close"),

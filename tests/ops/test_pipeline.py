@@ -143,7 +143,7 @@ def test_postclose_is_lean_close_layer_only():
     Entry plans re-anchor on the day's close (stale bottom signals drop out)
     before the reminder / today-group effect layer renders."""
     kp = keys(pipeline.POSTCLOSE)
-    assert kp == ["positions", "klines", "nav", "brief", "regime", "agents",
+    assert kp == ["positions", "klines", "nav", "brief", "regime", "option_stops", "agents",
                   "entry", "reminders", "today_group"]
     assert set(kp) <= set(keys(pipeline.BRIEFING))
 
@@ -757,3 +757,11 @@ def test_agents_failed_receipt_stays_failed(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["failed"] == ["agents"] and out["partial"] == {}
     assert rc == 0, "agents 不是 fatal 阶段: 其余步骤照跑, 退出码只看 aborted"
+
+
+def test_option_stop_sync_after_regime_before_reminders():
+    """期权卡 stop 跟随授予 cap 的 gate: 新 up 转移当轮就要抬卡,
+    画线 (reminders) 读到的卡 stop 与 S5g 同一个数。"""
+    for mode in (pipeline.BRIEFING, pipeline.POSTCLOSE):
+        k = keys(mode)
+        assert k.index("regime") < k.index("option_stops") < k.index("reminders"), mode

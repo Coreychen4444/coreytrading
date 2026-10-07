@@ -177,6 +177,11 @@ STAGES: List[Stage] = [
           (BRIEFING, POSTCLOSE),
           "gate 触发即机械转移卡片 regime — 收盘依赖; 须在 brief 之后 (退出侧先于"
           "转移 2026-08-20)、效果层之前 (画线/白名单渲染转移后世界)", parse_json=True),
+    Stage("option_stops", ["quant/sync/option_stop_sync.py", "--json"],
+          (BRIEFING, POSTCLOSE),
+          "期权卡 stop 跟随正股授予 cap 的 gate 上移, 只升不降 (S5g 已读新 gate 时卡上不能还"
+          "躺着旧线)。须在 regime 之后 (新 up 转移当轮生效)、reminders 之前 (画线与卡同一个数)",
+          parse_json=True, needs_opend=False),
     Stage("agents", ["quant/ops/agent_jobs.py", "run", "--json", "--apply"],
           (BRIEFING, POSTCLOSE),
           "领域工作流和受控复核写卡；退出评估与机械转移之后、提醒线和入场计划之前。",

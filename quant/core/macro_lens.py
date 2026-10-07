@@ -105,6 +105,15 @@ DIVERGENCE_FINDING = {
     "D4": "之后 20 日波动偏低（ln RV 增量 IS −0.179 / OOS −0.141，两窗显著）；回撤只 IS 显著，方向无增量，抄底臂两窗反号",
 }
 
+# 广度（描述行，零授权；预注册研究复测过）。
+# 窄度 = 等权 / 小盘相对 SPY + 行业站上 50 日线家数；B60 = 「高位 + 窄」。
+# D3 20 日尺度已删、B60 60 日尺度样本内段数不足未裁 —— 所以只描述形状，不预告方向，不进风险灯。
+BREADTH_DESIGN = "quant/core/macro_lens.py breadth_state"
+BREADTH_SECTORS = {"XLK": "科技", "XLC": "通信", "XLY": "可选消费", "XLF": "金融", "XLV": "医疗", "XLI": "工业",
+                   "XLE": "能源", "XLP": "必需消费", "XLU": "公用事业", "XLB": "材料", "XLRE": "地产"}
+BREADTH_FINDING = ("窄幅上涨已检验：20 日尺度无增量（D3 删）；60 日尺度样本不足未裁 —— 样本外点估计之后 60 日"
+                   "回撤多 2.4pp、少涨 2.2pp，不显著。只描述形状，不预告方向")
+
 
 def persistence_label(factor: str) -> Optional[str]:
     """该因子成为最强驱动后的历史持续性（DOMINANT_HISTORY 的未来解释力 ÷ 常态）。"""
@@ -753,6 +762,7 @@ def assess(series: Dict[str, Series], asof: Optional[str] = None) -> Dict:
                     "m_high": bool(drv["pct_M"] is not None and drv["pct_M"] >= 0.8),
                     "m_high_finding": M_HIGH_FINDING},
         "divergence": divergence_states(fr, t),
+        "breadth": breadth_state(fr, t),
     }
 
 
@@ -805,6 +815,47 @@ def divergence_states(fr: Dict, t: int) -> Dict[str, Dict]:
                           "SPY 20 日新低；" + ("、".join(nm for nm, v in zip(names, votes) if v) or "三项都跟着创新") +
                           (f"（{sum(v for v in votes if v)}/3）" if g4 is not None else "（缺数据）")))}
     return out
+
+
+def breadth_state(fr: Dict, t: int) -> Dict:
+    """广度描述：等权 / 小盘相对 SPY（20 / 60 日 ln 变动 + 自身 3 年分位）、11 行业站上 50 日线家数、
+    B60「高位 + 窄」状态。缺数据的项 = None。零授权，不预告方向（BREADTH_FINDING）。"""
+    raw = fr["raw"]
+    n = len(fr["dates"])
+    spy = raw.get("SPY") or [None] * n
+
+    def ln_ratio(a, b):
+        return math.log(a / b) if a is not None and b is not None and a > 0 and b > 0 else None
+
+    def rel(key: str) -> Dict:
+        other = raw.get(key) or [None] * n
+        ratio = [ln_ratio(other[i], spy[i]) for i in range(n)]
+        out = {}
+        for lag in (20, 60):
+            ser = rolling(lambda i, lag=lag: _shift_diff(ratio, i, lag), max(0, t - PCT_WIN), t)
+            out[f"d{lag}"] = ser[t]
+            out[f"pct{lag}"] = pct_at(ser, t)
+        return out
+
+    above, known = [], 0
+    for k, cn in BREADTH_SECTORS.items():
+        c = (raw.get(k) or [None] * n)[max(0, t - 49):t + 1]
+        if len(c) < 50 or any(x is None for x in c):
+            continue
+        known += 1
+        if c[-1] > sum(c) / 50:
+            above.append(cn)
+
+    w60 = spy[max(0, t - 59):t + 1]
+    r60 = _shift_log(spy, t, 60)
+    p = None if len(w60) < 60 or any(x is None for x in w60) or r60 is None \
+        else bool(spy[t] >= 0.97 * max(w60) and r60 > 0)
+    eq = rel("RSP")
+    g = None if eq["pct60"] is None else eq["pct60"] <= 0.2
+    on = False if p is False else (None if p is None or g is None else bool(p and g))
+    return {"equal_weight": eq, "small_cap": rel("IWM"),
+            "sectors_above_50dma": {"n": len(above), "of": known, "names": above},
+            "B60": {"P": p, "G": g, "on": on}, "finding": BREADTH_FINDING, "design": BREADTH_DESIGN}
 
 
 def book_exposure(holding_returns: Dict[str, Sequence[Optional[float]]], weights: Dict[str, float],

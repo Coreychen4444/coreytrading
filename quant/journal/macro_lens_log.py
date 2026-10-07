@@ -265,6 +265,14 @@ def _json_safe(o):
     return o
 
 
+def _breadth_row(br: Optional[Dict]) -> Optional[Dict]:
+    if not br:
+        return None
+    return {"rsp": br["equal_weight"], "iwm": br["small_cap"],
+            "sectors_above_50dma": [br["sectors_above_50dma"]["n"], br["sectors_above_50dma"]["of"]],
+            "B60": br["B60"]}
+
+
 def ledger_row(s: Dict) -> Dict:
     drv = s["drivers"]
     return {
@@ -278,6 +286,7 @@ def ledger_row(s: Dict) -> Dict:
         "co_dominant": drv.get("co_dominant") or [], "challenger": drv["challenger"],
         "theme": s["story"]["theme"], "rates_split": s.get("rates_split"),
         "leaders": [[r["ticker"], r["rel"]] for r in s["story"]["leaders"]],
+        "breadth": _breadth_row(s.get("breadth")),
         "book": {f: {"beta": v["beta"], "move": v.get("move")}
                  for f, v in ((s.get("book") or {}).get("factors") or {}).items()},
         "data_gaps": {"lagging": [x["key"] for x in (s.get("data_gaps") or {}).get("lagging") or []],
@@ -360,6 +369,22 @@ def gap_line(s: Dict) -> Optional[str]:
     return ("⚠️ 数据：" + "；".join(parts) + " —— 缺的那天该因子不计、水平量沿用 ≤3 日") if parts else None
 
 
+def breadth_line(br: Optional[Dict]) -> Optional[str]:
+    """广度一行（描述性，零授权）：等权 / 小盘相对 SPY + 行业站上 50 日线 + B60「高位 + 窄」。"""
+    if not br:
+        return None
+    eq, sm, sec = br["equal_weight"], br["small_cap"], br["sectors_above_50dma"]
+
+    def rel(x, lag):
+        d, p = x.get(f"d{lag}"), x.get(f"pct{lag}")
+        return "—" if d is None else f"{_pct(d)}" + ("" if p is None else f"（{_ap(p)}分位）")
+    parts = [f"等权 RSP 相对 SPY 20 日 {rel(eq, 20)} · 60 日 {rel(eq, 60)}", f"小盘 IWM 20 日 {rel(sm, 20)}"]
+    if sec["of"]:
+        parts.append(f"行业站上 50 日线 {sec['n']}/{sec['of']}" + (f"（{'、'.join(sec['names'])}）" if sec["names"] else ""))
+    flag = "；⚑ 高位 + 窄（B60 成立）" if br["B60"]["on"] else ""
+    return "- 广度（3年分位）：" + "｜".join(parts) + flag + " —— 形状描述，已检验不预告方向"
+
+
 def digest(s: Dict) -> str:
     drv, tier, st = s["drivers"], s["risk"]["tier"], s["risk"]["states"]
     b = tier["base"]
@@ -408,6 +433,9 @@ def digest(s: Dict) -> str:
         buy = "、".join(f"{r['cn']} {r['ticker']} {_pct(r['rel'])}" for r in lead[:2])
         sell = "、".join(f"{r['cn']} {r['ticker']} {_pct(r['rel'])}" for r in lead[-3:][::-1])
         lines.append(f"- 资金（20 日相对 SPY）：买 {buy}；卖 {sell}")
+    bl = breadth_line(s.get("breadth"))
+    if bl:
+        lines.append(bl)
     trig = []
     for f, hits in (s.get("triggers") or {}).items():
         for h in hits[:1]:
@@ -479,7 +507,15 @@ def report(s: Dict) -> str:
     for x in (s.get("divergence") or {}).values():
         mark = "成立" if x["on"] else ("不成立" if x["on"] is False else "缺数据")
         L_.append(f"- {x['name']}：{x['text']} → **{mark}**。历史：{x['finding']}")
-    L_.append("- 信用背离（股在高位 + 信用走弱）/ 广度背离（新高 + 等权落后）：已检验不采用 —— 信用走弱单独已是风险灯")
+    L_.append("- 信用背离（股在高位 + 信用走弱）：已检验不采用 —— 信用走弱单独已是风险灯")
+    br = s.get("breadth")
+    if br:
+        b60 = br["B60"]
+        mark = "成立" if b60["on"] else ("不成立" if b60["on"] is False else "缺数据")
+        L_ += ["", f"### 广度（描述性，零授权；`{br['design']}`）", "", breadth_line(br),
+               f"- 高位 + 窄（B60：SPY ≥0.97×60 日高且 60 日收益 >0，等权相对 60 日变动 ≤3年 p20）→ **{mark}**",
+               f"- 历史：{br['finding']}",
+               "- 局限：RSP 是等权代理，不是涨跌家数 / 新高新低 / 成分股站上均线比例"]
     L_ += ["", "### 读数", ""]
     for k, rd in s["readings"].items():
         ex = _extreme_txt(k, rd)
