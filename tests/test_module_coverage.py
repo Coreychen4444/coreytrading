@@ -29,7 +29,6 @@ UNTESTED: dict[str, str] = {
     "core/env": "只是 .env → os.environ 的读取，逻辑在 paths.ENV_PATH",
 
     # data —— 全都要活的 OpenD / 网络，没做 fake 层
-    "data/iv_logger": "需 OpenD 期权链。IV 历史不可重拉，写错=永久污染，**值得补**",
 
     # sync —— 写 state 的路径，风险最高的一层
     "sync/order_sync": "需 OpenD 在途订单。**真缺口**: 它写 pending_orders",

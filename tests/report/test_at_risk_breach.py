@@ -62,7 +62,7 @@ def test_option_premium_times_s1_fraction_googl_shape():
     assert sig["at_risk_usd"] == pytest.approx(5 * 2047.5 * F, abs=0.01)
     assert sig["trim_units"] == 3
     assert "S1 premium stop" in sig["stop_basis"]
-    # 标的 stop 不给期权折扣 — 用保费不用 (标的价−stop)
+    # 卡 stop 未标 underlying 基准且无 S5g gate → 不给期权折扣, 用保费名义 (有基准才投影)
     assert sig["stop"] is None
 
 
@@ -93,3 +93,71 @@ def test_at_risk_nominal_cap_rejects_degenerate_stops():
     assert f(20_000.0, 100.0, 100.0) is None                  # stop ≥ price
     assert f(20_000.0, 100.0, 120.0) is None
     assert f(20_000.0, 100.0, -5.0) is None
+
+
+# ── 期权: 先触发的那条线 (合成形状) ─────────────
+#
+# stop 上移到 gate 369.8 后旧口径仍按 mark×20% = $910 报超顶; 实际 gate 先响只亏 ~$370。
+
+OPT = {"ticker": "SYNA270319C380000", "qty": 1, "current_price": 45.5,
+       "avg_cost": 38.0, "iv_pct": 44.0, "delta": 0.57}
+OPT_NAV = 17_500.0     # cap = $875
+
+
+@pytest.fixture
+def _spot(monkeypatch):
+    from quant.options import premium_proj
+    monkeypatch.setattr(premium_proj, "dte_of", lambda t, today: 162)
+    box = {"spot": 376.5}
+    monkeypatch.setattr(pb.book, "price_of", lambda t, *a, **k: box["spot"])
+    return box
+
+
+def test_option_gate_binds_before_s1(_spot):
+    card = {"stop_level": 369.8, "stop_level_basis": "underlying"}
+    # 旧名义口径 $910 > $875 会响; gate 投影只亏 ~$370 → 静默
+    assert pb.at_risk_breach_signal(OPT, card, None, OPT_NAV) is None
+    sig = pb.at_risk_breach_signal({**OPT, "qty": 3}, card, None, OPT_NAV)
+    assert sig is not None and sig["stop"] == 369.8
+    assert 300 < sig["at_risk_usd"] / 3 < 450
+    assert "保费投影" in sig["stop_basis"] and "先于 S1 线 30.40" in sig["stop_basis"]
+    assert sig["trim_units"] == 1
+
+
+def test_option_guard_gate_line_counts_without_card_basis(_spot):
+    """卡 stop 未标基准 (不同基不比), 但 exit_guard 写回了 S5g gate → 用 gate。"""
+    guard = {"opt_gate_stop": {"level": 369.8, "days": 1}}
+    sig = pb.at_risk_breach_signal({**OPT, "qty": 3}, {"stop_level": 354.0}, guard, OPT_NAV)
+    assert sig is not None and sig["stop"] == 369.8
+    # 两条都在 → 取高 (严于 gate 的卡 stop 优先)
+    sig2 = pb.at_risk_breach_signal({**OPT, "qty": 3},
+                                    {"stop_level": 372.0, "stop_level_basis": "underlying"},
+                                    guard, OPT_NAV)
+    assert sig2 is None or sig2["stop"] == 372.0
+
+
+def test_option_s1_binds_when_underlying_line_is_far(_spot):
+    """正股线远 (投影保费 < 成本×0.8) → S1 先响, 损失 = mark − S1 线, 不报正股价。"""
+    card = {"stop_level": 300.0, "stop_level_basis": "underlying"}
+    sig = pb.at_risk_breach_signal(OPT, card, None, OPT_NAV)
+    assert sig is not None and sig["stop"] is None
+    assert sig["at_risk_usd"] == pytest.approx((45.5 - 30.4) * 100, abs=0.01)
+    assert "S1 线 30.40" in sig["stop_basis"]
+
+
+def test_option_already_through_a_line_is_exit_stack_business(_spot):
+    card = {"stop_level": 369.8, "stop_level_basis": "underlying"}
+    _spot["spot"] = 368.0
+    assert pb.at_risk_breach_signal({**OPT, "qty": 9}, card, None, OPT_NAV) is None
+    _spot["spot"] = 376.5
+    assert pb.at_risk_breach_signal({**OPT, "qty": 9, "current_price": 30.0},
+                                    card, None, OPT_NAV) is None
+
+
+def test_option_projection_missing_falls_back_to_nominal_and_says_so(_spot):
+    _spot["spot"] = None
+    card = {"stop_level": 369.8, "stop_level_basis": "underlying"}
+    sig = pb.at_risk_breach_signal(OPT, card, None, OPT_NAV)
+    assert sig is not None and sig["stop"] is None
+    assert sig["at_risk_usd"] == pytest.approx(45.5 * 100 * sizing.OPTION_ATRISK_LOSS_FRAC, abs=0.01)
+    assert "投影缺" in sig["stop_basis"]

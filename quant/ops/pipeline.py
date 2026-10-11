@@ -106,7 +106,9 @@ STAGES: List[Stage] = [
           "postclose 也刷新，避免收盘异动与退出检查读取盘前报价",
           fatal=True),
     Stage("orders", ["quant/sync/order_sync.py", "--json"], BOTH,
-          "在途订单 → pending_orders (briefing 此前完全没跑这步)", parse_json=True),
+          "在途订单 → pending_orders (briefing 此前完全没跑这步)。完成即推 📋 在途挂单 "
+          "(防忘单开盘成交: 含无卡 orphan, 每轮都推, 无挂单不推)",
+          parse_json=True),
     Stage("fills", ["quant/sync/trade_history_sync.py", "--json"], BOTH,
           "新成交 → events/<YYYY-MM>/trades.jsonl (dedup by order_id)", parse_json=True),
     Stage("reconcile", ["quant/sync/close_reconcile.py", "--json"], BOTH,
@@ -157,7 +159,7 @@ STAGES: List[Stage] = [
           "不 eod_only: 按清算日查, 盘中跑不会把盘中时刻当成一天; 只进 briefing = 每日一次够用",
           parse_json=True),
     Stage("iv", ["quant/data/iv_logger.py"], (BRIEFING,), "每日 ATM IV 快照 (幂等)",
-          eod_only=True),
+          eod_only=True, timeout_s=900),   # 链接口限频 10 次/30 秒, 每票 2 条链 (30D + LEAPS) × 3.1s
     Stage("earnings", ["quant/data/earnings_calendar.py", "--json"], (BRIEFING,),
           "前视财报日历 + per-ticker 缩仓比例 → market/earnings_calendar.json "
           "(earnings_window 路 A: 反应日 T+0 仓位上限 × 缩仓比例 × 0.7)。**须先于 "
@@ -318,6 +320,18 @@ def push_brief_alerts(data: Dict):
     if alerts:
         blocks.append("**— alerts —**\n" + "\n".join(str(x) for x in alerts))
     return notify("\n\n".join(blocks))
+
+
+def push_open_orders(data: Dict):
+    """order_sync 完成即推在途挂单 (忘掉的隔夜挂单会在开盘自动成交)。
+
+    文本由 order_sync 用 core/open_orders 渲染好 (`message`), 这里只投递。每轮都推 ——
+    忘单的解药是重复看见, 不设冷却; 无挂单 = "no_orders" 不推。
+    """
+    msg = data.get("message")
+    if not msg:
+        return "no_orders"
+    return notify(msg)
 
 
 def _bold_head(card: str) -> str:
@@ -523,6 +537,8 @@ def main(argv: List[str]) -> int:
         # lets task wrappers avoid duplicates; read-only and --no-notify never send.
         if s.key == "brief" and r["ok"] and send:
             result["tg_pushed"] = push_brief_alerts(r.get("data") or {})
+        if s.key == "orders" and r["ok"] and send:
+            result["orders_pushed"] = push_open_orders(r.get("data") or {})
 
     ok = result["aborted"] is None
     result["failed"] = [k for k, v in result["stages"].items() if not v["ok"]]

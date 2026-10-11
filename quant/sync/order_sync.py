@@ -6,6 +6,10 @@
 本脚本拉 OpenD 当前未成交订单 (SUBMITTED/WAITING/SUBMITTING),
 按 ticker 写回 pending_orders, 已成交/撤销的自动消失。
 
+忘单提醒: 没卡的挂单 (orphan) 只印在 JSON 里没人读, 有卡的写进 pending_orders 也没人推 ——
+所以 --json 输出带全部挂单 (`orders`, 含 orphan, 每张标 card) 与渲染好的 `message`
+(core/open_orders), pipeline 有挂单即推送。
+
 CLI:
     .venv/moomoo/bin/python3 quant/sync/order_sync.py [--json]
 """
@@ -26,7 +30,8 @@ import os
 
 from quant.sync import state_io  # noqa: E402
 from quant.core.occ import strip_us_prefix  # noqa: E402
-from quant.core.timeutil import et_naive_to_iso, now_utc_iso  # noqa: E402
+from quant.core.open_orders import card_status, render  # noqa: E402
+from quant.core.timeutil import et_naive_to_iso, et_today, now_utc_iso  # noqa: E402
 
 add_openapi_path()  # openapi skill scripts (`common`) 上 sys.path
 from common import (# noqa: E402
@@ -94,10 +99,15 @@ def main() -> int:
             doc['generated_at'] = now_utc_iso()
             state_io.write_positions(doc)
 
+    watch = set((state_io.read_watchlist(allow_missing=True).get('tickers') or {}))
+    for o in orders:
+        o['card'] = card_status(o['ticker'], set(doc['tickers']), watch)
     result = {
         'open_orders': len(orders),
         'tickers_updated': changed,
         'orphan_order_tickers': orphan,  # 挂单标的不在 positions — 提示需要 watchlist promote 或人工看
+        'orders': orders,                # 全部在途挂单, 含 orphan (pending_orders 只装得下有卡的)
+        'message': render(orders, et_today()),  # None = 无挂单不推
     }
     if a.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

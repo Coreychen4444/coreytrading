@@ -1248,9 +1248,15 @@ def at_risk_breach_signal(item: Dict, cfg: Optional[Dict], guard: Optional[Dict]
 
     正股: at-risk = qty × (现价 − binding stop), binding = max(卡 stop, 吊灯 trail)
     多头取大 —— 与 stop_status / price_reminder 下方线同口径。
-    期权 (long): at-risk = 保费 mark × **OPTION_ATRISK_LOSS_FRAC (= |S1|, 0.20)** —— S1 premium
-    硬 stop 接线后的 loss/unit (放宽自保费全额; 系数与
-    exit_guard 的 opt_s1_stop 相等由 pins 测试钉)。标的 stop 仍不给期权折扣。
+    期权 (long): **先触发的那条线打掉时的损失** (旧口径 保费 mark × |S1| 在 stop 已上移、
+    gate 先响时会高估 at-risk, 报出并不存在的超顶)。
+      · 正股基退出线 = max(卡 stop (stop_level_basis=underlying), exit_guard 写回的 S5g
+        `opt_gate_stop`) —— 与退出栈同源; 跌到该线的保费用 premium_proj 投影 (BS / delta)。
+      · S1 线 = 成本 × (1 − OPTION_ATRISK_LOSS_FRAC) (= exit_guard opt_s1_stop, pins 钉);
+        投影保费 ≥ S1 线 → gate 先响, 否则 S1 先响。reversal_probe 无 S1, 只有 gate。
+      · 没有正股基退出线 / 投影缺 (IV/DTE/正股价) → 退回旧名义 保费 mark × |S1| 并说出口。
+      · 正股已在线下 / mark 已在 S1 线下 = 退出栈已成立, 归 exit_guard, 本函数静默。
+    已知低估: gate 是收盘 ×1, 跳空穿线时损失 > 投影; 投影是估计不是报价。
     入场侧的对称物 = entry_guard.size_caps 第⑤条 (同一常量, 那边几乎恒被 n_unit
     先咬 = 后备; 真咬点在这里)。无 stop 正股跳过 (v1; 无界 at-risk 归 zone/schema 层)。
     """
@@ -1266,29 +1272,47 @@ def at_risk_breach_signal(item: Dict, cfg: Optional[Dict], guard: Optional[Dict]
         mult = occ.get("multiplier") or 100
         per_unit = price * mult * sizing.OPTION_ATRISK_LOSS_FRAC
         basis = f"保费 × {sizing.OPTION_ATRISK_LOSS_FRAC:.0%} (S1 premium stop)"
-        stop_lvl = None
-        # reversal_probe (止损放在 gate, 倒推 cap): 本类无 S1, at-risk =
-        # 正股跌到卡 stop (反转支撑) 时的保费投影损失 —— 与入场侧倒推 cap 同一把尺。
-        # 投影缺 (无 IV/DTE/正股价) → 退回 S1 名义并说出口, 不静默。
-        if (cfg or {}).get("entry_class") == "reversal_probe" \
-                and (cfg or {}).get("stop_level") is not None \
-                and ((cfg or {}).get("stop_level_basis") or "underlying") == "underlying":
+        rp = (cfg or {}).get("entry_class") == "reversal_probe"
+        lines = []
+        if (cfg or {}).get("stop_level") is not None and \
+                ((cfg or {}).get("stop_level_basis") or ("underlying" if rp else None)) == "underlying":
+            lines.append(normalize_num(cfg.get("stop_level")))
+        lines.append(normalize_num(((guard or {}).get("opt_gate_stop") or {}).get("level")))
+        lines = [x for x in lines if x is not None]
+        stop_lvl = max(lines) if lines else None
+        if stop_lvl is not None:
             from quant.options import premium_proj                 # 显示层折算, 单一投影实现
-            stop_lvl = normalize_num(cfg.get("stop_level"))
+            spot = book.price_of(occ["underlying"])
+            if spot is not None and spot <= stop_lvl:              # 正股已在线下 = 退出栈的事
+                return None
+            avg_cost = normalize_num(item.get("avg_cost"))
+            s1_line = (avg_cost * (1 - sizing.OPTION_ATRISK_LOSS_FRAC)
+                       if avg_cost and not rp else None)
+            if s1_line is not None and price <= s1_line:           # S1 已成立 = 退出栈的事
+                return None
             try:
                 dte_days = premium_proj.dte_of(item["ticker"], et_today())
             except Exception:                                      # noqa: BLE001
                 dte_days = None
             pj = premium_proj.project_call_premium(
-                stop_lvl, mark=price, spot=book.price_of(occ["underlying"]),
+                stop_lvl, mark=price, spot=spot,
                 strike=occ.get("strike"), dte_days=dte_days,
                 iv_pct=normalize_num(item.get("iv_pct")), delta=normalize_num(item.get("delta")))
             if pj and pj["premium"] < price:
-                per_unit = (price - pj["premium"]) * mult
-                basis = (f"正股跌到反转支撑 {stop_lvl:g} 的保费投影 ({pj['method']}) "
-                         f"→ 每张亏 ${per_unit:,.0f} (reversal_probe, 无 S1)")
+                if s1_line is not None and s1_line > pj["premium"]:
+                    per_unit = (price - s1_line) * mult
+                    basis = (f"S1 线 {s1_line:.2f} (成本 × {1 - sizing.OPTION_ATRISK_LOSS_FRAC:.0%}) "
+                             f"先于正股 {stop_lvl:g} 触发 → 每张亏 ${per_unit:,.0f}")
+                    stop_lvl = None                                # binding 是保费线, 不报正股价
+                else:
+                    per_unit = (price - pj["premium"]) * mult
+                    basis = (f"正股跌到 {stop_lvl:g} 的保费投影 {pj['premium']:.2f} ({pj['method']}) "
+                             f"→ 每张亏 ${per_unit:,.0f}"
+                             + (" (reversal_probe, 无 S1)" if rp else
+                                f"; 先于 S1 线 {s1_line:.2f}" if s1_line is not None else ""))
             else:
-                basis += " ⚠️ reversal_probe 投影缺 (IV/DTE/正股价), 退 S1 名义"
+                basis += f" ⚠️ 正股线 {stop_lvl:g} 投影缺 (IV/DTE/正股价), 退 S1 名义"
+                stop_lvl = None
         at_risk = qty * per_unit
         if at_risk <= cap:
             return None

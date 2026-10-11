@@ -38,7 +38,7 @@ from collections import deque
 from datetime import datetime, timezone
 
 from quant.core.io_json import atomic_write_json, iter_jsonl, read_json  # noqa: E402
-from quant.core.paths import FUNDAMENTALS_DIR  # noqa: E402
+from quant.core.paths import EARNINGS_CALENDAR_PATH, EARNINGS_DEEP_DIR, FUNDAMENTALS_DIR  # noqa: E402
 from quant.core.timeutil import now_utc_iso  # noqa: E402
 from quant.core.agent_contracts import canonical_hash  # noqa: E402
 from quant.core.valuation_contracts import finite  # noqa: E402
@@ -144,6 +144,57 @@ def parse_quarters(income: list[dict], balance: list[dict], cashflow: list[dict]
     rows.sort(key=lambda x: (x["_ts"], x["period"]))
     for x in rows:
         x.pop("_ts", None)
+    return rows
+
+
+REPORT_MAX_DAYS = 100               # 期末 → 财报披露最长间隔 (10-K 最迟 ~90 天)
+
+
+def report_dates(ticker: str, *, deep_dir: Path | None = None, calendar: dict | None = None,
+                 calendar_path: Path | None = None) -> dict:
+    """{period_text: 反应日} 来自财报事件存档 + {"_last_print": 反应日} 来自财报日历 (存档只更新到建档时)。
+
+    反应日 = 披露后第一个交易时段 (盘后发布 → 次日; 盘前 → 当日)，即市场能按这份财报定价的第一天。
+    """
+    out: dict = {}
+    p = Path(deep_dir or EARNINGS_DEEP_DIR) / f"{ticker.upper()}.json"
+    if p.exists():
+        for ev in (read_json(p) or {}).get("data") or []:
+            period, day = ev.get("period_text"), ev.get("trading_day_str") or ev.get("pub_trading_day_str")
+            if period and day:
+                out[period] = min(out.get(period, day), day)
+    cal = calendar if calendar is not None else (read_json(calendar_path or EARNINGS_CALENDAR_PATH) or {})
+    last = ((cal.get("tickers") or {}).get(ticker.upper()) or {}).get("last_print") or {}
+    day = last.get("reaction_day") or last.get("pub_day")
+    if day:
+        out["_last_print"] = day
+    return out
+
+
+def annotate_availability(rows: list[dict], dates: dict, *, fetched_day: str | None = None) -> list[dict]:
+    """给季度行补 available_at = 财报反应日。
+
+    没有它时研究级目标一律按「期末 +45 天」视为可知：刚发布的季度要在反应日之后几周才进 TTM，
+    盈利快速变化的票 TTM 会严重滞后、12 月空间被抬高。匹配: 存档按 period_text 精确对;
+    日历 last_print 只给期末之后 ≤ REPORT_MAX_DAYS 的最近一个未匹配季度。对不上 = 保持 None (下游回退 +45 天)。
+    """
+    from datetime import date as _date
+    used_last = False
+    for q in sorted(rows, key=lambda r: str(r.get("period_end") or ""), reverse=True):
+        end = q.get("period_end")
+        if not end:
+            continue
+        day, basis = dates.get(q.get("period")), "earnings_deep:period_text"
+        if not day and not used_last and dates.get("_last_print"):
+            day, basis = dates["_last_print"], "earnings_calendar:last_print"
+        if not day:
+            continue
+        gap = (_date.fromisoformat(day[:10]) - _date.fromisoformat(str(end)[:10])).days
+        if not 0 < gap <= REPORT_MAX_DAYS or (fetched_day and day[:10] > fetched_day):
+            continue
+        if basis.startswith("earnings_calendar"):
+            used_last = True
+        q["available_at"], q["available_at_basis"] = day[:10], basis
     return rows
 
 
@@ -304,6 +355,7 @@ def fetch_bundle(ticker: str, source, *, quarters: int = DEFAULT_QUARTERS) -> di
     rows = parse_quarters(inc, bal, cf)
     if not rows:
         raise RuntimeError(f"{ticker}: OpenD 未返回任何离散季度利润表")
+    annotate_availability(rows, report_dates(ticker), fetched_day=now_utc_iso()[:10])
     snap = parse_snapshot(source.snapshot(code))
     pe_raw = ps_raw = None
     try:

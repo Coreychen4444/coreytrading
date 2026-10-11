@@ -151,66 +151,85 @@ def pick_expiry(candidates: List[Tuple[str, int]], target_dte: int,
 
 # ── 行情层 ────────────────────────────────────────────────────────
 
+def list_expiries(ctx, code: str) -> List[Tuple[str, int]]:
+    """该标的全部到期日 → [(YYYY-MM-DD, DTE)]，DTE 按 ET 日历日。拉不到 = []。"""
+    from common import safe_get, RET_OK
+    ret, exps = ctx.get_option_expiration_date(code)
+    if ret != RET_OK or exps is None or exps.empty:
+        return []
+    today = date.fromisoformat(et_today())
+    cands: List[Tuple[str, int]] = []
+    for _, r in exps.iterrows():
+        ds = str(safe_get(r, "strike_time", default=""))[:10]
+        try:
+            cands.append((ds, (date.fromisoformat(ds) - today).days))
+        except ValueError:
+            continue
+    return cands
+
+
+def chain_quotes(ctx, code: str, expiry: str, spot: float, option_type: str = "call",
+                 n: int = 28) -> List[Dict]:
+    """一个到期日、spot 附近 n 档的报价 (bid/ask/last/OI/broker IV·delta)。拉不到 = []。"""
+    from common import safe_float, safe_get, RET_OK
+    from moomoo import OptionType
+
+    ot = OptionType.CALL if option_type == "call" else OptionType.PUT
+    ret, ch = ctx.get_option_chain(code, start=expiry, end=expiry, option_type=ot)
+    if ret != RET_OK or ch is None or ch.empty:
+        return []
+    # 只取 spot 附近的档 (深 OTM/ITM 无意义且拖慢快照)
+    rows = sorted(
+        ({"code": str(safe_get(r, "code", default="")),
+          "strike": safe_float(safe_get(r, "strike_price"), default=0.0)}
+         for _, r in ch.iterrows()),
+        key=lambda x: abs(x["strike"] - spot))[:n]
+    codes = [r["code"] for r in rows if r["code"]]
+    quotes: Dict[str, Dict] = {}
+    for i in range(0, len(codes), 20):            # 快照批量上限
+        ret, q = ctx.get_market_snapshot(codes[i:i + 20])
+        if ret != RET_OK or q is None or q.empty:
+            continue
+        for _, r in q.iterrows():
+            quotes[str(safe_get(r, "code", default=""))] = {
+                "bid": safe_float(safe_get(r, "bid_price"), default=0.0),
+                "ask": safe_float(safe_get(r, "ask_price"), default=0.0),
+                "last": safe_float(safe_get(r, "last_price"), default=0.0),
+                "oi": safe_float(safe_get(r, "option_open_interest"), default=0.0),
+                "iv_broker": safe_float(safe_get(r, "option_implied_volatility"), default=0.0),
+                "delta_broker": safe_float(safe_get(r, "option_delta"), default=0.0),
+            }
+    return [{**r, **quotes.get(r["code"], {})} for r in rows if r["code"] in quotes]
+
+
+def spot_of(ctx, code: str) -> Optional[float]:
+    from common import safe_float, safe_get, RET_OK
+    ret, snap = ctx.get_market_snapshot([code])
+    if ret != RET_OK or snap is None or snap.empty:
+        return None
+    return safe_float(safe_get(snap.iloc[0], "last_price"), default=None) or None
+
+
 def fetch_chain(ticker: str, target_dte: int, option_type: str = "call",
                 min_dte: int = 7) -> Optional[Dict]:
-    from common import create_quote_context, safe_close, safe_float, safe_get, RET_OK
-    from moomoo import OptionType
+    from common import create_quote_context, safe_close
 
     code = f"US.{ticker}"
     ctx = None
     try:
         ctx = create_quote_context()
-        ret, snap = ctx.get_market_snapshot([code])
-        if ret != RET_OK or snap is None or snap.empty:
-            return None
-        spot = safe_float(safe_get(snap.iloc[0], "last_price"), default=None)
+        spot = spot_of(ctx, code)
         if not spot:
             return None
-
-        ret, exps = ctx.get_option_expiration_date(code)
-        if ret != RET_OK or exps is None or exps.empty:
-            return None
-        today = date.fromisoformat(et_today())
-        cands: List[Tuple[str, int]] = []
-        for _, r in exps.iterrows():
-            ds = str(safe_get(r, "strike_time", default=""))[:10]
-            try:
-                cands.append((ds, (date.fromisoformat(ds) - today).days))
-            except ValueError:
-                continue
-        best_exp = pick_expiry(cands, target_dte, min_dte)
+        best_exp = pick_expiry(list_expiries(ctx, code), target_dte, min_dte)
         if not best_exp:
             return None
-        dte = (date.fromisoformat(best_exp) - today).days
-
-        ot = OptionType.CALL if option_type == "call" else OptionType.PUT
-        ret, ch = ctx.get_option_chain(code, start=best_exp, end=best_exp, option_type=ot)
-        if ret != RET_OK or ch is None or ch.empty:
+        dte = (date.fromisoformat(best_exp) - date.fromisoformat(et_today())).days
+        strikes = chain_quotes(ctx, code, best_exp, spot, option_type)
+        if not strikes:
             return None
-        # 只取 spot 附近的档 (深 OTM/ITM 无意义且拖慢快照)
-        rows = sorted(
-            ({"code": str(safe_get(r, "code", default="")),
-              "strike": safe_float(safe_get(r, "strike_price"), default=0.0)}
-             for _, r in ch.iterrows()),
-            key=lambda x: abs(x["strike"] - spot))[:28]
-        codes = [r["code"] for r in rows if r["code"]]
-        quotes: Dict[str, Dict] = {}
-        for i in range(0, len(codes), 20):            # 快照批量上限
-            ret, q = ctx.get_market_snapshot(codes[i:i + 20])
-            if ret != RET_OK or q is None or q.empty:
-                continue
-            for _, r in q.iterrows():
-                quotes[str(safe_get(r, "code", default=""))] = {
-                    "bid": safe_float(safe_get(r, "bid_price"), default=0.0),
-                    "ask": safe_float(safe_get(r, "ask_price"), default=0.0),
-                    "last": safe_float(safe_get(r, "last_price"), default=0.0),
-                    "oi": safe_float(safe_get(r, "option_open_interest"), default=0.0),
-                    "iv_broker": safe_float(safe_get(r, "option_implied_volatility"), default=0.0),
-                    "delta_broker": safe_float(safe_get(r, "option_delta"), default=0.0),
-                }
         return {"ticker": ticker, "spot": spot, "expiry": best_exp, "dte": dte,
-                "type": option_type,
-                "strikes": [{**r, **quotes.get(r["code"], {})} for r in rows if r["code"] in quotes]}
+                "type": option_type, "strikes": strikes}
     except Exception as e:                                       # noqa: BLE001
         print(f"[option_plan] {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return None
@@ -283,6 +302,25 @@ def rung_premiums(contract: Dict, ladder: List[float], dte: int) -> List[Dict]:
     return out
 
 
+def iv_context(ticker: str, hv_pct: Optional[float] = None) -> Dict:
+    """IV 读数 → 情报层分档 / 硬门槛 / delta 带分位输入。build 与 contract_matrix 同读这一份。"""
+    ivp = iv_logger.percentile(ticker)
+    iv_pct = ivp.get("iv_percentile") if not ivp.get("error") else None
+    reliable = bool(ivp.get("reliable"))
+    gate = iv_gate(iv_pct, reliable)
+    # 硬门槛: 单腿 long call 只给 IV 友好的票, 不过门 = 不选约不拉链
+    # (见底点是 IV 峰值, sizing.long_call_iv_gate 有数据)。上面的 iv_gate 仍是情报层
+    # 分档 (canonical §六), 两者并存: 一个说"该不该", 一个说"能不能"。
+    hard = long_call_iv_gate(iv_pct, reliable,
+                             ivp.get("latest_iv_pct") if not ivp.get("error") else None,
+                             hv_pct=hv_pct)
+    # delta 带的分位输入与硬门槛同源: IV 可信用 IV percentile, 否则 HV 分位代理
+    eff_pct = iv_pct if (reliable and iv_pct is not None) else (
+        hv_pct if hv_pct is not None else iv_pct)
+    return {"ivp": ivp, "iv_pct": iv_pct, "reliable": reliable, "gate": gate,
+            "hard": hard, "eff_pct": eff_pct}
+
+
 def build(ticker: str, ladder: List[float], cap: Optional[float], *,
           target_dte: int, stop: Optional[float], option_type: str = "call",
           min_dte: int = 7, notional_cap: Optional[float] = None,
@@ -304,19 +342,9 @@ def build(ticker: str, ladder: List[float], cap: Optional[float], *,
     delta×100×spot 的名义敞口, 把名义上限当保费花 = 名义敞口数倍于上限, 方向是
     **放松**约束 —— 正是 shock_budget_design §1.2 说的"名义 cap 在期权上完全失效"。
     """
-    ivp = iv_logger.percentile(ticker)
-    iv_pct = ivp.get("iv_percentile") if not ivp.get("error") else None
-    reliable = bool(ivp.get("reliable"))
-    gate = iv_gate(iv_pct, reliable)
-    # 硬门槛 (用户): 单腿 long call 只给 IV 友好的票, 不过门 = 不选约不拉链
-    # (见底点是 IV 峰值, sizing.long_call_iv_gate 有数据)。上面的 iv_gate 仍是情报层
-    # 分档 (canonical §六), 两者并存: 一个说"该不该", 一个说"能不能"。
-    hard = long_call_iv_gate(iv_pct, reliable,
-                             ivp.get("latest_iv_pct") if not ivp.get("error") else None,
-                             hv_pct=hv_pct)
-    # delta 带的分位输入与硬门槛同源: IV 可信用 IV percentile, 否则 HV 分位代理
-    eff_pct = iv_pct if (reliable and iv_pct is not None) else (
-        hv_pct if hv_pct is not None else iv_pct)
+    ivc = iv_context(ticker, hv_pct)
+    ivp, iv_pct, reliable = ivc["ivp"], ivc["iv_pct"], ivc["reliable"]
+    gate, hard, eff_pct = ivc["gate"], ivc["hard"], ivc["eff_pct"]
     if not hard["allowed"]:
         return {"ticker": ticker, "iv": {**ivp, "reliable": reliable, "hv_pct": hv_pct}, "gate": gate,
                 "hard_gate": hard,

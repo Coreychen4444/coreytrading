@@ -135,3 +135,22 @@ def test_parser_rejects_boolean_infinite_fields_and_preserves_unverified_period_
     assert row["available_at"] is None and row["provider_period_timestamp"]
     assert "unverified" in row["period_end_basis"]
     assert F.parse_snapshot({"update_time": "2026-01-05 16:00:00"})["update_time"].endswith("-05:00")
+
+
+def test_annotate_availability_uses_archive_then_calendar(tmp_path):
+    """季度可知日 = 财报反应日。存档按 period_text；日历 last_print 只给最近一个未匹配季度。"""
+    import json as _json
+    from quant.valuation import fundamentals as F
+    (tmp_path / "SYN.json").write_text(_json.dumps({"code": 0, "data": [
+        {"period_text": "2026/Q3", "pub_trading_day_str": "2026-06-24", "trading_day_str": "2026-06-25"}]}))
+    cal = {"tickers": {"SYN": {"last_print": {"pub_day": "2026-09-30", "reaction_day": "2026-10-01"}}}}
+    dates = F.report_dates("SYN", deep_dir=tmp_path, calendar=cal)
+    rows = [{"period": "2026/Q2", "period_end": "2026-02-25", "available_at": None},
+            {"period": "2026/Q3", "period_end": "2026-05-27", "available_at": None},
+            {"period": "2026/Q4", "period_end": "2026-09-02", "available_at": None}]
+    F.annotate_availability(rows, dates, fetched_day="2026-10-10")
+    assert [r["available_at"] for r in rows] == [None, "2026-06-25", "2026-10-01"]
+    assert rows[2]["available_at_basis"] == "earnings_calendar:last_print"
+    later = [{"period": "2026/Q4", "period_end": "2026-09-02", "available_at": None}]
+    F.annotate_availability(later, dates, fetched_day="2026-09-30")       # 反应日在抓取日之后 → 不填
+    assert later[0]["available_at"] is None

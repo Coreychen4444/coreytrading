@@ -97,6 +97,9 @@ NOT_DOF_EXPLICIT = {                             # 外部约束，不是系统�
     "core/sizing:shock_budget_cap(used_gross=)",
     "decision/exit_guard:_klines_for(n=)",          # 载入几根 bar = 管道
     "options/option_plan:risk_free",                # 无风险利率 = 市场输入，不是系统可调选择
+    # 拉 spot 附近几档 = 取数窗口 (同 _klines_for(n=)), 不是新旋钮。窗口太窄时 Δ 带深 ITM 端可能落在窗外
+    # (高价票 + 宽档距), 那是取数缺口不是阈值选择; contract_matrix 传 40。
+    "options/option_plan:chain_quotes(n=)",
     "report/portfolio_brief:_cached_closes(n=)",
     "core/technical:_find_local_lows(window=)",     # 内部辅助, 由调用方口径决定
     "core/bottom_evidence:_EPS",                    # 级数截断精度 = 数值, 不是旋钮

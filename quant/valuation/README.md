@@ -38,6 +38,26 @@ ten-year core-EPS growth rate (3% terminal, 10Y + model ERP, beta 1) that justif
 current price, withheld for PE above 100. None of these changes the center. Each run appends
 one row per ticker to the forward ledger `trade/portfolio/observations/valuation_forward.jsonl`
 for later reconciliation.
+
+Quarters carry `available_at` = the earnings reaction day (`fundamentals.annotate_availability`,
+matched from deep earnings history by period text, else the calendar's last print); the +45-day
+lag is only the fallback, so a freshly reported quarter enters TTM on its reaction day. A quarter
+whose other income net of securities gains exceeds 25% of revenue is treated as a one-off and its
+EPS is recomputed from pretax ex-item at 21%. Names the EPS route cannot anchor (forward/trailing
+EPS ≤ 0, near-breakeven PE, no EPS package) go to an EV/revenue route: 12-month EV = the slim
+package's next-year revenue × today's forward EV/revenue, less net debt rolled by TTM FCF, per
+share at today's count; plus a reverse read of the year-5 revenue the current EV requires at the
+archetype's steady-state margin (a lower bound: years 1–5 are ignored). Still unvalidated and
+zero-authority; the constant multiple is a declared assumption.
+
+Cyclicals: `semi_cyclical` names carry `cyclical_constant_pe` and a side reading (5-year average
+EPS including the forward year × own 5-year P/E median). Any name whose forward EPS grows more than
+50% carries `eps_surge_bias`, because in that state a constant multiple tends to overshoot even with
+perfect EPS foresight. For `semi_cyclical` names in that surge state the center and scenarios use
+the geometric midpoint √(R0 × R2) of the constant-multiple and cycle-average readings, flagged
+`cyclical_geo_center`, with the constant-multiple reading kept as a side note. This is a declared,
+unvalidated rule; validate it in a private study before relying on it.
+
 ## Outputs and meaning
 
 The current intrinsic value is an FCFF valuation of the operating business plus

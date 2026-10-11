@@ -41,7 +41,8 @@
    ├── decision 决策层（机械闸门）
    │           entry_guard · exit_guard · regime_transition · regime_score
    │           structure_drift · level_map · catalyst_check · tape_check
-   │    ├── options  期权执行参数   option_plan · implied_move · strike_compare
+   │    ├── options  期权执行参数   option_plan · implied_move · strike_compare · premium_proj
+   │    │            contract_matrix（合约矩阵 + 情景表：到期 × Δ 网格，卡上线位与退出栈的钟下各合约值多少 + 实测误差带 + 随机游走 EV [FYI]；判读层零授权；误差带是离线校准常数，用自己的样本重新校准）
    │    └── risk     仓位/集中度     kelly_size · chain_layers
    ├── sync    broker 真值 ↔ state（唯一写 broker block 的层）
    │           state_io · stock_fetch · order_sync · trade_history_sync

@@ -230,3 +230,146 @@ def test_render_tg_is_tables_sorted_by_upside_with_warnings_and_folds():
     assert "- **NEG** 未来四季 EPS ≤ 0" in text and "输入过期，按冻结时点 2026-09-08" in text
     kinds = [b["type"] for b in tg_rich.compile_blocks(text)]
     assert kinds.count("table") == 2 and "details" in kinds          # 逐票 EPS / 口径进折叠块
+
+
+# ── 财报反应日 / 一次性非经营项 / 无盈利锚 EV/营收路径 ─────────────────
+
+def test_available_at_beats_45_day_lag():
+    """期末 09-02、10-01 反应日；+45 天要到 10-17 才进 TTM。"""
+    q = {"period_end": "2026-09-02", "available_at": "2026-10-01"}
+    assert rt.known_day(q) == date(2026, 10, 1)
+    assert rt.known_day({"period_end": "2026-09-02"}) == date(2026, 10, 17)
+
+
+def test_oneoff_nonoperating_item_is_stripped_pretax():
+    """合成形状：其他损益 −78 亿（远超 25% 营收）、税前 −74.6 亿只记少量税收抵免 → 按税前重算。"""
+    q = {"period_end": "2026-06-26", "diluted_eps": -84.0, "net_income": -7160e6, "revenue": 1000e6,
+         "other_income": -7800e6, "pretax": -7460e6, "gain_on_securities": None}
+    small = {**q, "other_income": -10e6, "pretax": 300e6, "diluted_eps": 2.8, "net_income": 237e6}
+    assert rt.oneoff_residual(small) == 0.0
+    (core,) = rt.core_eps([q])
+    shares = -7160e6 / -84.0
+    assert abs(core["diluted_eps"] - (-7460e6 + 7800e6) * 0.79 / shares) < 1e-6
+    assert core["oneoff_stripped"] == -7800e6
+
+
+def _rev_quarters(rev, *, debt=40e9, cash=5e9, fcf=-3e9, eps=-1.0, n=8, issuance=0.0):
+    out = []
+    for i in range(n):
+        end = date(2024, 9, 30) + timedelta(days=91 * i)
+        out.append({"period_end": end.isoformat(), "available_at": (end + timedelta(days=40)).isoformat(),
+                    "revenue": rev[i] if isinstance(rev, list) else rev, "diluted_eps": eps,
+                    "net_income": eps * 500e6, "current_debt": debt / 4, "lt_debt": debt * 3 / 4,
+                    "current_lease": 0.0, "lt_lease": 0.0, "cash_sti": cash, "fcf": fcf,
+                    "net_stock_issuance": issuance})
+    return out
+
+
+def _slim(near_q, far_q, shares=500.0):
+    qs = []
+    for i, r in enumerate([near_q] * 4 + [far_q] * 4):
+        qs.append({"id": f"Q{i}", "start": "2026-10-01", "end": "2026-12-31",
+                   "revenue": {s: r * m for s, m in zip(rt.SCENARIOS, (0.8, 1.0, 1.2))},
+                   "operating_profit": {s: -100.0 for s in rt.SCENARIOS},
+                   "other_pretax": {s: -200.0 for s in rt.SCENARIOS},
+                   "tax_rate": {s: 0.0 for s in rt.SCENARIOS}, "other_after_tax": {s: 0.0 for s in rt.SCENARIOS},
+                   "special_expense": {s: 0.0 for s in rt.SCENARIOS},
+                   "diluted_shares": {s: shares for s in rt.SCENARIOS}})
+    return {"origin": "seed:test", "reviewed": True, "quarters": qs}
+
+
+def test_ev_sales_route_holds_the_forward_multiple_and_rolls_net_debt():
+    """无盈利锚形状：前瞻 EPS < 0 → EV/营收。EV_12m = 次年营收 × (今天 EV ÷ 今年营收)；净债务 + TTM 烧钱。"""
+    q = _rev_quarters(2e9)                                    # TTM 营收 8B，净债务 35B，TTM FCF −12B
+    fund = {"snapshot": {"total_market_val": 50e9, "last_price": 100.0}}
+    r = rt.research_target("SYN", company_research=None, input_state="current", quarters=q, price=100.0,
+                           closes={}, as_of=AS_OF, eps_model=_slim(4000.0, 6000.0), required_return=0.09,
+                           fundamentals_row=fund, archetype_margin=0.25)
+    assert r["status"] == "ok" and r["method"] == "ev_sales"
+    assert r["eps_route_reason"] == "forward_eps_not_positive"
+    ev = 100.0 * 500e6 + 35e9
+    assert abs(r["ev_sales_now"] - ev / 16e9) < 1e-9
+    center = (24e9 * ev / 16e9 - (35e9 + 12e9)) / 500e6
+    assert abs(r["target_12m"]["center"] - center) < 1e-6
+    assert "cash_burn_adds_debt" in r["flags"]
+    imp = r["implied_revenue"]
+    assert imp["status"] == "ok" and imp["implied_cagr"] > 0
+    assert abs(imp["revenue_implied"] - ev * 1.09 ** 5 * 0.06 / (0.25 * 0.79 * 1.03)) < 1
+
+
+def test_ev_sales_route_needs_revenue_history():
+    q = quarters([-1.0] * 19)                                 # 无营收字段
+    r = rt.research_target("SYN", company_research=None, input_state="current", quarters=q, price=100.0,
+                           closes={}, as_of=AS_OF, eps_model=_slim(4000.0, 6000.0), required_return=0.09,
+                           fundamentals_row={"snapshot": {"total_market_val": 50e9, "last_price": 100.0}})
+    assert r["status"] == "unavailable" and r["reason"] == "forward_eps_not_positive"
+    assert r["ev_route"]["reason"] == "revenue_history_missing"
+
+
+def test_ev_sales_route_renders_in_all_three_outputs():
+    q = _rev_quarters(2e9, issuance=1e9)
+    r = rt.research_target("SYN", company_research=None, input_state="current", quarters=q, price=100.0,
+                           closes={}, as_of=AS_OF, eps_model=_slim(4000.0, 9000.0), required_return=0.09,
+                           fundamentals_row={"snapshot": {"total_market_val": 50e9, "last_price": 100.0}},
+                           archetype_margin=0.25)
+    assert {"dilution_ignored", "revenue_step_change"} <= set(r["flags"])
+    result = {"version": rt.VERSION, "as_of": AS_OF, "tickers": {"SYN": r}, "counts": {"ok": 1, "total": 1},
+              "required_return_basis": None}
+    assert "EV/营收" in rt.render(result) and "EV/S" in rt.render_tg(result)
+    assert "无盈利锚" in rt.fyi_line(r)
+    row = rt.ledger_rows(result)[0]
+    assert row["method"] == "ev_sales" and row["eps_route_reason"] == "forward_eps_not_positive"
+    assert row["implied_revenue_cagr"] is not None
+
+
+# ── 周期票（默认不换中枢，只旁注 + flag）──────────
+
+def test_cyclical_gets_flag_and_cycle_reading_without_moving_center():
+    q = quarters([1.0] * 31, start=date(2019, 1, 1))           # TTM 4, PE 20, N = 4
+    c = closes(lambda d: 80.0, start=date(2019, 1, 1))
+    base = rt.research_target("SYN", company_research=research(base=5.0), input_state="current",
+                              quarters=q, price=80.0, closes=c, as_of=AS_OF)
+    cyc = rt.research_target("SYN", company_research=research(base=5.0), input_state="current",
+                             quarters=q, price=80.0, closes=c, as_of=AS_OF, archetype="semi_cyclical")
+    assert cyc["target_12m"]["center"] == base["target_12m"]["center"]
+    assert "cyclical_constant_pe" in cyc["flags"] and "cyclical_constant_pe" not in base["flags"]
+    n = cyc["cycle_normalized"]
+    assert n["status"] == "ok"
+    assert abs(n["normalized_eps_12m"] - (16 * 1.0 + 5.0) / 5) < 1e-9     # 16 季已知 + 前瞻 4 季
+    assert abs(n["multiple_5y_median"] - 20.0) < 1e-9                     # P/N = 80 / 4
+    assert abs(n["center"] - 4.2 * 20.0) < 1e-9
+
+
+def test_eps_surge_flag_any_archetype():
+    q = quarters([1.0] * 19)
+    r = rt.research_target("SYN", company_research=research(base=6.5, down=6.0, up=7.0), input_state="current",
+                           quarters=q, price=80.0, closes=closes(lambda d: 80.0), as_of=AS_OF)
+    assert "eps_surge_bias" in r["flags"]                                  # 6.5 / 4 − 1 = 62.5% > 50%
+    assert "高估" in rt.fyi_line(r)
+
+
+def test_norm_series_needs_twenty_contiguous_quarters():
+    assert rt.norm_eps_series(quarters([1.0] * 19)) == []
+    s = rt.norm_eps_series(quarters([1.0] * 20))
+    assert len(s) == 1 and abs(s[0][1] - 4.0) < 1e-9
+
+
+def test_cyclical_surge_center_is_geometric_midpoint():
+    """周期票前瞻 EPS 增 >50% → 中枢 = √(R0 × R2)，R0 留旁注。"""
+    q = quarters([1.0] * 31, start=date(2019, 1, 1))           # TTM 4, PE 20, P/N 20
+    c = closes(lambda d: 80.0, start=date(2019, 1, 1))
+    r = rt.research_target("SYN", company_research=research(base=8.0, down=6.0, up=10.0), input_state="current",
+                           quarters=q, price=80.0, closes=c, as_of=AS_OF, archetype="semi_cyclical")
+    r0 = 8.0 * 20.0                                             # 160
+    r2 = (16 * 1.0 + 8.0) / 5 * 20.0                            # 96
+    assert abs(r["target_12m"]["center"] - (r0 * r2) ** 0.5) < 1e-9
+    assert abs(r["r0_target_12m"]["center"] - r0) < 1e-9
+    assert abs(r["target_12m"]["eps_scenarios"]["downside"] - (120.0 * (22 / 5 * 20)) ** 0.5) < 1e-9
+    assert "cyclical_geo_center" in r["flags"] and "cyclical_constant_pe" not in r["flags"]
+    assert abs(r["upside_center"] - ((r0 * r2) ** 0.5 / 80 - 1)) < 1e-12
+    result = {"version": rt.VERSION, "as_of": AS_OF, "tickers": {"SYN": r}, "counts": {"ok": 1, "total": 1}}
+    assert "几何中值" in rt.render(result) and "倍数不变" in rt.render_tg(result)
+    assert rt.ledger_rows(result)[0]["r0_center"] == r0
+    plat = rt.research_target("SYN", company_research=research(base=8.0, down=6.0, up=10.0), input_state="current",
+                              quarters=q, price=80.0, closes=c, as_of=AS_OF, archetype="platform")
+    assert abs(plat["target_12m"]["center"] - r0) < 1e-9 and "r0_target_12m" not in plat

@@ -125,6 +125,23 @@ def test_push_brief_alerts_pushes_only_when_alerts_exist(monkeypatch):
     assert sent[0].index("card") < sent[0].index("AAOI 🚨 STOP"), "卡片在前, alerts 在后"
 
 
+def test_push_open_orders_every_round_when_orders_exist(monkeypatch):
+    """忘单提醒: order_sync 渲染好的 message 原样推, 无冷却; 无挂单不推。"""
+    sent = []
+    monkeypatch.setattr(pipeline, "notify", lambda msg: sent.append(msg) or True)
+    assert pipeline.push_open_orders({"open_orders": 0, "message": None}) == "no_orders"
+    assert sent == []
+    data = {"open_orders": 1, "message": "📋 Moomoo 在途挂单 1 张"}
+    assert pipeline.push_open_orders(data) is True
+    assert pipeline.push_open_orders(data) is True, "每轮都推, 不设冷却"
+    assert sent == ["📋 Moomoo 在途挂单 1 张"] * 2
+
+
+def test_orders_stage_runs_in_heartbeat_and_briefing():
+    assert pipeline.HEARTBEAT in next(s for s in pipeline.STAGES if s.key == "orders").modes
+    assert pipeline.BRIEFING in next(s for s in pipeline.STAGES if s.key == "orders").modes
+
+
 def test_push_brief_alerts_bolds_card_head_only(monkeypatch):
     """ 全部富消息: 卡片头行加粗、alerts 标题加粗, 卡片正文逐字不动 (原文规矩)。"""
     sent = []

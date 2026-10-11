@@ -32,4 +32,4 @@ Produce a human-reviewed operating brief before the US session.
 9. Do not infer authorization from news, conviction or a chart narrative, do not offer a narrative override after a mechanical exit breach, and do not place orders.
 10. Optionally send the reviewed result with `quant/ops/tg_notify.py --stdin` (rich messages by default; pipe the text, do not pass it as a shell argument).
 
-The pipeline's immediate alert channel does not replace the full briefing. Preserve the alert receipt to avoid duplicating urgent cards, then send the reviewed briefing normally when configured.
+The pipeline's immediate alert channel does not replace the full briefing. Preserve the alert receipt to avoid duplicating urgent cards, then send the reviewed briefing normally when configured. Open broker orders are pushed by the pipeline as their own 📋 message (`orders_pushed`; when it is `false`, send `stages.orders.data.message` verbatim as a fallback), so the briefing need not repeat them.
